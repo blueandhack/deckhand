@@ -197,7 +197,30 @@ export function makeProjectReplies({ listDirs, listFiles, statMs, headLines, ses
   async function buildProjSessReply(key, liveIds = []) {
     const ids = liveIds instanceof Set ? liveIds : new Set(liveIds);
     let files = [];
-    try { files = await listFiles(key); } catch { return { projsess: { k: key, items: [], total: 0 } }; }
+    try {
+      files = await listFiles(key);
+    } catch (err) {
+      // AN UNKNOWN KEY IS REFUSED BY NAME, NOT ANSWERED WITH AN EMPTY LIST.
+      // The two are completely different facts and they used to be the same
+      // three bytes on the wire: `{k, items: [], total: 0}` for a project that
+      // genuinely has no transcripts, and the SAME reply for a key this Mac has
+      // never heard of. Because the key echoes back unchanged, the device's own
+      // staleness strcmp matched and level 2 painted "No sessions found" over a
+      // project whose level-1 row had just said it has N sessions - nothing at
+      // either end naming a cause. It is reachable in ordinary use: a device
+      // whose key buffer truncated the directory name (four of this Mac's
+      // sixteen projects are 64 characters or longer) asks EXACTLY this way, and
+      // so does any Mac that simply does not hold this project - RESUME's own
+      // "another paired Mac may hold it" case, one level up.
+      // `e` is the whole refusal: the device shows its own named state for it
+      // (projects.ino's PROJ_STATE_REFUSED) instead of the empty-list lie.
+      return {
+        projsess: {
+          k: key, items: [], total: 0,
+          e: `unknown project key (${String(err?.code || err?.message || "no such directory")})`,
+        },
+      };
+    }
     const jsonls = files.filter((f) => f.endsWith(".jsonl"));
     const meta = [];
     for (const f of jsonls) {

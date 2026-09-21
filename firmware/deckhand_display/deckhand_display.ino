@@ -893,6 +893,18 @@ struct HostLink {
   // (a legacy host old enough to send no hostId) falls back to the bare
   // globals voiceSeq/voiceSeqShown declared near line 1082, the same fallback
   // pattern pairingSlotForRow() uses for answer signing.
+#if BOARD_HISTORY_SCROLL
+  // THE RESUME NONCE THIS MAC LAST PUBLISHED (its `rnonce`, refreshed every
+  // tick and rotated by the host the moment a RESUME is accepted). 16 hex
+  // characters + NUL + 3 spare, the headroom shape every other fixed buffer
+  // here keeps. PER LINK, not one global: with two Macs paired, each issues
+  // its own and signs with its own key, so one shared field would sign half
+  // the resumes against the wrong Mac's credential. Behind BOARD_HISTORY_SCROLL
+  // because RESUME is - board 1 has no scrollback, refuses the verb from
+  // UNAVAILABLE_COMMANDS[], and must not carry the storage for a credential it
+  // can never use.
+  char resumeNonce[20] = "";
+#endif
   long voiceSeq = 0;
   long voiceSeqShown = 0;
   // Highest seq whose TRANSCRIPT has been inserted into the compose draft. Kept
@@ -1500,10 +1512,18 @@ int sessionTotalAll = 0;
 // undefined-is-0 default to cover.
 #if BOARD_HAS_PROJECTS
 struct ProjInfo {
-  char key[64];   // opaque directory name - NEVER decoded, split, or shown;
+  char key[PROJ_KEY_MAX];
+                  // opaque directory name - NEVER decoded, split, or shown;
                   // see host/project-replies.mjs. Sent back verbatim to ask
                   // for this project's sessions (PROJOPEN and a level-1 row
                   // tap both go through projOpenLevel1(), projects.ino).
+                  // SIZED FROM THE HEADER, never a literal: at 64 this
+                  // truncated four of this Mac's sixteen real projects at 63
+                  // characters and the tap that followed asked the host for a
+                  // directory that does not exist - see PROJ_KEY_MAX's own
+                  // note in board_es3c35p.h for the measurement and the
+                  // arithmetic. projOpenKey below holds the SAME string and
+                  // is sized from the SAME constant, so the two cannot drift.
   char name[24];  // host caps at 22 (deviceText(label, 22)) plus NUL and one
                   // spare byte
   uint16_t count; // transcripts in this project (jsonl files, not turns)
@@ -1535,9 +1555,10 @@ extern int projLevel;
 // like ProjInfo.key: never decoded, only ever echoed back on the wire and
 // compared against an incoming `projsess` reply's own `k` to catch a stale
 // reply landing after the level moved on (projects.ino's own JSON
-// absorption). 64, matching ProjInfo.key's own size - it holds the SAME
-// string.
-extern char projOpenKey[64];
+// absorption). PROJ_KEY_MAX, matching ProjInfo.key's own size - it holds the
+// SAME string, and both read the one constant rather than two literals that
+// once agreed.
+extern char projOpenKey[PROJ_KEY_MAX];
 
 struct PSessInfo {
   char id[16];    // the wire's 12-char session id + NUL, +3 spare - the
@@ -1581,6 +1602,11 @@ extern bool psessEverReceived;
 // just above it.
 extern bool psessPending;
 extern bool psessFetchFailed;
+// Set by the `projsess` absorption below when the reply carries `e` - the Mac
+// naming a key it does not know, rather than failing to answer. Defined in
+// projects.ino beside its two neighbours; see PROJ_STATE_REFUSED there for why
+// it is a THIRD state and not a second spelling of psessFetchFailed.
+extern bool psessRefused;
 void requestProjSessions(const char* key);
 void projOpenLevel1(int pos);
 void projBack();
@@ -1937,6 +1963,21 @@ extern int      scrollNewBelow;
 extern char scrollLoadedId[16];
 extern bool scrollFromProjects;
 extern bool scrollProjLive;
+// THE CAP IS THE HOST'S OWN. host/typed-answer.mjs's typedTextOk() rejects
+// anything over ANSWER_TEXT_MAX_BYTES (150) or outside printable ASCII, and
+// verifyResume() runs that same check - so a longer or non-ASCII prompt would
+// be signed on this side, travel, and be refused there as "text is empty, over
+// the cap, or not printable ASCII", which from the Mac reads as an
+// authentication failure on a frame that was signed perfectly well. Refused
+// HERE instead, by name, with the number quoted.
+//
+// A #define AND IT LIVES HERE, not beside sendResumeSigned() in scrollback.ino:
+// a macro is TEXTUAL and the .ino files are one translation unit concatenated
+// with this one FIRST (CLAUDE.md), so a definition in the later file would not
+// exist yet at the RESUME command handler below - unlike a function, which gets
+// an auto-generated prototype from anywhere in the sketch. That asymmetry is
+// exactly the ordering trap this file's own header note describes.
+#define RESUME_TEXT_MAX 150
 #endif
 
 // Second level: ONE entry, in full, in its own pager. The list rows are previews, and an
@@ -4748,9 +4789,20 @@ const char* dispMacTag(int hostSlot) {
 // deliberately: a SessionInfo is 2.2KB and a value sort would memmove tens of
 // KB every tick.
 uint8_t sessionOrder[SESSION_SLOTS];
+// ENDED IS ITS OWN RANK, BELOW EVERY LIVE ONE - not the default bucket it used
+// to share with "working". The hook stamps updated_at when it writes the ghost
+// record, so an ended session is the FRESHEST thing in the list for the whole
+// of its grace period; in bucket 2 it therefore outsorted every session that is
+// actually doing something and took the expanded hero card. The ghost row exists
+// to say "that session did not just vanish", not to be the most prominent thing
+// on the screen. The host ranks it the same way (host/index.mjs's readSessions),
+// and BOTH are needed: the host decides which sessions are sent in full, this
+// decides which row is drawn where. sessions-rank-check.mjs PARSES this table,
+// so the rank it asserts is this one and not a copy.
 int urgencyRank(const char* status) {
   if (strcmp(status, "asking") == 0) return 0;
   if (strcmp(status, "waiting") == 0) return 1;
+  if (strcmp(status, "ended") == 0) return 3;
   return 2;
 }
 int sessionAt(int displayPos) {
@@ -4996,6 +5048,14 @@ void handleLine(const String& line) {
     hostLinks[curLink].lastPayloadMillis = millis();
     copyField(hostLinks[curLink].tag, sizeof(hostLinks[curLink].tag), doc["hostTag"] | "");
     copyField(hostLinks[curLink].emoji, sizeof(hostLinks[curLink].emoji), doc["hostEmoji"] | "");
+#if BOARD_HISTORY_SCROLL
+    // The credential a RESUME is signed against, published by THIS Mac in
+    // THIS tick - see HostLink::resumeNonce. Stored per link because each Mac
+    // issues (and rotates) its own, and a resume signed against the wrong
+    // Mac's nonce is rejected by the only Mac that could have run it.
+    copyField(hostLinks[curLink].resumeNonce, sizeof(hostLinks[curLink].resumeNonce),
+              doc["rnonce"] | "");
+#endif
   }
 
   // May we DECIDE a prompt, or only display it? The Mac owns this policy,
@@ -5067,7 +5127,7 @@ void handleLine(const String& line) {
     projectsPending = false;
     projectsEverReceived = true;
     JsonArray items = projs["items"].as<JsonArray>();
-    int n = 0, overflow = 0;
+    int n = 0, overflow = 0, toolong = 0;
     if (!items.isNull()) {
       for (JsonObject it : items) {
         // PROJ_SLOTS IS THIS DEVICE'S OWN CEILING, not a mirror of a host-side
@@ -5077,7 +5137,23 @@ void handleLine(const String& line) {
         // rule SESSIONS' hiddenCount follows.
         if (n >= PROJ_SLOTS) { overflow++; continue; }
         ProjInfo& p = projects[n];
-        copyField(p.key, sizeof(p.key), it["k"] | "");
+        // A KEY THAT WOULD TRUNCATE IS REFUSED BY NAME, NOT STORED SHORT.
+        // copyField() truncates silently, and a truncated key is worse than a
+        // missing row: it LISTS (the name comes from the transcript's cwd, not
+        // from the key) and then asks the host for a directory that does not
+        // exist, which is exactly the "No sessions found for a project that
+        // says it has N" defect PROJ_KEY_MAX was raised to abolish. Unreachable
+        // at 128 against the 80 measured - stated rather than assumed
+        // impossible, the same rule the overflow counter below follows.
+        const char* kk = it["k"] | "";
+        if (strlen(kk) >= sizeof(p.key)) {
+          Serial.printf("PROJECTS: a project key of %u chars exceeds PROJ_KEY_MAX(%u) and was "
+                        "NOT stored - it would have been truncated and could never be opened\n",
+                        (unsigned) strlen(kk), (unsigned) sizeof(p.key));
+          toolong++;
+          continue;
+        }
+        copyField(p.key, sizeof(p.key), kk);
         copyField(p.name, sizeof(p.name), it["n"] | "");
         p.count = it["c"] | 0;
         p.tod = it["t"] | -1L;
@@ -5092,6 +5168,9 @@ void handleLine(const String& line) {
     if (overflow > 0)
       Serial.printf("PROJECTS: %d project(s) beyond PROJ_SLOTS(%d) were not stored\n",
                     overflow, PROJ_SLOTS);
+    if (toolong > 0)
+      Serial.printf("PROJECTS: %d project(s) with a key longer than PROJ_KEY_MAX(%d) were not stored\n",
+                    toolong, (int) PROJ_KEY_MAX);
     // Repaint only if this tab is actually showing - the same rule sdetail's
     // reply follows above, and for the same reason: a reply that lands while
     // the user is on a different tab must not paint over it.
@@ -5133,6 +5212,24 @@ void handleLine(const String& line) {
     // exactly as it already changes none of psess[]/psessCount/psessTotal.
     if (strcmp(k, projOpenKey) == 0) {
       psessPending = false;
+      // A REFUSAL IS NOT AN EMPTY PROJECT, and this is where the two used to be
+      // indistinguishable. host/project-replies.mjs answers an unknown key with
+      // `e` now (its own note on why the old empty-list reply was a lie the
+      // staleness strcmp below could not catch: the key echoes back UNCHANGED,
+      // so it matched and level 2 drew "No sessions found" for a project whose
+      // row had just claimed N). psessEverReceived is deliberately NOT set: the
+      // list is unknown, not known-to-be-empty, and leaving it false is what
+      // keeps renderPSessLevel() in its message branch.
+      const char* perr = projsess["e"] | "";
+      if (perr[0]) {
+        psessRefused = true;
+        psessFetchFailed = true;   // psessDeadEnd(), so the tap still retries
+        Serial.printf("PROJSESS: the Mac REFUSED \"%s\" (%u chars): %s - this device asked with "
+                      "the key it holds; if that key is short, it was truncated on the way in\n",
+                      k, (unsigned) strlen(k), perr);
+        if (currentTab == TAB_PROJECTS) renderProjectsTab();
+        return;
+      }
       psessEverReceived = true;
       JsonArray items = projsess["items"].as<JsonArray>();
       int n = 0, overflow = 0;
@@ -5748,6 +5845,52 @@ void handleLine(const String& line) {
   // and keeps the countdown honest on a tick that arrives between ticks.
   if (pairPanelActive) { renderPairPanel(); renderFooter(); return; }
 #endif
+#if BOARD_HISTORY_SCROLL
+  // THE TRANSCRIPT'S OWN ARM RUNS BEFORE THE histActive ONE BELOW, AND THE ORDER
+  // IS THE WHOLE FIX. The scrollback screen owns the whole panel - unlike every
+  // OTHER tab it reserves no footer strip at all, so without this an ordinary ~5s
+  // tick falls through to `renderSessionsTab()` + `renderFooter()` below and paints
+  // the clock/battery/freshness readout straight over the transcript's own bottom
+  // row. FOUND on the glass: SCROLLPERF's own SCREENSHOT showed "04:49:38 / 1s ago"
+  // where the last visible line of chat should have been. New chunks still reach
+  // the screen - the `hist` reply handler in processCompletedLine() calls
+  // drawScrollback() itself the moment they land - so an ordinary tick carrying no
+  // history has nothing to repaint here.
+  //
+  // THIS BLOCK USED TO SIT *AFTER* THE histActive ARM, AND THAT FROZE THE WHOLE UI -
+  // CONFIRMED ON HARDWARE 2026-09-21 (two captures 45 seconds apart showing the same
+  // footer clock, 04:24:39 / "0s ago", while the host tick still reported
+  // via=usb:Deckhand-C114,ble). Both openers set histActive as well as scrollActive
+  // (openScrollback()'s own note on why), so a PROJECTS-opened transcript reached
+  // the histActive arm first; scrollOpenById() loads an id that is deliberately NOT
+  // in sessions[], detailId is empty, resolveDetailIndex() returns -1, and that arm
+  // painted the SESSIONS list over the open transcript - leaving scrollActive TRUE.
+  // After that the 5s tick returned here every time and the 1s tick is gated on
+  // !scrollActive, so THE FOOTER AND EVERY TAB RENDER STOPPED FOREVER and 304KB of
+  // PSRAM stayed held: a device that still talks to the Mac behind a dead screen.
+  // scrollback-check.mjs binds this ordering and fails BY NAME if it regresses.
+  if (scrollActive) {
+    // THE OTHER ENTRY PATH IS UNCHANGED. A transcript opened the ordinary way
+    // (openScrollback(), from a SESSIONS detail card) keeps the per-tick re-anchor
+    // it has always had: detailIndex is what drawScrollback()'s header, the
+    // CHAT/ALL refetch and the live tail all read, and a reorder between ticks
+    // would otherwise leave it pointing at a different session's row. What it no
+    // longer does on a -1 is call exitReaderToList(), which cleared histActive but
+    // NOT scrollActive - the same freeze by the other door. exitScrollback() is the
+    // one exit that releases both (and the PSRAM), and with showingDetail cleared
+    // first it lands on the sessions list exactly where exitReaderToList() did.
+    //
+    // A PROJECTS-OPENED TRANSCRIPT IS NOT SUBJECT TO ANY OF IT: there is no
+    // sessions[] row for its id by construction, so "resolve the detail index" has
+    // no meaning here and its answer (-1) says nothing about whether this screen is
+    // still valid.
+    if (!scrollFromProjects) {
+      detailIndex = resolveDetailIndex();
+      if (detailIndex < 0) { showingDetail = false; exitScrollback(); }
+    }
+    return;
+  }
+#endif
   // The history reader owns the whole screen. Absorb the tick - without this the
   // periodic repaint paints the detail screen straight over it, the same way it once
   // painted over the settings confirm dialog.
@@ -5767,18 +5910,6 @@ void handleLine(const String& line) {
     exitReaderToList();
     return;
   }
-#if BOARD_HISTORY_SCROLL
-  // The scrollback screen owns the whole panel too - unlike every OTHER tab it
-  // reserves no footer strip at all, so without this an ordinary ~5s tick falls
-  // through to `renderSessionsTab()` + `renderFooter()` below and paints the
-  // clock/battery/freshness readout straight over the transcript's own bottom
-  // row. FOUND on the glass: SCROLLPERF's own SCREENSHOT showed "04:49:38 / 1s
-  // ago" where the last visible line of chat should have been. New chunks still
-  // reach the screen - the `hist` reply handler in processCompletedLine() calls
-  // drawScrollback() itself the moment they land - so an ordinary tick carrying
-  // no history has nothing to repaint here.
-  if (scrollActive) return;
-#endif
 
   if (firstEver) {
     // The standalone screen owns the whole content area (a 64px mark, a wordmark
@@ -7913,15 +8044,42 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
       buf = "";
       return;
     }
-    // BROADCAST - scrollOpenById()'s own reasoning: the device has no
-    // hostSlot on file for a PROJECTS-opened id, so whichever paired Mac's
-    // filesystem actually holds this transcript is the one that acts on it
-    // (host/index.mjs's RESUME handler, via transcriptPathFor()).
-    String line = String("RESUME ") + scrollLoadedId + " " + arg;
-    sendLineToHost(line.c_str());
-    Serial.printf("RESUME: sent a headless turn for %s (%u chars) - no session "
-                  "opens on the Mac; the reply lands in its log, not here\n",
-                  scrollLoadedId, (unsigned) arg.length());
+    // THE HOST'S OWN TWO TEXT RULES, CHECKED HERE SO THE REFUSAL NAMES THEM.
+    // verifyResume() rejects anything over RESUME_TEXT_MAX bytes or outside
+    // printable ASCII with one message covering both; from the Mac that reads
+    // as an authentication failure on a frame that was signed perfectly well.
+    if (arg.length() > RESUME_TEXT_MAX) {
+      Serial.printf("RESUME refused: %u characters is over the %d-byte cap the host verifies "
+                    "against (host/typed-answer.mjs's ANSWER_TEXT_MAX_BYTES)\n",
+                    (unsigned) arg.length(), RESUME_TEXT_MAX);
+      buf = "";
+      return;
+    }
+    for (unsigned i = 0; i < arg.length(); i++) {
+      const char ch = arg[i];
+      if (ch < 0x20 || ch > 0x7E) {
+        Serial.printf("RESUME refused: byte 0x%02X at offset %u is outside printable ASCII, "
+                      "which the host's own text check rejects\n", (unsigned char) ch, i);
+        buf = "";
+        return;
+      }
+    }
+    // ONE SIGNED FRAME PER PAIRED MAC - see sendResumeSigned() (scrollback.ino)
+    // for why the unsigned broadcast this replaces could not simply be signed
+    // in place: a signature is over ONE secret, and the device does not know
+    // which Mac's disk holds a PROJECTS-opened transcript. Every skipped link
+    // says why there; a run that reached nobody says so here.
+    const int sentTo = sendResumeSigned(scrollLoadedId, arg.c_str());
+    if (sentTo == 0) {
+      Serial.println("RESUME refused: no paired Mac is reachable with a signable frame - "
+                     "see the per-link reasons above. Nothing was sent, because an unsigned "
+                     "resume is refused by the host rather than run");
+      buf = "";
+      return;
+    }
+    Serial.printf("RESUME: sent a SIGNED headless turn for %s (%u chars) to %d Mac(s) - no "
+                  "session opens on the Mac; the reply lands in its log, not here\n",
+                  scrollLoadedId, (unsigned) arg.length(), sentTo);
 #endif
   } else if (buf.startsWith("READTEST")) {
     // THE ASK READER IS OTHERWISE UNCAPTURABLE, and that is the same argument

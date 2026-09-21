@@ -2016,7 +2016,18 @@ void renderSessionsList() {
   // element, at exactly the y this line would float to, and the two would sit on
   // top of each other rather than beside each other. Outside it, sessionRowVisible()
   // is unconditionally true, so countLineY()'s "last row" is always on screen.
-  if (!sessionsScrollActive() && sessionTotalAll > sessionCount) {
+  // BOARD_HAS_PROJECTS IS THE FIRST TERM, and it is not decoration: this line
+  // POINTS AT A TAB. Board 1 is BOARD_HAS_PROJECTS 0 - PROJECTS is out of scope
+  // there by design - so its TAB 2 renders nothing at all, and "131 more in
+  // PROJECTS" on that board advertises a destination that does not exist. The
+  // flag is a #define (never a const int - "#if on a const int is silently
+  // false" has shipped twice here), so on board 1 this whole branch folds away
+  // at compile time along with its format string, while the `else` arm that
+  // keeps the cache honest is shared by both boards - written as one condition
+  // rather than an #if/#else pair precisely because an #if that opens a brace in
+  // both arms is what breaks every brace-counting checker in this repo
+  // (CLAUDE.md).
+  if (BOARD_HAS_PROJECTS && !sessionsScrollActive() && sessionTotalAll > sessionCount) {
     char buf[32];
     snprintf(buf, sizeof(buf), "%d more in PROJECTS", sessionTotalAll - sessionCount);
     padTo(buf, sizeof(buf), 26);

@@ -62,6 +62,15 @@ int projScrollCache = -1;
 const int PROJ_STATE_PENDING = -2;
 const int PROJ_STATE_FAILED  = -3;
 const int PROJ_STATE_EMPTY   = -4;
+// A FOURTH STATE, AND FOR THE SAME REASON THE OTHER THREE ARE SEPARATE: "the
+// Mac answered and said it has never heard of this project" is not "the Mac did
+// not answer" and is emphatically not "this project has no sessions". Level 2
+// used to show the LAST of those three for all three, because an unknown key
+// came back as an ordinary empty list (host/project-replies.mjs's own note on
+// `e`) - so a project whose row says it has 21 sessions opened onto "No sessions
+// found" with nothing anywhere naming a cause. Level 2 only: level 1 asks for no
+// key and so has nothing to be told it does not know.
+const int PROJ_STATE_REFUSED = -5;
 // The layout state last painted: -1 (never rendered), one of the three
 // states above, or the project count the rows were drawn for. Any change to
 // this value means the content area needs a wholesale clear before anything
@@ -93,7 +102,10 @@ char projMsg2Cache[16] = "";
 // reason (handleLine()'s `projsess` absorption needs the type and the
 // storage before this file's own text is concatenated in).
 int projLevel = 0;
-char projOpenKey[64] = "";
+// PROJ_KEY_MAX, the same constant ProjInfo.key is sized from (see its note in
+// board_es3c35p.h): this buffer holds a COPY of one of those keys, so a size
+// of its own would be a second place for the wire's worst case to be wrong.
+char projOpenKey[PROJ_KEY_MAX] = "";
 
 PSessInfo psess[PSESS_SLOTS];
 int psessCount = 0;
@@ -121,6 +133,13 @@ bool psessEverReceived = false;
 bool psessPending = false;
 unsigned long psessFetchStart = 0;
 bool psessFetchFailed = false;
+// The Mac REFUSED the key this level asked with (the reply carried `e`), as
+// opposed to never answering. Kept beside psessFetchFailed rather than folded
+// into it because the two produce different words on the glass and only one of
+// them is worth retrying for a different outcome; psessDeadEnd() still governs
+// whether the tap retries, so a refusal remains tappable (the operator may have
+// just fixed the project, and re-asking costs one line).
+bool psessRefused = false;
 
 // projLevel PAINTED, not projLevel wanted - projScrollCache's own "last
 // actually painted" shape (this file's own header note on why a
@@ -445,15 +464,18 @@ int projRowAtY(int sy) {
 //
 // projOpenKey IS SET HERE, BEFORE requestProjSessions() is called, NOT
 // inside that function - deliberately, so the key on screen is always
-// accurate to what the level is DISPLAYING even on the rare tick where
-// requestProjSessions() finds its own fetch slot busy (a level-1
-// background refresh from switchTab() still in flight - the brief's own
-// verification sequence, "TAB 2 then PROJOPEN 0", can land close enough
-// together to hit this) and defers rather than sending immediately. The
-// JSON absorption in deckhand_display.ino's handleLine() compares an
-// incoming `projsess` reply's own key against THIS value, so it has to be
-// right the instant the level opens, not only once the wire request
-// actually goes out.
+// accurate to what the level is DISPLAYING even when requestProjSessions()
+// finds its own fetch slot busy and DROPS the request (it reports "busy" on
+// the wire and returns - it does not queue it, and nothing sends it later).
+// The busy case is a SECOND LEVEL-2 open while level 2's own previous
+// PROJSESS is still in flight - the doubled trigger-file delivery, or two
+// taps - and NOT, as this comment used to claim, a level-1 background
+// refresh from switchTab(): the two levels carry deliberately independent
+// pending flags (see this file's header note on why they cannot share one),
+// so PROJECTS being in flight can never make PROJSESS busy. The JSON
+// absorption in deckhand_display.ino's handleLine() compares an incoming
+// `projsess` reply's own key against THIS value, so it has to be right the
+// instant the level opens, not only once the wire request actually goes out.
 void projOpenLevel1(int pos) {
   strncpy(projOpenKey, projects[pos].key, sizeof(projOpenKey) - 1);
   projOpenKey[sizeof(projOpenKey) - 1] = '\0';
@@ -489,15 +511,24 @@ void requestProjSessions(const char* key) {
   // independent of level 1's projectsPending - see this file's header note
   // on why the two levels cannot share one fetch slot.
   if (psessPending) {
-    char m[96];
+    // SIZED FROM PROJ_KEY_MAX, never a literal: "PROJSESS " (9) + the key +
+    // " busy ms=" (9) + a 10-digit millis + NUL. At `char m[96]` an 80-character
+    // key silently lost its tail here, so the one line that reports a busy
+    // fetch named a project that does not exist.
+    char m[PROJ_KEY_MAX + 32];
     snprintf(m, sizeof(m), "PROJSESS %s busy ms=%lu", key, millis() - psessFetchStart);
     sendLineToHost(m);
     return;
   }
   psessPending = true;
   psessFetchFailed = false;
+  psessRefused = false;   // a fresh ask has not been refused yet
   psessFetchStart = millis();
-  char m[80];
+  // THE REQUEST LINE ITSELF, sized from PROJ_KEY_MAX + "PROJSESS " + NUL rather
+  // than a literal 80 - a truncated key here is the exact defect PROJ_KEY_MAX
+  // exists to abolish, and it would have travelled all the way to the host's
+  // readdir before anything noticed.
+  char m[PROJ_KEY_MAX + 16];
   snprintf(m, sizeof(m), "PROJSESS %s", key);
   sendLineToHost(m);
 }
@@ -739,6 +770,7 @@ void renderProjLevel0() {
 void renderPSessLevel() {
   if (!psessEverReceived || psessCount == 0) {
     const int state = psessPending  ? PROJ_STATE_PENDING
+                     : psessRefused  ? PROJ_STATE_REFUSED
                      : psessDeadEnd() ? PROJ_STATE_FAILED
                                       : PROJ_STATE_EMPTY;
     if (psessRowCountCache != state) {
@@ -748,10 +780,15 @@ void renderPSessLevel() {
       psessMsgCache[0] = '\0';
       psessMsg2Cache[0] = '\0';
     }
+    // ASCII ONLY (Spleen is 0x20..0x7E and an out-of-range codepoint draws
+    // NOTHING and advances NOTHING), and 34 characters at 8px is 272 of this
+    // panel's 320 - the widest of the four, and it fits.
     const char* msg = state == PROJ_STATE_PENDING ? "Loading sessions..."
+                     : state == PROJ_STATE_REFUSED ? "-- this Mac has no such project --"
                      : state == PROJ_STATE_FAILED  ? "-- could not reach the Mac --"
                                                     : "No sessions found";
-    const char* msg2 = state == PROJ_STATE_FAILED ? "tap to retry" : "";
+    const char* msg2 = (state == PROJ_STATE_FAILED || state == PROJ_STATE_REFUSED)
+                         ? "tap to retry" : "";
     setUIFont(T_BODY);
     const int msgY1 = CONTENT_Y + 40;
     drawIfChanged(psessMsgCache, sizeof(psessMsgCache), msg, tft.width() / 2, msgY1,

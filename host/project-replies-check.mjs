@@ -207,10 +207,31 @@ function suite(makeMod, check) {
       manyRes.projsess.total, manyN);
 
     // -----------------------------------------------------------------
+    // AN UNKNOWN KEY AND AN EMPTY PROJECT MUST NOT LOOK THE SAME. They used to
+    // be the same three fields, and the consequence was on the glass: the key
+    // echoes back UNCHANGED, so the device's staleness strcmp matched and level
+    // 2 drew "No sessions found" for a project whose own row had just said it
+    // has N sessions. It is reachable in ordinary use - a device whose key
+    // buffer truncated the directory name asks exactly this way, and so does a
+    // second paired Mac that simply does not hold this project. Checked as a
+    // PAIR, deliberately: the refusal assertion alone would pass on a module
+    // that stamped `e` on every reply, so the empty-project case below is what
+    // makes this one mean "distinguishable" rather than "present".
     const missingKeyMod = makeMod(readersFrom(fixtureBasic()));
     const missing = await missingKeyMod.buildProjSessReply("does-not-exist", []);
-    check("an unknown project key answers empty rather than throwing",
-      missing, { projsess: { k: "does-not-exist", items: [], total: 0 } });
+    check("an unknown project key is REFUSED BY NAME rather than answered with an empty list",
+      {
+        k: missing.projsess.k,
+        items: missing.projsess.items,
+        total: missing.projsess.total,
+        named: typeof missing.projsess.e === "string" && missing.projsess.e.length > 0,
+      },
+      { k: "does-not-exist", items: [], total: 0, named: true });
+
+    const emptyProjMod = makeMod(readersFrom({ "-a-real-but-empty-project": { files: { "notes.md": { ms: 1 } } } }));
+    const emptyRes = await emptyProjMod.buildProjSessReply("-a-real-but-empty-project", []);
+    check("a project that REALLY has no transcripts answers an empty list and no refusal",
+      emptyRes, { projsess: { k: "-a-real-but-empty-project", items: [], total: 0 } });
 
     const brokenDirsMod = makeMod({
       listDirs: async () => { throw new Error("readdir failed"); },
@@ -359,6 +380,18 @@ if (!SELFTEST) {
 // reimplementation of the one function being mis-behaved, so this module
 // deleted entirely still fails these the same way it fails the real run.
 const faults = [
+  ["an unknown project key answers an ordinary empty list again (the shipped bug)",
+    (readers) => {
+      const real = realModule.makeProjectReplies(readers);
+      return {
+        ...real,
+        buildProjSessReply: async (key, liveIds = []) => {
+          const res = await real.buildProjSessReply(key, liveIds);
+          if (res.projsess.e) delete res.projsess.e;  // BUG: silence the refusal
+          return res;
+        },
+      };
+    }],
   ["the opaque-fallback label is decoded (hyphens read as path separators) instead of used whole",
     (readers) => {
       const real = realModule.makeProjectReplies(readers);

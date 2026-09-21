@@ -261,6 +261,57 @@ function checkAll(c, projSrc, mainSrc) {
       "\"reuse the existing mechanism rather than duplicating it\")");
   }
 
+  // ---- THE PROJECT KEY BUFFER ----
+  //
+  // A project key is a real filesystem path with its separators rewritten, so
+  // NOTHING caps its length: not the host, not the wire, not the device. It
+  // shipped at 64 bytes against a measured worst case of 80 - four of this
+  // Mac's sixteen projects were truncated at 63 characters, and copyField()
+  // truncates SILENTLY, so the row still listed (its name comes from the
+  // transcript's cwd, not the key) and only the tap failed, as "No sessions
+  // found" for a project that had just claimed N.
+  //
+  // THREE SEPARATELY PARSED CONSTANTS, never one compared against its own
+  // definition ("X >= Y where X is declared = Y always holds", CLAUDE.md): the
+  // header states what was MEASURED, what headroom is wanted, and what the
+  // buffer IS, and this asserts the relation between them. Shrinking the buffer
+  // back - or raising the measured worst case past it after a deeper worktree
+  // appears - fails here, by name.
+  assert(fails, "the project key buffer holds the measured worst case with headroom",
+    c.PROJ_KEY_MAX >= c.PROJ_KEY_MEASURED_MAX + c.PROJ_KEY_HEADROOM,
+    `PROJ_KEY_MAX(${c.PROJ_KEY_MAX}) is under PROJ_KEY_MEASURED_MAX(${c.PROJ_KEY_MEASURED_MAX}) + ` +
+    `PROJ_KEY_HEADROOM(${c.PROJ_KEY_HEADROOM}) = ${c.PROJ_KEY_MEASURED_MAX + c.PROJ_KEY_HEADROOM} - ` +
+    `a key past the buffer is truncated by copyField() with no warning, listed correctly at ` +
+    `level 1, and then asks the host for a directory that does not exist`);
+
+  // ONE CONSTANT, THREE DECLARATIONS - ProjInfo.key (the stored key), the
+  // extern (deckhand_display.ino's view of it) and projOpenKey (the COPY level 2
+  // compares every reply against). The two used to be independent literals that
+  // happened to agree; if they ever stop agreeing, the staleness strcmp compares
+  // a full key against a shorter copy of itself and discards every reply as
+  // stale - a level 2 that loads forever. Bound to the DECLARATIONS themselves,
+  // so a literal reintroduced anywhere in the trio fails by name.
+  assert(fails, "ProjInfo.key, its extern and projOpenKey are all sized from PROJ_KEY_MAX",
+    /char key\[PROJ_KEY_MAX\]/.test(mainSrc) &&
+      /extern char projOpenKey\[PROJ_KEY_MAX\]/.test(mainSrc) &&
+      /char projOpenKey\[PROJ_KEY_MAX\] = ""/.test(projSrc),
+    "one of ProjInfo.key / extern projOpenKey / projOpenKey's definition is sized by a " +
+    "literal rather than by PROJ_KEY_MAX - the three hold the SAME string and a " +
+    "disagreement truncates a copy of a key that was already checked to fit");
+
+  // The wire line that CARRIES the key must be sized from the same constant:
+  // a request buffer that fits yesterday's key length truncates on the way OUT
+  // instead of on the way in, which is the identical defect one step later.
+  {
+    const reqBody = fnBody(projSrc, "void requestProjSessions(const char* key) {", "projects.ino");
+    assert(fails, "requestProjSessions() sizes its wire buffers from PROJ_KEY_MAX",
+      (reqBody.match(/char m\[PROJ_KEY_MAX \+ \d+\]/g) || []).length === 2,
+      "requestProjSessions() does not size BOTH of its line buffers (the busy report and the " +
+      "PROJSESS request itself) from PROJ_KEY_MAX - at `char m[80]` an 80-character key loses " +
+      "its tail on the wire, which is the truncation PROJ_KEY_MAX exists to prevent, moved " +
+      "one step downstream");
+  }
+
   // ---- fix round 1: the stale-reply guard must protect the PENDING FLAG,
   // not only the DATA ----
   //
@@ -403,6 +454,14 @@ function main() {
     // check that always happens to pass at today's numbers.
     ["PSESS_PAD widened to 60 (crowds the title lane under 24 characters)",
       { PSESS_PAD: 60 }, "the title lane holds at least 24 characters"],
+    // CRITICAL 2: the buffer shrunk back to the 64 that truncated four of this
+    // Mac's sixteen real projects. DERIVED from the parsed measured worst case
+    // rather than transcribed as "64", for the reason the BLE-timeout fault
+    // above states at length: a fault holding a stale literal stops triggering
+    // the moment the header moves, and reports a MISS nobody reads as one.
+    ["PROJ_KEY_MAX shrunk under the measured worst case",
+      (c) => ({ PROJ_KEY_MAX: c.PROJ_KEY_MEASURED_MAX - 16 }),
+      "the project key buffer holds the measured worst case with headroom"],
   ];
   const projSrc = loadProjSrc();
   const mainSrc = loadMainSrc();
@@ -426,6 +485,17 @@ function main() {
   // the const overrides above AND of each other, so each proves its own
   // assertion on its own.
   const structuralFaults = [
+    // CRITICAL 2's own regression: projOpenKey back to a literal, disagreeing
+    // with ProjInfo.key. Must fail by the SIZING assertion's name and nothing
+    // else - the key-length arithmetic assertion reads constants, not this text.
+    ["projects.ino", /char projOpenKey\[PROJ_KEY_MAX\] = "";/, 'char projOpenKey[64] = "";',
+      "projOpenKey re-sized by a literal 64, disagreeing with ProjInfo.key",
+      "ProjInfo.key, its extern and projOpenKey are all sized from PROJ_KEY_MAX"],
+    // The same defect one step downstream: the request line itself back to the
+    // fixed 80 that truncated an 80-character key on the way out.
+    ["projects.ino", /char m\[PROJ_KEY_MAX \+ 16\];/, "char m[80];",
+      "requestProjSessions()'s PROJSESS line buffer back to a literal 80",
+      "requestProjSessions() sizes its wire buffers from PROJ_KEY_MAX"],
     // Fix round 1's original regression, relocated: the one line that makes
     // a retry possible after a timeout now lives in checkFetchTimeout()
     // (shared by both levels) rather than in tickProjectsFetch() itself,
@@ -448,8 +518,8 @@ function main() {
     // shipped before the finding, so "does reverting the fix make this
     // fail, by name" is a literal statement here, not a metaphor.
     ["deckhand_display.ino",
-      '    if (strcmp(k, projOpenKey) == 0) {\n      psessPending = false;\n      psessEverReceived = true;',
-      '    psessPending = false;\n    if (strcmp(k, projOpenKey) == 0) {\n      psessEverReceived = true;',
+      '    if (strcmp(k, projOpenKey) == 0) {\n      psessPending = false;\n',
+      '    psessPending = false;\n    if (strcmp(k, projOpenKey) == 0) {\n',
       "psessPending = false; moved back outside the key-matched branch (this round's own shipped bug)",
       "psessPending is cleared only inside the key-matched branch"],
   ];

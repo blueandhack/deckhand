@@ -53,7 +53,7 @@ panel, which reads as a layout bug rather than a build mistake.
 | mic / beeper | both fitted and working | both work, via the ES8311 |
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64 |
-| size today | flash 1425888, RAM 72100 | flash 1157984, RAM 63868 |
+| size today | flash 1425680, RAM 72100 | flash 1160016, RAM 65500 |
 
 **FOUR of the six numbers this file quotes about the binaries are BOUND and two are not.**
 `node firmware/board-baseline.mjs --doc-check` asserts the two **hashes** and the two **sizes**
@@ -86,7 +86,18 @@ past a capped list) account for most of it, the rest level 2's own independent f
 trio (`psessPending`, `psessFetchStart`, `psessFetchFailed` - a SEPARATE pair from level 1's,
 not a shared one, even though both route through the same `checkFetchTimeout()`) plus
 `projLevel`, `projOpenKey[64]`, `psessCount`/`psessTotal`/`psessEverReceived` and two more
-message caches. Board 1 took none of it - same `#if BOARD_HAS_PROJECTS` boundary. `arduino-cli`'s
+message caches. Board 1 took none of it - same `#if BOARD_HAS_PROJECTS` boundary. It then **rose
+1,632 bytes on 2026-09-21** (the final fix pass on that same branch), and almost all of it is one
+buffer: `ProjInfo.key` went from 64 to `PROJ_KEY_MAX` (128) because the real worst case on this
+Mac is an **80-character** project directory name and FOUR of sixteen were 64 or longer - a
+silent truncation that listed the project correctly and then asked the host for a directory that
+does not exist. 64 x `PROJ_SLOTS`(24) = 1,536, plus 64 for `projOpenKey` (the same constant, so
+the two cannot drift), plus `HostLink.resumeNonce[20]` x `MAX_LINKS`(2) for the credential a
+signed `RESUME` is HMAC'd against, plus one `bool`. Board 1 took none of it: the key buffers sit
+behind `#if BOARD_HAS_PROJECTS` and the nonce behind `#if BOARD_HISTORY_SCROLL`, both `0` there -
+its RAM is byte-identical across that change, measured, and its flash fell 192 bytes (`.flash.text`
+1,006,932 -> 1,006,764) because the SESSIONS count line ("N more in PROJECTS") now folds away on a
+board with no PROJECTS tab to point at. `arduino-cli`'s
 "Sketch uses N" is a
 slightly smaller number than the `.bin` - the same image without its trailing padding - so do
 not expect the compile summary to print these.
@@ -149,7 +160,7 @@ arduino-cli compile --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app" \
 node firmware/board-baseline.mjs /tmp/b1/deckhand_display.ino.bin --check 1
 ```
 
-Today: `50341e3e930a7ff5...`, size 1425888 (board 2: `da48c5fc6a93fcd6...`, size 1157984).
+Today: `326a36e3d8dd9189...`, size 1425680 (board 2: `1245333f04093415...`, size 1160016).
 
 It compares **BYTES, not sizes**, and that matters: a default argument on a shared function
 once changed board 1's codegen with **no size change whatsoever** - invisible to a size

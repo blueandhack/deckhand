@@ -76,6 +76,18 @@ if (SELFTEST) {
   if (fault === "seq-append")
     SKETCH = SKETCH.replace(/if \(seq != scrollNextSeq\) \{[\s\S]*?\n      \}/, "if (seq != scrollNextSeq) {\n      }");
   if (fault === "wide-marker") INO = INO.replace(/"\$"/, '"·"');
+  // THE UI FREEZE, REPRODUCED EXACTLY: the scrollback arm moved back BELOW the
+  // reader's histActive arm, which is the shipped order that froze the device.
+  // A swap, not a deletion - deleting the arm would fail several assertions for
+  // the wrong reason, and the defect was never a missing guard.
+  if (fault === "tick-order")
+    SKETCH = SKETCH.replace(
+      /(\n  if \(scrollActive\) \{[\s\S]*?\n  \}\n)([\s\S]{0,40}?)(  if \(histActive\) \{[\s\S]*?\n  \}\n)/,
+      "\n$2$3$1");
+  // The device stops signing the label, so a PROMPT signature would authenticate
+  // a headless turn. Swapped rather than deleted, host/voice-answer-check.mjs's
+  // own reasoning for the same fault on the host side.
+  if (fault === "resume-nolabel") INO = INO.replace(/":RESUME:"/, '":PROMPT:"');
   // TASK 5: proves the two-draw-paths equivalence assertion below actually
   // binds rather than passing vacuously. A plain, non-global replace hits
   // only the FIRST occurrence of the pattern in the whole (comment-stripped)
@@ -798,6 +810,90 @@ present(reqBody, /strncpy\(scrollLoadedId, id,/,
   "structural: scrollLoadedId is set from scrollFetch's own id argument");
 absent(reqBody, /sessions\[/, "structural: scrollFetch itself never reads sessions[] either - every caller resolves an id first");
 
+// ---------------- STRUCTURAL: the 5s tick's ORDER (the UI freeze) ----------
+//
+// CONFIRMED ON HARDWARE 2026-09-21, and invisible to every geometry assertion
+// and to a single screenshot: a PROJECTS-opened transcript froze the WHOLE UI
+// within ~5 seconds. Both openers set histActive as well as scrollActive
+// (openScrollback()'s own note on why every shared guard list names histActive),
+// and handleLine()'s tick used to reach the READER's histActive arm FIRST. That
+// arm re-resolves detailIndex from detailId - which is EMPTY for an id that is
+// not in sessions[], the entire point of scrollOpenById - so it took the -1
+// branch, painted the SESSIONS list over the open transcript and called
+// exitReaderToList(), which clears histActive and NOT scrollActive. From then on
+// the 5s tick returned at the scrollActive guard and the 1s tick was gated on
+// !scrollActive: the footer and every tab render stopped FOREVER, with 304KB of
+// PSRAM still held, while the device went on talking to the Mac. Two captures
+// 45 seconds apart showed the identical footer clock.
+//
+// The fix is an ORDER - the transcript's own arm first - so this is an assertion
+// about POSITION, which is not a thing any other assertion in this repo checks.
+// Bound to handleLine()'s own body so a `scrollActive` test somewhere else in
+// the file cannot satisfy it.
+const tickBody = body(SKETCH, "void handleLine(const String& line)", "deckhand_display.ino");
+{
+  const scrollAt = tickBody === null ? -1 : tickBody.indexOf("if (scrollActive) {");
+  const histAt   = tickBody === null ? -1 : tickBody.indexOf("if (histActive) {");
+  s(scrollAt >= 0 && histAt >= 0,
+    "structural: handleLine() has both the scrollback arm and the reader's histActive arm");
+  s(scrollAt >= 0 && histAt >= 0 && scrollAt < histAt,
+    "structural: the tick decides the SCROLLBACK before the reader's histActive arm - " +
+    "reversed, a PROJECTS-opened transcript is painted over by the SESSIONS list and the " +
+    "whole UI freezes (hardware-confirmed)");
+  // The arm's own body: the two entry paths, and what each is and is not
+  // subjected to. slice() to the first "\n  }" after the arm opens - the arm is
+  // small and closes at that indentation, the same "locate by structure, not by
+  // offset" discipline the baseline masker uses.
+  const armBody = scrollAt >= 0
+    ? tickBody.slice(scrollAt, tickBody.indexOf("\n  }", scrollAt) + 4) : "";
+  s(/if \(!scrollFromProjects\)/.test(armBody),
+    "structural: the scrollback arm resolves a detail index ONLY for the non-PROJECTS entry " +
+    "path - a scrollOpenById() transcript has no sessions[] row by construction, so " +
+    "resolveDetailIndex()'s -1 says nothing about whether the screen is still valid");
+  s(/detailIndex = resolveDetailIndex\(\);/.test(armBody),
+    "structural: the live entry path (openScrollback, from a detail card) still re-anchors " +
+    "detailIndex on every tick - it is what the header, the CHAT/ALL refetch and the live " +
+    "tail all read, and a reorder between ticks would otherwise leave it on another session");
+  s(/exitScrollback\(\);/.test(armBody) && !/exitReaderToList\(\)/.test(armBody),
+    "structural: the scrollback arm leaves through exitScrollback(), never exitReaderToList() - " +
+    "that one clears histActive and NOT scrollActive, which is the freeze by the other door");
+}
+
+// ---------------- STRUCTURAL: RESUME is SIGNED ----------------
+//
+// It shipped as `RESUME <id> <plaintext>`, run by the host with no HMAC and no
+// nonce, while the two OTHER ways of injecting text into a session (PROMPT and a
+// typed ANSWER) have been signed against a per-device secret since they existed.
+// host/voice-answer-check.mjs proves the CRYPTO and binds nothing about the
+// device; these bind the firmware's own half.
+const resumeBody = body(INO, "int sendResumeSigned(const char* id12, const char* text)", "scrollback.ino");
+present(resumeBody, /":RESUME:"/,
+  "structural: the device signs the RESUME LABEL - the one thing stopping a signature minted " +
+  "for a message to a READY session from starting a headless turn in a dead one");
+present(resumeBody, /authHmacFor\(slot,/,
+  "structural: the frame is signed with the PAIRING KEY of the link it is addressed to, not " +
+  "with activeHost's - \"whoever ticked most recently\" is wrong about half the time with two Macs");
+present(resumeBody, /hostLinks\[i\]\.resumeNonce/,
+  "structural: the nonce signed is the one THAT Mac published (per link), so a rotated or " +
+  "never-issued nonce is refused rather than replayed");
+present(resumeBody, /sendLineToHost\(line, i\)/,
+  "structural: each signed frame is ADDRESSED to the link whose key signed it - a broadcast " +
+  "would hand every other Mac a signature it cannot check");
+{
+  const at = SKETCH.indexOf('} else if (buf.startsWith("RESUME")) {');
+  const end = SKETCH.indexOf('} else if (buf.startsWith("READTEST"))', at);
+  const cmd = at >= 0 && end > at ? SKETCH.slice(at, end) : "";
+  s(cmd.length > 200, "structural: the RESUME command handler is findable in deckhand_display.ino");
+  s(/sendResumeSigned\(scrollLoadedId, arg\.c_str\(\)\)/.test(cmd),
+    "structural: the RESUME command sends through sendResumeSigned() - the signing path");
+  s(cmd.length > 200 && !/String\("RESUME "\)/.test(cmd),
+    "structural: the RESUME command never builds a plaintext `RESUME <id> <text>` line itself - " +
+    "the unsigned form is refused by the host, so sending it would be a silent no-op");
+  s(/RESUME_TEXT_MAX/.test(cmd),
+    "structural: the text cap is checked HERE, by name, against the same number the host " +
+    "verifies with - an over-cap prompt otherwise reads on the Mac as an authentication failure");
+}
+
 // ---------------- STRUCTURAL: touch (Task 5) ----------------
 
 // THE SCROLLBACK MUST NOT HIT-TEST OR CLEAR AGAINST THE PAGED READER'S HEADER.
@@ -1009,6 +1105,8 @@ if (SELFTEST) {
     "lang-any-fence": /the language row is emitted on the OPENING fence only/,
     "lang-one-path": /BOTH draw paths draw a language row dim/,
     "scrollopenbyid-detailindex": /scrollOpenById never reads sessions\[\] for the id it loads/,
+    "tick-order": /the tick decides the SCROLLBACK before the reader's histActive arm/,
+    "resume-nolabel": /the device signs the RESUME LABEL/,
   }[process.env.SB_FAULT || "wrap-cap"];
   const hit = FAILED.find(x => WANT.test(x));
   if (!hit) { console.log(`SELFTEST FAILED: fault ${process.env.SB_FAULT || "wrap-cap"} was not caught`); process.exit(1); }

@@ -190,9 +190,16 @@ const SOURCE_FAULTS = [
     "derives its y from the LAST ROW"],
   ["the count line is gated on sessionsTotal (this tab's own live overflow count) instead of sessionTotalAll",
     "sessions.ino",
-    (t) => t.replace(/if \(!sessionsScrollActive\(\) && sessionTotalAll > sessionCount\) \{/,
-                     "if (!sessionsScrollActive() && sessionsTotal > sessionCount) {"),
+    (t) => t.replace(/if \(BOARD_HAS_PROJECTS && !sessionsScrollActive\(\) && sessionTotalAll > sessionCount\) \{/,
+                     "if (BOARD_HAS_PROJECTS && !sessionsScrollActive() && sessionsTotal > sessionCount) {"),
     "gated on sessionTotalAll"],
+  // The board gate dropped, which is how it shipped: board 1 drawing a line that
+  // names a tab it does not have.
+  ["the count line loses its BOARD_HAS_PROJECTS gate, so board 1 points at a tab it has not got",
+    "sessions.ino",
+    (t) => t.replace(/if \(BOARD_HAS_PROJECTS && !sessionsScrollActive\(\)/,
+                     "if (!sessionsScrollActive()"),
+    "gated on BOARD_HAS_PROJECTS"],
   // The prose's two figures, one fault each, because they are two claims: the
   // parenthesis drifted on its own once already.
   ["board-1-known-state.md's sessions allowlist ENTRY count is nudged off KNOWN[1].length",
@@ -4750,10 +4757,18 @@ for (const b of [1, 2]) {
     chk(/return sessionRowYAt\(lastPos\) \+ sessionRowHAt\(lastPos\) \+ SESSION_ROW_GAP;/.test(clBody),
         "countLineY() derives its y from the LAST ROW (sessionRowYAt/sessionRowHAt), not a fixed " +
         "constant - a pinned y would cost a permanent row on a five-row list that cannot spare one");
-    chk(/if \(!sessionsScrollActive\(\) && sessionTotalAll > sessionCount\) \{/.test(rlBody),
+    chk(/if \(BOARD_HAS_PROJECTS && !sessionsScrollActive\(\) && sessionTotalAll > sessionCount\) \{/.test(rlBody),
         "the count line is gated on sessionTotalAll (Task 3's PROJECTS total) exceeding " +
         "sessionCount, not sessionsTotal (this tab's OWN live-list overflow count, which is " +
         'what the existing "+N more session(s)" strip already answers)');
+    // AND ON BOARD_HAS_PROJECTS, its FIRST term. This is shared code and the line
+    // POINTS AT A TAB: board 1 is BOARD_HAS_PROJECTS 0, its TAB 2 renders nothing,
+    // and "131 more in PROJECTS" there advertises a destination that does not
+    // exist. Bound separately from the gate above so the two failures read
+    // differently - "wrong counter" and "wrong board" are different defects.
+    chk(/if \(BOARD_HAS_PROJECTS &&/.test(rlBody),
+        "the count line is gated on BOARD_HAS_PROJECTS - board 1 has no PROJECTS tab for it " +
+        "to point at, so on that board the branch (and its format string) must fold away");
   }
   // THE MARGIN, PARSED FROM THE SKETCH RATHER THAN CHOSEN HERE. "Holds its worst
   // case" is the assertion that let both signature caches drift to within a

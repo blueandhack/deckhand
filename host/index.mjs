@@ -29,7 +29,7 @@ import { resolveSessionId } from "./session-lookup.mjs";
 import { pickTranscript, cwdFromLines, SCAN_LINES } from "./project-index.mjs";
 import { makeProjectReplies, countUserTurns } from "./project-replies.mjs";
 import { postToSessionInbox } from "./session-inbox.mjs";
-import { verifyPrompt, verifyTypedAnswer } from "./typed-answer.mjs";
+import { verifyPrompt, verifyTypedAnswer, verifyResume } from "./typed-answer.mjs";
 import { macTag } from "./host-tag.mjs";
 import { toAscii, deviceText } from "./to-ascii.mjs";
 import { askChips } from "./ask-chips.mjs";
@@ -772,6 +772,26 @@ function nonceForPid(pid) {
   }
   return e.nonce;
 }
+// THE RESUME NONCE. One per HOST PROCESS, not one per session, and that is
+// forced rather than chosen: a resumable session is by definition not in the
+// live list (it ended, or it belongs to a project on this disk that this Mac
+// has never had live), so there is no record to hang a per-session nonce off
+// and nothing publishing one for it. It rides in every tick payload as
+// `rnonce` - the device stores it per link and signs with the key of the Mac
+// that published it - and it is ROTATED on every accepted RESUME, which gives
+// the same single-use property consumeSessionNonce() gives a typed message:
+// the identical captured frame can never run a second time.
+//
+// Not pruned on a timer, unlike its two neighbours above. Those expire because
+// they are credentials for a specific session that may stop being messageable
+// while the device still holds one; this one names no session at all (the id
+// is signed alongside it, never implied by it), the device is re-issued it
+// every ~5s, and expiring it would only make a resume typed a minute after the
+// last tick fail for a reason nobody could see.
+let resumeNonceValue = crypto.randomBytes(8).toString("hex");
+function resumeNonce() { return resumeNonceValue; }
+function rotateResumeNonce() { resumeNonceValue = crypto.randomBytes(8).toString("hex"); }
+
 function pruneNonces() {
   const now = Date.now();
   for (const [pid, e] of askNonces) if (now - e.seen > 60_000) askNonces.delete(pid);
@@ -2431,7 +2451,18 @@ async function readSessions() {
 
   // Urgency first, recency second: the display fits 6 sessions, and when
   // there are more, a session that NEEDS INPUT must never be the hidden one.
-  const rank = (r) => (r.status === "asking" ? 0 : r.status === "waiting" ? 1 : 2);
+  // ENDED RANKS BELOW EVERY LIVE SESSION, and that is not cosmetic. The hook
+  // stamps `updated_at` when it writes the "ended" record, so for the whole of
+  // SESSION_ENDED_GRACE_MS a ghost row is the MOST RECENTLY UPDATED thing in
+  // this list - in bucket 2 beside "working" it therefore sorted ABOVE every
+  // session actually doing something, took the device's expanded hero card, and
+  // could push a live session out of SESSION_ROW_CAP into the lean tail. The
+  // ghost row's job is "that session did not just vanish", not "look at me".
+  // The device's own urgencyRank() (deckhand_display.ino) carries the same rank
+  // for the same reason - it re-sorts what it receives, so fixing only this end
+  // would have left the hero card wrong on the glass.
+  const rank = (r) =>
+    r.status === "asking" ? 0 : r.status === "waiting" ? 1 : r.status === "ended" ? 3 : 2;
   records.sort((a, b) => rank(a) - rank(b) || b.updated_at - a.updated_at);
   const top = records.slice(0, SESSION_ROW_CAP);
 
@@ -3966,6 +3997,21 @@ async function handleDeviceLine(line, via, pairGen = 0) {
     const fitted = fitPayload(reply);
     if (fitted.dropped.length) console.log(`PROJSESS: shed ${fitted.dropped.join("; ")}`);
     await sendToLink(replyLink, fitted.line);
+    // A REFUSAL IS LOGGED AS A REFUSAL, not as a successful reply carrying zero
+    // sessions - from this log the two were indistinguishable, which is the same
+    // hole the reply itself had (see buildProjSessReply's own note on `e`). The
+    // key is quoted with its LENGTH, because the way this happens in practice is
+    // a device asking with a TRUNCATED key: the character count is what makes
+    // that visible at a glance rather than something to notice by eye.
+    if (reply.projsess.e) {
+      console.log(
+        `PROJSESS REFUSED for "${key}" (${key.length} chars): ${reply.projsess.e}. ` +
+        `No such directory under ~/.claude/projects on this Mac - either another paired Mac ` +
+        `holds this project, or the key arrived truncated. Told the device so by name; it ` +
+        `shows its own refused state rather than "No sessions found".`
+      );
+      return;
+    }
     console.log(
       `PROJSESS: sent ${fitted.bytes} bytes (${reply.projsess.items.length}/${reply.projsess.total} ` +
       `session(s) for "${key}") via ${linkLabel(replyLink?.id ?? "none")}`
@@ -3989,19 +4035,41 @@ async function handleDeviceLine(line, via, pairGen = 0) {
   // `id` IS THE OPAQUE 12-CHAR SESSION ID, taken verbatim - never split,
   // decoded or otherwise interpreted, PROJSESS's own `key` precedent for why
   // an id (or here, a directory name derived FROM one) is handled as one
-  // opaque unit. Everything after the first space is `text`, UNTRIMMED
-  // except for its own surrounding whitespace - it is a prompt, not a
-  // wire token, and may itself contain spaces.
+  // opaque unit.
+  //
+  // SIGNED, AND IT SHIPPED UNSIGNED. The frame is now `RESUME <id12> <b64>
+  // <hmac>` - handleTypedPrompt's own four-token shape, verified through
+  // verifyResume() with the sending device's per-device secret and this
+  // host's rolling `rnonce`. It was `RESUME <id> <plaintext>`, accepted from
+  // anything that could put a line on the wire, while the two OTHER ways of
+  // injecting text into a session (PROMPT and a typed ANSWER) have gone
+  // through an HMAC and a single-use nonce since they existed. Resuming is
+  // the same class of act - it makes Claude run a turn - so it is held to the
+  // same discipline rather than a second, weaker one invented for it. The
+  // RESUME label in the signed string is what keeps a signature minted for a
+  // message from being replayed as a headless turn.
   if (line.startsWith("RESUME ")) {
-    const rest = line.slice("RESUME ".length).trim();
-    const sp = rest.indexOf(" ");
-    const id = sp < 0 ? rest : rest.slice(0, sp);
-    const text = sp < 0 ? "" : rest.slice(sp + 1).trim();
-    console.log(`[device/${linkLabel(via)}] ${line}`);
-    if (!id || !text) {
-      console.log(`RESUME refused: ${!id ? "no session id" : "no text"} in "${line}"`);
+    const parts = line.trim().split(/\s+/);
+    // The ID is logged, the BODY is not: the base64 is the prompt itself and it
+    // is echoed in full below once it has actually authenticated ("accepted N
+    // signed chars"), rather than twice - once unverified and once not.
+    console.log(`[device/${linkLabel(via)}] RESUME ${parts[1] || "?"} <b64> <hmac> (${line.length} bytes)`);
+    if (parts.length !== 4) {
+      // NAMED, and it names the SHAPE: a device still sending the old
+      // plaintext form lands here, and "malformed" alone would read as a wire
+      // fault rather than as firmware that predates the signature.
+      console.log(
+        `RESUME refused: malformed frame - expected "RESUME <id12> <base64> <hmac>" ` +
+        `(4 tokens), got ${parts.length}. An unsigned "RESUME <id> <text>" from older ` +
+        `firmware is refused here rather than run.`
+      );
       return;
     }
+    // NO "empty id" BRANCH: the line was trimmed and split on whitespace runs,
+    // so a 4-token frame cannot have an empty second token. A guard that can
+    // never fire is a defect in this repo, not belt and braces - the id's real
+    // check is the signature, which is computed OVER it.
+    const [, id, b64, mac] = parts;
     // DEDUPED LIKE PROJECTS/PROJSESS/HISTORY, and it matters MORE here: unlike
     // a read, this is NOT idempotent - it is a real headless turn - and the
     // trigger-file path delivers every command over BOTH transports, so a
@@ -4010,9 +4078,33 @@ async function handleDeviceLine(line, via, pairGen = 0) {
     // conversation twice.
     const now = Date.now();
     for (const [k, t] of scrollReqSeen) if (now - t > SCROLL_REQ_DEDUP_MS) scrollReqSeen.delete(k);
-    const reqKey = `${scrollSenderKey(via)}|resume|${id}|${text}`;
+    const reqKey = `${scrollSenderKey(via)}|resume|${id}|${mac}`;
     if (scrollReqSeen.has(reqKey)) return scrollReqDropped(via, reqKey);
     scrollReqSeen.set(reqKey, now);
+
+    // VERIFIED AFTER THE DEDUPE, DELIBERATELY. The device sends one line per
+    // paired Mac and each of those still goes out over every live transport,
+    // so a cabled board delivers this Mac's own copy twice within
+    // milliseconds. Verifying first would accept the first copy, ROTATE the
+    // nonce, and then log the second as a hard authentication failure - the
+    // "trains you to ignore the one log line that means something" problem the
+    // duplicate-PROMPT dedup already exists for.
+    const from = deviceNameFor(via);
+    const dev = from ? deviceEntry(from) : null;
+    const v = verifyResume({ secret: dev?.secret, nonce: resumeNonce(), id12: id, b64, mac });
+    if (!v.ok) {
+      console.error(
+        `RESUME REJECTED for session ${id} ${senderDescription(via, from)} - ${v.why}. ` +
+        `Nothing was run.`
+      );
+      return;
+    }
+    const text = v.text;
+    // SINGLE USE, exactly as consumeSessionNonce() is for a typed message: this
+    // frame authenticated once and the identical bytes can never run again. The
+    // next tick (~5s) hands the device the new one.
+    rotateResumeNonce();
+    console.log(`RESUME: accepted ${text.length} signed chars for ${id} from ${from}.`);
 
     // BROADCAST FROM THE DEVICE, SO RESOLVED THE SAME WAY HERE - the device
     // does not know which paired Mac's filesystem holds this session
@@ -5805,6 +5897,13 @@ async function tick(generation = tickGeneration) {
     // display text that is not what gets signed - that one is SUPPRESSED instead.
     const wire = asciiFit({
       ...usage, hostId, hostTag, ...(hostEmoji ? { hostEmoji } : {}), remoteAnswer, voice: lastVoice,
+      // rnonce: the credential a RESUME is signed against (see resumeNonce()
+      // above). Published unconditionally rather than "only when the device
+      // has a transcript open", because this end cannot know that and the
+      // device must already hold it when the operator types RESUME - 21 bytes
+      // a tick. A device that has never seen one refuses to send by name
+      // rather than sending something this Mac would reject.
+      rnonce: resumeNonce(),
     });
     if (wire.offenders.length) {
       const sig = wire.offenders.join("|");

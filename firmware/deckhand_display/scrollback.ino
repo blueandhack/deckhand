@@ -431,10 +431,26 @@ void requestScrollback(int idx) {
 // relationship to a PROJECTS-opened id and can even be -1 (no card open at
 // all). scrollLoadedId is what THIS screen is actually showing, however it got
 // opened, so it is what "re-fetch the same thing" has to mean here.
-void scrollRefetch() {
-  if (scrollFromProjects) scrollFetch(scrollLoadedId, 0, true);
+//
+// AND THAT CLAIM IS NOW TRUE. It was written when only ONE caller used this:
+// the dead-end tap ran its own inlined copy of the same two lines, because it
+// has to call scrollEnd() first (to drop an empty store so the fetch
+// re-allocates) and scrollEnd() CLEARS scrollLoadedId - so a no-argument
+// refetch called afterwards would broadcast for "" and fetch nothing. A comment
+// claiming a shared predicate that was not shared is worse than the duplication
+// it describes (this branch's own finding, one file over), so the id became an
+// ARGUMENT: the tap passes the copy it snapshotted before scrollEnd(), the
+// filter toggle passes what is loaded now, and there is exactly one statement
+// of "which id, addressed how".
+void scrollRefetch(const char* id) {
+  if (scrollFromProjects) scrollFetch(id, 0, true);
   else requestScrollback(detailIndex);
 }
+// An OVERLOAD, not a default argument: a default argument on a shared function
+// has silently changed board 1's codegen here before, with no size change to
+// notice it by (CLAUDE.md, the baseline's own story). This file is board 2 only,
+// so the risk is theoretical - the habit is not.
+void scrollRefetch() { scrollRefetch(scrollLoadedId); }
 
 // Called from loop(). A stalled fetch must say so rather than leaving
 // "fetching" on the glass forever.
@@ -1166,13 +1182,16 @@ bool handleScrollTouch(int sx, int sy) {
       // ("the store is gone; it holds nothing" - its own comment), so
       // scrollRefetch()'s broadcast arm would otherwise read the id AFTER it
       // has already been wiped to "" and re-fetch nothing.
-      const bool wasFromProjects = scrollFromProjects;
       char savedId[16];
       strncpy(savedId, scrollLoadedId, sizeof(savedId) - 1);
       savedId[sizeof(savedId) - 1] = '\0';
       scrollEnd();                 // drop the empty store so the fetch re-allocates
-      if (wasFromProjects) scrollFetch(savedId, 0, true);
-      else requestScrollback(detailIndex);
+      // THROUGH scrollRefetch(), not a second copy of its body - it takes the
+      // id precisely so this caller can hand it the pre-scrollEnd() snapshot.
+      // scrollFromProjects is untouched by scrollEnd(), so the shared function
+      // still reads the right one; the local `wasFromProjects` this used to
+      // keep was only ever needed by the inlined copy.
+      scrollRefetch(savedId);
       drawScrollback();
       return true;
     }
@@ -1287,6 +1306,73 @@ void scrollOpenById(const char* id12, const char* title) {
   // callback to place the view.
   if (!scrollPending) scrollY = scrollMaxY();
   drawScrollback();
+}
+
+// ---------- RESUME: a SIGNED headless turn ----------
+// Base64 of an arbitrary buffer. kbBase64() (keyboard.ino) does exactly this
+// over kbText and nothing else - it reads kbLen/kbText directly - and the
+// keyboard has no part in a RESUME typed from the Mac, so this is the same
+// three-bytes-to-four loop over a caller's own buffer rather than a second
+// global's. Lives in THIS file, which is board 2 only: board 1 has no RESUME
+// and must not carry the code for one.
+void resumeBase64(const char* src, int len, char* out, size_t outSize) {
+  int o = 0;
+  for (int i = 0; i < len && o + 4 < (int) outSize; i += 3) {
+    uint32_t v = (uint32_t) (uint8_t) src[i] << 16;
+    if (i + 1 < len) v |= (uint32_t) (uint8_t) src[i + 1] << 8;
+    if (i + 2 < len) v |= (uint8_t) src[i + 2];
+    out[o++] = B64[(v >> 18) & 63];
+    out[o++] = B64[(v >> 12) & 63];
+    out[o++] = (i + 1 < len) ? B64[(v >> 6) & 63] : '=';
+    out[o++] = (i + 2 < len) ? B64[v & 63] : '=';
+  }
+  out[o] = '\0';
+}
+
+// SENDS ONE SIGNED FRAME PER LIVE LINK, each with that Mac's OWN nonce and
+// signed with that Mac's OWN key, addressed to it. Returns how many went out.
+//
+// WHY NOT ONE BROADCAST LINE, which is what the unsigned version sent: a
+// signature is over ONE secret. The device cannot know which paired Mac's disk
+// holds a PROJECTS-opened transcript (scrollOpenById()'s own reasoning - a
+// project inventory is not owned by whichever Mac ticked last), so the unsigned
+// line went to everyone and only the Mac that HAD the transcript acted. Signing
+// keeps exactly that property by sending each Mac its own frame: the one that
+// holds the session verifies and runs, the others verify and find no transcript
+// (host/index.mjs's transcriptPathFor refuses by name), and no Mac is ever
+// handed a signature it cannot check. sendPromptToHost()'s "sign with the
+// session's OWN Mac" rule, applied where the session's Mac is not yet known.
+//
+// EVERY SKIPPED LINK SAYS WHY. From the Mac, a link that was skipped and a link
+// that was never there are indistinguishable, which is the rule this whole
+// command surface is built on.
+int sendResumeSigned(const char* id12, const char* text) {
+  const int len = (int) strlen(text);
+  String sha = sha256Hex16(text);
+  char b64[204];                       // 150 bytes -> 200 chars + NUL
+  resumeBase64(text, len, b64, sizeof(b64));
+  int sent = 0;
+  for (int i = 0; i < MAX_LINKS; i++) {
+    if (!hostLinks[i].used) continue;
+    if (hostLinks[i].resumeNonce[0] == '\0') {
+      Serial.printf("RESUME: link %d (%s) has published no rnonce yet - not sending to it "
+                    "(its host predates signed RESUME, or no tick has arrived from it)\n",
+                    i, hostLinks[i].hostId);
+      continue;
+    }
+    const int slot = pairingSlotForLink(i);
+    String mac = authHmacFor(slot, String(hostLinks[i].resumeNonce) + ":" + id12 + ":RESUME:" + sha);
+    if (mac.length() == 0) {
+      Serial.printf("RESUME: no pairing key for link %d (%s) - not sending to it; an unsigned "
+                    "resume is refused by the host rather than run\n", i, hostLinks[i].hostId);
+      continue;
+    }
+    char line[280];
+    snprintf(line, sizeof(line), "RESUME %s %s %s", id12, b64, mac.c_str());
+    sendLineToHost(line, i);
+    sent++;
+  }
+  return sent;
 }
 
 #endif  // BOARD_HISTORY_SCROLL

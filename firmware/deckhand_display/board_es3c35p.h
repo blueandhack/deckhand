@@ -1386,6 +1386,54 @@ const int SESSION_OVERFLOW_H = 19;
 // more than PROJ_SLOTS items is not silently lost: projects.ino's absorb loop
 // counts and logs whatever did not fit.
 #define PROJ_SLOTS 24
+
+// ---------- The project KEY buffer ----------
+// A project key is Claude Code's own directory name under ~/.claude/projects,
+// which is the project's ABSOLUTE PATH with every "/" (and "." ) turned into
+// "-". Its length is therefore the length of a real filesystem path, not of
+// anything the device or the host chose - nothing caps it, and it is NEVER
+// decoded or shortened, because a key must round-trip to that exact directory
+// or PROJSESS asks for a project that does not exist (host/project-replies.mjs's
+// own header on why even transliteration is refused here).
+//
+// MEASURED ON THIS MAC, 2026-09-21, over the same 16 projects PROJ_SLOTS was
+// sized against: the longest is 80 characters, and FOUR are 64 or longer -
+//   80  -Users-yujia-work-synthropic-agent-ui--claude-worktrees-drop-live-postgres-tests
+//   70  -Users-yujia-work-synthropic-agent-ui--claude-worktrees-v2-rule-deploy
+//   65  -Users-yujia-work-synthropic-agent-ui--claude-worktrees-core-2973
+//   64  -Users-yujia-projects-deckhand--claude-worktrees-session-ranking
+// - so the 64-byte buffer this shipped with truncated a QUARTER of the real
+// inventory at 63 characters. That failure was silent and looked like a
+// different bug entirely: level 1 listed the project correctly (the NAME comes
+// from the cwd inside a transcript, not from the key), the tap sent
+// `PROJSESS <truncated>`, the host's readdir threw, and the empty reply echoed
+// the TRUNCATED key - which matched projOpenKey, passed the staleness strcmp,
+// and painted "No sessions found" over a project whose own row had just said it
+// has N. Nothing named the cause at either end.
+//
+// 128, NOT 96. The worst case is not "80" but "80 plus whatever the next
+// worktree is called": every one of the four long keys above is an ordinary
+// path plus one `--claude-worktrees-<branch-name>` segment, and that segment
+// alone runs 19..45 characters here. 96 leaves 16 characters of margin, which
+// is less than ONE such segment - it would be a buffer sized to today's
+// measurement rather than to the thing that produces it. 128 leaves 47, i.e.
+// room for another full worktree segment on top of the longest path measured,
+// and it is the power of two that costs least to reason about.
+//
+// THE RAM: ProjInfo.key grows 64 -> 128, so projects[PROJ_SLOTS] costs
+// 64 * 24 = 1536 bytes more .bss, plus 64 for projOpenKey - about 1.6KB on a
+// board with ~64KB of static RAM in use and 8MB of PSRAM behind it. Paid in
+// .bss deliberately rather than moved to PSRAM: sessions[] went to PSRAM
+// because it is ~23.5KB, and 1.6KB does not buy the indirection.
+//
+// PROJ_KEY_MEASURED_MAX is a SEPARATE declaration on purpose - the checker
+// asserts PROJ_KEY_MAX >= PROJ_KEY_MEASURED_MAX + PROJ_KEY_HEADROOM against the
+// three as parsed, so shrinking the buffer back fails by name instead of
+// quietly agreeing with itself ("X >= Y where X is declared = Y always holds",
+// CLAUDE.md).
+#define PROJ_KEY_MEASURED_MAX 80
+#define PROJ_KEY_HEADROOM 45
+#define PROJ_KEY_MAX 128
 // T_BODY (16px, Spleen 8x16) + 2*15 padding = 46, and 46 is this board's own
 // TAP_MIN - not merely over it. A project row carries no title, no band, no
 // ask, so nothing about it needs more than one line of name and one of meta,

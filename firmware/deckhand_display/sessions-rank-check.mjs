@@ -92,6 +92,20 @@ eq("asking outranks waiting outranks working, whatever the times",
           S("a", "asking", { since: NOW - 1_000 })], NOW),
    ["a", "r", "w"]);
 
+// A GHOST ROW MUST NEVER TAKE THE HERO CARD. Task 8's "ended" record is written
+// by the hook with a FRESH updated_at, so for its whole grace period it is the
+// most recently touched row in the list - in the default bucket beside "working"
+// it therefore sorted above every session actually doing something. Parsed from
+// urgencyRank(), never transcribed, so deleting that line makes this fail by name
+// rather than leaving the checker agreeing with a rank that no longer exists.
+count++;
+if (!(rankOf("ended") > rankOf("asking") && rankOf("ended") > rankOf("waiting") &&
+      rankOf("ended") > rankOf("working")))
+  fails.push(`urgencyRank must rank "ended" BELOW every live status (parsed ${JSON.stringify(RANKS)})`);
+eq("an ENDED ghost row sorts below a working session, however fresh it is",
+   order([S("ghost", "ended", { actSec: 86_399 }), S("busy", "working", { actSec: 1 })], NOW),
+   ["busy", "ghost"]);
+
 // Unchanged behaviour for the other two ranks.
 eq("two waiting: most RECENT leads (unchanged)",
    order([S("old", "waiting", { actSec: 100 }), S("new", "waiting", { actSec: 900 })], NOW),
