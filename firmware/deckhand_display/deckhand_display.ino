@@ -6382,6 +6382,12 @@ static const UnavailableCommand UNAVAILABLE_COMMANDS[] = {
     "for setPins() to take, SD_MMC.h is not included here, and no FATFS or SDMMC driver is "
     "linked into this binary at all. Probing this slot needs an SPI-mode probe against the SD "
     "library, which is a different command and does not exist yet." },
+  { "SDPERF",
+    "it times writes, reads and an append against the microSD over SDMMC, from a PSRAM source "
+    "buffer, to size the offline-sessions write policy. This board is BOARD_HAS_SD 0 - no SDMMC "
+    "slot is wired, no PIN_SD_* are declared in board_e32r28t.h, and it has no PSRAM to source "
+    "such a buffer from either, so neither half of the measurement exists here. SCROLLPERF is "
+    "the timing instrument this board does have, and it is also absent (BOARD_HISTORY_SCROLL 0)." },
 #endif
   // TERMINATOR, and it is what makes an all-#if'd array legal: on board 2 every
   // block above is skipped and `UnavailableCommand[] = {}` would not compile.
@@ -6656,6 +6662,94 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
       // take begin()'s `if (_card) return true` and report a stale mount.
       SD_MMC.end();
       sendLineToHost(line);
+    }
+  } else if (buf == "SDPERF") {
+    // WHAT THE OFFLINE-SESSIONS DESIGN CANNOT BE WRITTEN WITHOUT. Its write policy
+    // turns entirely on how long a write blocks: the loop here is single-threaded,
+    // so a 300KB transcript flush that costs 400ms is ~12 dropped frames and reads
+    // as a RENDERING bug, not a storage one. Guessing the number would be an
+    // assumption load-bearing for a whole subsystem.
+    //
+    // THE SOURCE BUFFER IS PSRAM, DELIBERATELY, because that is where scrollText
+    // lives. A DRAM-sourced write measures a path the real code never takes and
+    // would flatter it: PSRAM read bandwidth and the DMA constraints on it are part
+    // of the cost this is trying to find. If PSRAM turns out to BE the bottleneck,
+    // the answer is a DRAM staging buffer - and that is a design decision this
+    // measurement exists to inform rather than pre-empt.
+    //
+    // Sizes are the three the design actually writes: a delta append, the session
+    // snapshot (~48KB), and a full transcript text blob (SCROLL_TEXT_BYTES).
+    char line[128];
+    if (!SD_MMC.setPins(PIN_SD_CLK, PIN_SD_CMD, PIN_SD_D0, PIN_SD_D1, PIN_SD_D2, PIN_SD_D3) ||
+        !SD_MMC.begin("/sd", false)) {
+      SD_MMC.end();
+      sendLineToHost("SDPERF failed: could not mount at 4-bit - run SDPROBE for the cause");
+    } else {
+      const size_t SIZES[] = { 2048, 49152, 262144 };
+      uint8_t* src = (uint8_t*) heap_caps_malloc(262144, MALLOC_CAP_SPIRAM);
+      if (!src) {
+        // Named, not silent: a failed allocation and a failed write are
+        // indistinguishable from the Mac otherwise.
+        sendLineToHost("SDPERF failed: could not allocate a 262144-byte PSRAM source buffer");
+      } else {
+        for (size_t i = 0; i < 262144; i++) src[i] = (uint8_t) ('a' + (i % 26));
+        SD_MMC.mkdir("/dh");
+        for (unsigned s = 0; s < sizeof(SIZES) / sizeof(SIZES[0]); s++) {
+          const size_t n = SIZES[s];
+          unsigned long t0 = millis();
+          File f = SD_MMC.open("/dh/perf.tmp", FILE_WRITE);
+          if (!f) { snprintf(line, sizeof(line), "SDPERF write %u B: open failed", (unsigned) n);
+                    sendLineToHost(line); continue; }
+          size_t wrote = f.write(src, n);
+          f.close();                       // close() is what flushes FATFS - time it INSIDE
+          unsigned long wms = millis() - t0;
+          // KB/s computed here rather than on the Mac so the line is readable on the
+          // glass too, and so a zero-millisecond result cannot divide by zero there.
+          snprintf(line, sizeof(line), "SDPERF write %u B in %lu ms (%lu KB/s)%s",
+                   (unsigned) n, wms, wms ? (unsigned long) (n / wms) : 0UL,
+                   wrote == n ? "" : " SHORT WRITE");
+          sendLineToHost(line);
+
+          t0 = millis();
+          f = SD_MMC.open("/dh/perf.tmp", FILE_READ);
+          if (!f) { sendLineToHost("SDPERF read: open failed"); continue; }
+          size_t got = 0;
+          while (got < n) {
+            size_t r = f.read(src + got, n - got);
+            if (!r) break;
+            got += r;
+          }
+          f.close();
+          unsigned long rms = millis() - t0;
+          snprintf(line, sizeof(line), "SDPERF read  %u B in %lu ms (%lu KB/s)%s",
+                   (unsigned) got, rms, rms ? (unsigned long) (got / rms) : 0UL,
+                   got == n ? "" : " SHORT READ");
+          sendLineToHost(line);
+        }
+        // THE APPEND IS THE ONE THE DESIGN LEANS ON HARDEST - every transcript delta
+        // is one of these, and if an append costs the same as a rewrite then the
+        // whole hybrid argument collapses back into the snapshot policy it rejected.
+        unsigned long t0 = millis();
+        File f = SD_MMC.open("/dh/perf.tmp", FILE_APPEND);
+        if (f) { f.write(src, 2048); f.close(); }
+        snprintf(line, sizeof(line), "SDPERF append 2048 B to 262144 B file in %lu ms",
+                 millis() - t0);
+        sendLineToHost(line);
+
+        // Open+close with no payload, so the per-call floor is separable from the
+        // per-byte cost rather than being smeared through every number above.
+        t0 = millis();
+        f = SD_MMC.open("/dh/perf2.tmp", FILE_WRITE);
+        if (f) f.close();
+        snprintf(line, sizeof(line), "SDPERF open+close empty in %lu ms", millis() - t0);
+        sendLineToHost(line);
+
+        SD_MMC.remove("/dh/perf.tmp");
+        SD_MMC.remove("/dh/perf2.tmp");
+        heap_caps_free(src);
+        sendLineToHost("SDPERF done (temp files removed)");
+      }
+      SD_MMC.end();
     }
 #endif
 #if !BOARD_USES_TFT_ESPI
