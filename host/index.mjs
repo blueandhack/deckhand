@@ -15,7 +15,8 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import os from "node:os";
 import fs from "node:fs/promises";
-import { createWriteStream, renameSync, statSync, appendFileSync, readFileSync, writeFileSync, mkdirSync, existsSync, realpathSync } from "node:fs";
+import { createWriteStream, createReadStream, renameSync, statSync, appendFileSync, readFileSync, writeFileSync, mkdirSync, existsSync, realpathSync } from "node:fs";
+import readline from "node:readline";
 import crypto from "node:crypto";
 import { SerialPort } from "serialport";
 import noble from "@abandonware/noble";
@@ -26,6 +27,7 @@ import {
 } from "./voice-answer.mjs";
 import { resolveSessionId } from "./session-lookup.mjs";
 import { pickTranscript } from "./project-index.mjs";
+import { makeProjectReplies } from "./project-replies.mjs";
 import { postToSessionInbox } from "./session-inbox.mjs";
 import { verifyPrompt, verifyTypedAnswer } from "./typed-answer.mjs";
 import { macTag } from "./host-tag.mjs";
@@ -1713,6 +1715,46 @@ async function transcriptPathFor(id12) {
   }
   return null;
 }
+
+// The real, fs-backed reader for host/project-replies.mjs's PROJECTS and
+// PROJSESS builders - host/project-replies-check.mjs wires fakes instead, so
+// this is the only place any of these five functions touch a real file.
+// headLines() streams rather than reading the whole file, because the SAME
+// reader is also used (with a very large `n`) by sessionInfo() below to count
+// a transcript's lines - some of these are multi-megabyte, and loading one
+// whole into a string just to keep the first 40 lines of it would be exactly
+// the "read the whole file to find one field" cost project-index.mjs's own
+// header rejects.
+async function headLines(dir, file, n) {
+  const out = [];
+  try {
+    const rl = readline.createInterface({
+      input: createReadStream(path.join(PROJECTS_DIR, dir, file)),
+      crlfDelay: Infinity,
+    });
+    for await (const line of rl) {
+      out.push(line);
+      if (out.length >= n) { rl.close(); break; }
+    }
+  } catch { /* missing/unreadable file - whatever was collected stands */ }
+  return out;
+}
+// Title comes straight from transcriptInfo() - the existing 64KB-tail read -
+// rather than a second parser here; turn count is the one piece nothing
+// upstream computes, so it is counted from the same streamed lines.
+async function sessionInfo(dir, file) {
+  const tx = await transcriptInfo(path.join(PROJECTS_DIR, dir, file));
+  const lines = await headLines(dir, file, Number.MAX_SAFE_INTEGER);
+  return { title: tx.title, turns: lines.filter((l) => l.trim().length > 0).length };
+}
+const { buildProjectsReply, buildProjSessReply, countInventory } = makeProjectReplies({
+  listDirs: () => fs.readdir(PROJECTS_DIR),
+  listFiles: (dir) => fs.readdir(path.join(PROJECTS_DIR, dir)),
+  statMs: async (dir, file) => (await fs.stat(path.join(PROJECTS_DIR, dir, file))).mtimeMs,
+  headLines,
+  sessionInfo,
+});
+
 // id -> { mtimeMs, items } so a transcript is parsed once per version, not once per page
 // turn. Paging through 300 screens must not re-read a megabyte each time.
 // BOUNDED, because a parsed transcript is big: a real one is 2500 entries / ~600KB of
@@ -2487,11 +2529,16 @@ async function readUsage() {
   // supplies only the three token counts, so rejecting as a unit is what let
   // one 20s timeout throw away the hero percentages, the session list and the
   // clock, publish nothing, and freeze the menu bar on the previous reading.
-  const [blocksResp, weeklyResp, rateLimits, sessions] = await Promise.all([
+  // countInventory() is readdir-only (no stat, no content read - see
+  // host/project-replies.mjs) so it is cheap enough to sit on this list too.
+  // The full project listing and a project's own session list are NOT built
+  // here, deliberately - see the note beside hostSecondsSinceMidnight below.
+  const [blocksResp, weeklyResp, rateLimits, sessions, projectInventory] = await Promise.all([
     tryCcusage(["blocks", "--active"]),
     tryCcusage(["weekly"]),
     readRateLimits(),
     readSessions(),
+    countInventory(),
   ]);
 
   const activeBlock = blocksResp?.blocks?.find((b) => b.isActive);
@@ -2560,6 +2607,17 @@ async function readUsage() {
     sessions: sessions.list,
     sessionsTotal: sessions.total,
     hiddenAsking: sessions.hiddenAsking,
+    // How many projects exist and how many transcripts they hold in total -
+    // readdir-cheap counters, not the listing itself. The full project
+    // listing, and any one project's own session list, are BOTH deliberately
+    // absent from this payload: 132 sessions at ~150 bytes is ~20KB every 5s
+    // against a link measured at 6.6 KB/s - three seconds of radio every
+    // five, for a screen that is usually closed. Those two ship ON DEMAND
+    // only, once something on the device asks for them (see the reply
+    // builders host/project-replies.mjs exports, wired in further up this
+    // file).
+    projectCount: projectInventory.projectCount,
+    sessionTotal: projectInventory.sessionTotal,
     // Seconds since local midnight, so the device can render a live clock
     // without needing to know the timezone - it just ticks this forward
     // with millis() between updates and re-syncs on every poll.
