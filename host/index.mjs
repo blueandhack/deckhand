@@ -284,10 +284,31 @@ const OAUTH_429_BACKOFF_MS = 15 * 60_000;
 const OAUTH_CACHE_FILE = path.join(RUNTIME_DIR, "oauth-usage.json");
 
 // Written by ~/.claude/deckhand-session-hook.mjs (registered for SessionStart,
-// UserPromptSubmit, Stop, SessionEnd). One file per session_id; deleted on
-// SessionEnd. This is what powers the SESSIONS tab.
+// UserPromptSubmit, Stop, SessionEnd). One file per session_id; MARKED ENDED
+// (status: "ended"), not deleted, on SessionEnd - see the hook for why. This is
+// what powers the SESSIONS tab.
 const SESSIONS_DIR = path.join(os.homedir(), ".claude", "deckhand-sessions");
 const SESSION_STALE_MS = 20 * 60 * 1000; // 20 min with no update = treat as dead
+// How long an ENDED record survives before this host deletes its file, which is
+// what makes the device's ghost row eventually retire. A deliberate "it ended"
+// signal is unambiguous - unlike SESSION_STALE_MS above, which is a GUESS at a
+// terminal that closed without ever telling us - so this grace period answers a
+// different question and can be far shorter: not "how long before we give up
+// waiting for a heartbeat" but "how long should a session that we KNOW is gone
+// stay visible so a person glancing at the device sees where it went".
+//
+// TWO MINUTES. Short enough that the SESSIONS tab (five rows, or one expanded
+// card - the measured normal case) does not fill up with corpses: at the 5s tick
+// this host runs, a handful of sessions ending in the same couple of minutes is
+// already an unusual burst, and anything older than that is exactly what the
+// new PROJECTS tab (Tasks 5-7) and the floating count line below the list
+// (sessions.ino's countLineY()) exist to answer instead - "ended Nm ago" on the
+// glass is a notice, not an archive. Long enough that it survives at least one
+// missed tick without disappearing before anyone saw it, and that a duration
+// past the first minute ("1m ago") is legible before it's retired - a session
+// that goes stale in under a minute would spend its entire visible life saying
+// "0s ago" through "59s ago" and retire as those digits are still changing.
+const SESSION_ENDED_GRACE_MS = 2 * 60 * 1000;
 // Every transcript ever written, live or long ended - the fallback transcriptPathFor
 // scans when a session isn't in the live map.
 const PROJECTS_DIR = path.join(os.homedir(), ".claude", "projects");
@@ -2371,7 +2392,18 @@ async function readSessions() {
     const filePath = path.join(SESSIONS_DIR, file);
     try {
       const record = JSON.parse(await fs.readFile(filePath, "utf8"));
-      if (Date.now() - record.updated_at > SESSION_STALE_MS) {
+      // ENDED IS A DELIBERATE SIGNAL, checked before the general staleness guard
+      // and on its own, shorter clock (SESSION_ENDED_GRACE_MS) - see its
+      // definition for why the two questions differ. `ended_at` falls back to
+      // `updated_at` for a record written before this field existed (an older
+      // hook, or one that raced a host restart); both are set together by the
+      // hook today, so that fallback is only ever exercised by old data.
+      if (record.status === "ended") {
+        if (Date.now() - (record.ended_at ?? record.updated_at) > SESSION_ENDED_GRACE_MS) {
+          await fs.rm(filePath, { force: true }); // ghost row's grace period is over
+          continue;
+        }
+      } else if (Date.now() - record.updated_at > SESSION_STALE_MS) {
         await fs.rm(filePath, { force: true }); // terminal likely closed without SessionEnd
         continue;
       }

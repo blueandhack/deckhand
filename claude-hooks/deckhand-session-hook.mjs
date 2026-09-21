@@ -645,7 +645,36 @@ try {
       const filePath = path.join(SESSIONS_DIR, `${sessionId}.json`);
 
       if (data.hook_event_name === "SessionEnd") {
-        fs.rmSync(filePath, { force: true });
+        // MARK ENDED, DO NOT DELETE. Deleting here is the ORIGINAL bug this whole
+        // feature answers: the record died the instant the session did, so 131 of
+        // 132 conversations this Mac has ever run simply vanished from the device
+        // with nothing saying where they went. Leaving the file lets the SESSIONS
+        // tab show a brief "ended Nm ago" ghost row instead - see
+        // firmware/deckhand_display/sessions.ino - and host/index.mjs
+        // (SESSION_ENDED_GRACE_MS) is what deletes the file once the grace period
+        // passes, so this hook's only job is to stop pretending the session is
+        // still live.
+        //
+        // `ask` is dropped: a prompt cannot be answered from a session that no
+        // longer exists, and carrying it forward would leave a stale question on
+        // the ghost row. Everything else (name, model, transcript, ...) is kept as
+        // a MERGE onto whatever is already there, the same pattern every other
+        // event in this file uses - a session that never got another event before
+        // ending (killed within its first turn) still gets a minimal ended record
+        // rather than none at all.
+        let existing = {};
+        try {
+          existing = JSON.parse(fs.readFileSync(filePath, "utf8"));
+        } catch {
+          // no existing record - still write a minimal ended stub
+        }
+        delete existing.ask;
+        writeRecord(filePath, {
+          ...existing,
+          status: "ended",
+          ended_at: Date.now(),
+          updated_at: Date.now(),
+        });
         return;
       }
 

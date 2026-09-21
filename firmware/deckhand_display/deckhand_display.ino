@@ -877,6 +877,12 @@ struct HostLink {
   bool  remoteAnswer = true;
   int   sessionsTotal = 0;
   int   hiddenAsking = 0;
+  // Task 8: EVERY session this Mac has ever run, live or ended (doc["sessionTotal"],
+  // Task 3's PROJECTS inventory total) - NOT sessionsTotal above, which is this
+  // tab's own live-list overflow count. Summed across links the same way, into
+  // the bare global below, so the SESSIONS tab's floating count line counts every
+  // Mac this device is paired with.
+  int   sessionTotalAll = 0;
   Usage usage;
   // Host-LIFETIME counter, so it restarts at 1 when that host process does.
   // It MUST be per-link: shared as one high-water mark, two independent
@@ -1019,6 +1025,28 @@ inline void uiFillRound(int x, int y, int w, int h, int r, uint16_t fill, uint16
 inline void uiStrokeRound(int x, int y, int w, int h, int r, int thickness,
                           uint16_t stroke, uint16_t behind) {
   tft.drawSmoothRoundRect(x, y, r, r - thickness + 1, w, h, stroke, behind);
+}
+// Task 8: a DASHED rectangle, for a card that is going away rather than merely
+// sitting there - the SESSIONS tab's ended-session ghost row. Ignores the corner
+// radius the card's own fill was drawn with (four straight dashed edges over a
+// rounded fill) rather than mitring dashes around an arc: this border is on
+// screen for at most SESSION_ENDED_GRACE_MS (host/index.mjs), and nobody has
+// asked whether its corners are exactly as round as a live row's in that time.
+// drawFastHLine/drawFastVLine, not a generic line primitive: both boards
+// implement them directly (TFT_eSPI natively, PanelShim in panel_shim.cpp), so
+// this needs no board-specific arm.
+inline void uiStrokeDashed(int x, int y, int w, int h, uint16_t stroke) {
+  const int dash = 4, gap = 3, step = dash + gap;
+  for (int px = 0; px < w; px += step) {
+    int len = min(dash, w - px);
+    tft.drawFastHLine(x + px, y, len, stroke);
+    tft.drawFastHLine(x + px, y + h - 1, len, stroke);
+  }
+  for (int py = 0; py < h; py += step) {
+    int len = min(dash, h - py);
+    tft.drawFastVLine(x, y + py, len, stroke);
+    tft.drawFastVLine(x + w - 1, y + py, len, stroke);
+  }
 }
 // Circular ring, same idea: a full 0-360 arc with an outer and inner radius is
 // one even annulus, where drawCircle(r) + drawCircle(r-1) is not.
@@ -1446,6 +1474,11 @@ int sessionCount = 0;
 // working, then recency); these say what it had to leave out.
 int sessionsTotal = 0;
 int hiddenAskingCount = 0;
+// Task 8: the SUM of every hostLink's sessionTotalAll above - every session this
+// device's Mac(s) have ever run, live or ended. Compared against sessionCount (the
+// rows actually on screen, not sessionsTotal's own live-overflow count) to decide
+// whether the SESSIONS tab's floating count line is drawn at all.
+int sessionTotalAll = 0;
 
 // ---------- Projects tab (board 2 only; see projects.ino) ----------
 // The struct lives here rather than in projects.ino because handleLine()'s
@@ -1591,6 +1624,10 @@ const int SESSION_SIG_MARGIN = 64;
 char rowSigCache[SESSION_SLOTS][SESSION_ROW_SIG_LEN]; // sized per board - see the header
 char rowDurCache[SESSION_SLOTS][8];
 char overflowCache[32] = "";
+// Task 8: the floating "N more in PROJECTS" line - same drawIfChanged pattern as
+// overflowCache above (change-only text at a change-only y), sized the same way:
+// "%d more in PROJECTS" padded to 26 plus room for a 4-digit count and the NUL.
+char countLineCache[32] = "";
 int rowCountCache = -1; // layout code: sessionCount*2 + overflow-strip flag
 
 // Session detail screen (tap a row in the SESSIONS list to open it).
@@ -2309,20 +2346,33 @@ bool drawIfChanged(char* cache, size_t cacheSize, const char* text, int x, int y
 }
 
 
-// Three states a session can be in, from ~/.claude/deckhand-session-hook.mjs:
+// Four states a session can be in, from ~/.claude/deckhand-session-hook.mjs:
 //   "working" - actively processing a turn
 //   "asking"  - paused for your input (permission prompt, AskUserQuestion,
 //               ExitPlanMode) or an idle nudge
+//   "ended"   - the session is over (SessionEnd marks the record rather than
+//               deleting it - see the hook - so a ghost row can say where a
+//               session went instead of it just vanishing). Task 8.
 //   anything else ("waiting") - turn finished, waiting for your next message
 uint16_t colorForStatus(const char* status) {
   if (strcmp(status, "working") == 0) return COLOR_WARN;
   if (strcmp(status, "asking") == 0) return COLOR_BAD;
+  // NEITHER a live colour nor COLOR_LABEL's plain grey: COLOR_UNKNOWN is the
+  // palette's own "no data yet / stale" colour, and a session that ended is
+  // exactly that - stale by definition, not merely quiet the way "waiting" is.
+  // Every reader of this function (the dot, the spine, the band fill, the
+  // outlined pill) gets the grey-and-dashed ghost look for free from this one
+  // branch; only drawStatusDot's board-2 mark needs its own copy, because that
+  // one path draws COLOR_LABEL for every non-working status without calling
+  // this function at all.
+  if (strcmp(status, "ended") == 0) return COLOR_UNKNOWN;
   return COLOR_GOOD;
 }
 
 const char* labelForStatus(const char* status) {
   if (strcmp(status, "working") == 0) return "working";
   if (strcmp(status, "asking") == 0) return "needs your input";
+  if (strcmp(status, "ended") == 0) return "ended";
   return "waiting for you";
 }
 // THE SAME THREE STATES IN THE SHORT FORM - the words a tall row's status pill
@@ -2339,6 +2389,7 @@ const char* labelForStatus(const char* status) {
 const char* shortLabelForStatus(const char* status) {
   if (strcmp(status, "working") == 0) return "WORKING";
   if (strcmp(status, "asking") == 0) return "NEEDS INPUT";
+  if (strcmp(status, "ended") == 0) return "ENDED";
   return "READY";
 }
 
@@ -2681,8 +2732,15 @@ void drawStatusDot(int cx, int cy, int r, const char* status, uint16_t bg = COLO
   // so the indicator does not jump sideways when a session changes status, and so
   // the checker's blit-clearance model still describes what is drawn.
   const bool working = strcmp(status, "working") == 0;
-  drawAgentMark(cx - SPARK_SIZE / 2, cy - SPARK_SIZE / 2, codex,
-                working ? colorForStatus(status) : COLOR_LABEL, bg, working);
+  // Task 8: THE ONE EXPLICIT FORCE. Every other non-working status shares
+  // COLOR_LABEL here on purpose (colour is not the carrier at the indicator - see
+  // above), but "ended" has to be told apart from "waiting" even though neither
+  // is working, so it is checked before falling into that shared grey rather than
+  // routed through colorForStatus() the way the working branch is.
+  const bool ended = strcmp(status, "ended") == 0;
+  const uint16_t markColor =
+      working ? colorForStatus(status) : (ended ? COLOR_UNKNOWN : COLOR_LABEL);
+  drawAgentMark(cx - SPARK_SIZE / 2, cy - SPARK_SIZE / 2, codex, markColor, bg, working);
   (void) r;   // the shape vocabulary's radius; board 2 draws a fixed-size mark
 #endif
 }
@@ -5434,13 +5492,18 @@ void handleLine(const String& line) {
   if (curLink >= 0) {
     hostLinks[curLink].sessionsTotal = doc["sessionsTotal"] | 0;
     hostLinks[curLink].hiddenAsking = doc["hiddenAsking"] | 0;
+    // Task 3's field, first actually READ here: every session this link's Mac has
+    // ever run (live or ended), for the SESSIONS tab's floating count line below.
+    hostLinks[curLink].sessionTotalAll = doc["sessionTotal"] | 0;
   }
   sessionsTotal = 0;
   hiddenAskingCount = 0;
+  sessionTotalAll = 0;
   for (int i = 0; i < MAX_LINKS; i++) {
     if (!hostLinks[i].used) continue;
     sessionsTotal += hostLinks[i].sessionsTotal;
     hiddenAskingCount += hostLinks[i].hiddenAsking;
+    sessionTotalAll += hostLinks[i].sessionTotalAll;
   }
   if (newlyAsking) {
     Serial.println("BEEP: session newly asking");
