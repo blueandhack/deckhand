@@ -148,6 +148,29 @@ void tickProjectsFetch() {
   if (currentTab == TAB_PROJECTS) renderProjectsTab();
 }
 
+// IS THE FAILED STATE ON THE GLASS RIGHT NOW, THE ONE A TAP CAN RETRY?
+// scrollDeadEnd()'s own shape (scrollback.ino) - "ONE predicate, read by the
+// draw site and the hit test both: a control drawn under one condition and
+// hit-tested under another is this codebase's classic defect" - extracted
+// here for the identical reason, after a review caught the two sites
+// spelling the same two-variable condition independently: they agreed
+// today, and a comment claiming they were already "the same predicate"
+// when no such function existed was worse than the duplication it
+// described, because the next edit to either copy would have had nothing
+// forcing the other to follow.
+//
+// NARROWER THAN scrollDeadEnd() ON PURPOSE - not a full port of its shape.
+// scrollDeadEnd() also treats a genuinely EMPTY transcript (scrollCount ==
+// 0) as a dead end, because there is nothing else that screen could offer
+// instead of a retry. PROJ_STATE_EMPTY ("No projects found") is not a
+// failure to recover from - it is an accurate report - so a tap there does
+// nothing rather than re-fetching an inventory that was already answered
+// correctly. Only PROJ_STATE_FAILED is retriable, which is exactly what
+// this predicate says and nothing more.
+bool projFetchFailed() {
+  return projectsFetchFailed && !projectsPending;
+}
+
 // ---------- Scrolling (board 2's only shape at this level - see the header
 // note on board_es3c35p.h's PROJ_* block) ----------
 bool projScrollActive() { return projectCount > PROJ_ROWS; }
@@ -312,9 +335,12 @@ void renderProjectsTab() {
   // would flicker the same text every second - and drawIfChanged below is
   // what keeps that call nearly free once the state itself has settled.
   if (!projectsEverReceived || projectCount == 0) {
+    // projFetchFailed() rather than the raw `projectsFetchFailed` flag - the
+    // SAME predicate handleProjectsTouch() reads below, so a tap is offered
+    // exactly when, and only when, this branch drew a state it can retry.
     const int state = projectsPending  ? PROJ_STATE_PENDING
-                     : projectsFetchFailed ? PROJ_STATE_FAILED
-                                            : PROJ_STATE_EMPTY;
+                     : projFetchFailed() ? PROJ_STATE_FAILED
+                                          : PROJ_STATE_EMPTY;
     if (projRowCountCache != state) {
       tft.fillRect(0, CONTENT_Y, tft.width(), contentBottom() - CONTENT_Y, COLOR_BG);
       for (int i = 0; i < PROJ_SLOTS; i++) projRowSigCache[i][0] = '\0';
@@ -392,16 +418,18 @@ void handleProjectsTouch(int sx, int sy) {
 #if BOARD_HAS_PROJECTS
   // Nothing to touch before the first reply, or with a genuinely empty
   // inventory - EXCEPT the failed state's own escape: a tap anywhere retries,
-  // since the screen has nothing else on it to hit-test against. The SAME
-  // predicate renderProjectsTab() draws by (scrollDeadEnd()'s own precedent:
-  // "one predicate, read by the draw site and the hit test both"), so a
-  // retry is offered exactly when, and only when, the glass says one is.
-  // Guarded on !projectsPending so a tap during the brief window between a
-  // fresh send and its own pending flag settling cannot fire twice - though
+  // since the screen has nothing else on it to hit-test against.
+  // projFetchFailed() is CALLED here, not re-derived - the actual shared
+  // function renderProjectsTab() reads to choose that same state, so a
+  // retry is offered exactly when, and only when, the glass says one is
+  // (scrollDeadEnd()'s own precedent: "one predicate, read by the draw site
+  // and the hit test both"). Its own `!projectsPending` term is what makes
+  // a tap during the brief window between a fresh send and the pending flag
+  // settling a no-op here rather than a second request - though
   // requestProjects()'s own busy-guard would catch that anyway, belt and
-  // braces costs nothing here.
+  // braces costs nothing.
   if (!projectsEverReceived || projectCount == 0) {
-    if (projectsFetchFailed && !projectsPending) {
+    if (projFetchFailed()) {
       requestProjects();
       renderProjectsTab(); // immediate feedback - "Loading..." without a 1s wait for the next tick
     }

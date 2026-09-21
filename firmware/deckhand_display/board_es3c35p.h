@@ -1440,18 +1440,41 @@ const int PROJ_META_W = 88;
 
 // A STALLED FETCH MUST SAY SO rather than leaving "Loading projects..." on
 // the glass forever - SCROLL_FETCH_TIMEOUT_MS/_BLE_MS's own reasoning
-// (scrollback.ino's requestScrollback()/tickScrollFetch()), mirrored here
-// rather than reinvented: two figures for the same reason (BLE's 20-byte
-// notifies are a slower, less reliable pipe than USB, so BLE gets the
-// longer allowance), and the same numbers, because this fetch has never
-// been measured slower than the transcript one - if anything it should be
-// faster (the design's own projection: ~175ms for 16 projects, one wire
-// chunk, against the transcript's own multi-chunk fetches). Read by
+// (scrollback.ino's requestScrollback()/tickScrollFetch()). Read by
 // tickProjectsFetch() (projects.ino), called from loop() beside
 // tickScrollFetch(), under the identical `if (!pending) return;` guard so a
 // fetch that is not outstanding costs nothing per tick.
-const int PROJ_FETCH_TIMEOUT_MS     = 20000;
-const int PROJ_FETCH_TIMEOUT_BLE_MS = 40000;
+//
+// THE NUMBERS THEMSELVES ARE NOT SCROLL_FETCH_TIMEOUT_MS/_BLE_MS, and a
+// first version of this that simply copied them (20000/40000) was wrong,
+// caught in review rather than by any checker here. Those two are tuned for
+// a MULTI-CHUNK transcript fetch that pays a ~130ms ACK round-trip PER
+// CHUNK - a 20-entry transcript can be eight or more chunks, and 20s/40s is
+// sized for that shape of request. This one is a single chunk: the design's
+// own projection is ~175ms for 16 projects
+// (docs/superpowers/specs/2026-09-20-sessions-manager-design.md), and even a
+// degraded 2.7 KB/s BLE link (scrollback.ino's own worst-case measurement,
+// before MTU negotiation) delivers the whole ~1.1KB reply in well under a
+// second. A cap sized for the WRONG shape of request undoes most of the
+// point of having one at all: this fix exists because a too-long wait is
+// exactly the experience it was written to abolish, and inheriting
+// SCROLL's numbers would have left up to 40 real seconds of "Loading
+// projects..." on a link that would in practice have answered in one.
+//
+// 8000/12000 - 45x and 68x the measured single-chunk fetch - so normal
+// variance (a busier Mac, a slightly slower poll) will not false-fail this,
+// while a genuinely wedged host is still reported in single-digit seconds
+// rather than tens of them. THE ASYMMETRY IS WHY THIS SIDE IS THE ONE TO
+// ERR ON: a cap that is too SHORT costs one extra tap on a state that is
+// already named and already recoverable (tap to retry); a cap that is too
+// LONG costs real, silent seconds of exactly the stuck-forever feeling this
+// whole mechanism exists to prevent. If a slow Mac is ever measured
+// false-failing this in practice, raise PROJ_FETCH_TIMEOUT_BLE_MS first (it
+// is the more exposed transport) with the measurement that justified it in
+// the same commit - do not restore SCROLL's numbers, which were never
+// measured against THIS request's shape in the first place.
+const int PROJ_FETCH_TIMEOUT_MS     = 8000;
+const int PROJ_FETCH_TIMEOUT_BLE_MS = 12000;
 
 // ---------- §3 THE STATUS BAND ----------
 // The card head becomes a FILLED BAND in the status colour. Filled bands are new

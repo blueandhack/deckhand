@@ -203,14 +203,26 @@ function main() {
     // Fix round 1: BLE's own timeout dropped to (incorrectly) equal USB's -
     // proves the relational assertion actually compares the two rather than
     // merely checking each is positive, which any real declared value would
-    // pass regardless of which board's own number it was.
+    // pass regardless of which board's own number it was. DERIVED from the
+    // real parsed PROJ_FETCH_TIMEOUT_MS (a function, not a literal object
+    // like the two faults above) rather than a transcribed number: fix
+    // round 2 lowered PROJ_FETCH_TIMEOUT_MS from 20000 to 8000, and a fault
+    // still reading "20000" here would have gone on "passing" - i.e. NOT
+    // triggering the assertion at all, a MISSED result this checker itself
+    // caught the moment the header changed underneath it. This is exactly
+    // "a checker must parse the constant it certifies, never transcribe it"
+    // (CLAUDE.md), applied to the fault's own target value, not only to the
+    // assertion being tested.
     ["PROJ_FETCH_TIMEOUT_BLE_MS dropped to equal PROJ_FETCH_TIMEOUT_MS",
-      { PROJ_FETCH_TIMEOUT_BLE_MS: 20000 }, "PROJECTS' BLE fetch timeout is longer than its USB one"],
+      (c) => ({ PROJ_FETCH_TIMEOUT_BLE_MS: c.PROJ_FETCH_TIMEOUT_MS }),
+      "PROJECTS' BLE fetch timeout is longer than its USB one"],
   ];
   const projSrc = loadProjSrc();
   for (const [label, override, want] of constFaults) {
     console.log(`selftest: ${label}`);
-    const c = { ...loadConsts(), ...override };
+    const base = loadConsts();
+    const applied = typeof override === "function" ? override(base) : override;
+    const c = { ...base, ...applied };
     const fails = checkAll(c, projSrc);
     if (fails.includes(want)) {
       console.log(`  caught  ${want}`);
