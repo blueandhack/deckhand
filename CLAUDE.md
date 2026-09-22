@@ -53,7 +53,7 @@ panel, which reads as a layout bug rather than a build mistake.
 | mic / beeper | both fitted and working | both work, via the ES8311 |
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64 |
-| size today | flash 1425680, RAM 72100 | flash 1160032, RAM 65500 |
+| size today | flash 1425680, RAM 72100 | flash 1160512, RAM 65532 |
 
 **FOUR of the six numbers this file quotes about the binaries are BOUND and two are not.**
 `node firmware/board-baseline.mjs --doc-check` asserts the two **hashes** and the two **sizes**
@@ -97,7 +97,15 @@ signed `RESUME` is HMAC'd against, plus one `bool`. Board 1 took none of it: the
 behind `#if BOARD_HAS_PROJECTS` and the nonce behind `#if BOARD_HISTORY_SCROLL`, both `0` there -
 its RAM is byte-identical across that change, measured, and its flash fell 192 bytes (`.flash.text`
 1,006,932 -> 1,006,764) because the SESSIONS count line ("N more in PROJECTS") now folds away on a
-board with no PROJECTS tab to point at. `arduino-cli`'s
+board with no PROJECTS tab to point at. It then **rose 32 bytes on 2026-09-21** (the PROJECTS
+scroll rail, SESSIONS' own `drawSessionRail()` mirrored onto both PROJECTS levels): level 1's
+`drawProjRail()` carries a three-int cache tuple (`projRailYCache`/`H`/`CountCache` - no `total`
+term, unlike SESSIONS, because a PROJECTS reply past `PROJ_SLOTS` is counted and logged rather
+than shown as its own overflow strip) and level 2's `drawPSessRail()` carries the full four
+(`psessRailYCache`/`H`/`CountCache`/`TotalCache`, `psessTotal` able to exceed `psessCount` the same
+way `sessionsTotal` can) - seven `int`s total, 28 bytes, rounded to 32 by alignment. Board 1 took
+none of it - the rail sits behind the same `#if BOARD_HAS_PROJECTS` boundary as everything else in
+`projects.ino`, and its own binary measured byte-identical across this change. `arduino-cli`'s
 "Sketch uses N" is a
 slightly smaller number than the `.bin` - the same image without its trailing padding - so do
 not expect the compile summary to print these.
@@ -160,7 +168,7 @@ arduino-cli compile --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app" \
 node firmware/board-baseline.mjs /tmp/b1/deckhand_display.ino.bin --check 1
 ```
 
-Today: `326a36e3d8dd9189...`, size 1425680 (board 2: `5f681b9f0417074a...`, size 1160032).
+Today: `326a36e3d8dd9189...`, size 1425680 (board 2: `ce6e6bdf9511c041...`, size 1160512).
 
 It compares **BYTES, not sizes**, and that matters: a default argument on a shared function
 once changed board 1's codegen with **no size change whatsoever** - invisible to a size

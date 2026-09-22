@@ -136,6 +136,25 @@ function checkAll(c, projSrc, mainSrc) {
     c.PROJ_SLOTS >= 16,
     `${c.PROJ_SLOTS} < 16`);
 
+  // ---- the rail (both levels reuse these three - board_es3c35p.h's own
+  // note beside PROJ_RAIL_X: PSESS_ROW_X/W alias PROJ_ROW_X/W, so one rail
+  // geometry serves both lists rather than a second that could drift) ----
+  assert(fails, "the rail does not overlap the rows",
+    c.PROJ_RAIL_X >= c.PROJ_ROW_X + c.PROJ_ROW_W,
+    `PROJ_RAIL_X(${c.PROJ_RAIL_X}) < PROJ_ROW_X(${c.PROJ_ROW_X}) + PROJ_ROW_W(${c.PROJ_ROW_W}) = ` +
+    `${c.PROJ_ROW_X + c.PROJ_ROW_W} - the rail would be drawn on top of a row's own right edge`);
+
+  assert(fails, "the rail fits on the panel",
+    c.PROJ_RAIL_X + c.PROJ_RAIL_W <= c.BOARD_W,
+    `PROJ_RAIL_X(${c.PROJ_RAIL_X}) + PROJ_RAIL_W(${c.PROJ_RAIL_W}) = ` +
+    `${c.PROJ_RAIL_X + c.PROJ_RAIL_W} > BOARD_W(${c.BOARD_W}) - the rail would be drawn ` +
+    `off the right edge of the panel`);
+
+  assert(fails, "the rail's thumb has a stated minimum",
+    c.PROJ_RAIL_MIN_THUMB > 0,
+    `PROJ_RAIL_MIN_THUMB(${c.PROJ_RAIL_MIN_THUMB}) is not a positive floor - a very long list ` +
+    `would shrink the thumb to nothing, which is ungrabbable rather than merely small`);
+
   // The three narrower checks the long header note above promises: each
   // binds one of the header's OWN derivations to the primitive terms it is
   // supposed to be built from, independently of the fault-injection path
@@ -490,6 +509,19 @@ function main() {
     ["PROJ_FETCH_TIMEOUT_BLE_MS dropped to equal PROJ_FETCH_TIMEOUT_MS",
       (c) => ({ PROJ_FETCH_TIMEOUT_BLE_MS: c.PROJ_FETCH_TIMEOUT_MS }),
       "PROJECTS' BLE fetch timeout is longer than its USB one"],
+    // The rail's own three faults. DERIVED from the parsed row geometry
+    // rather than a transcribed offset - the same "a checker must parse the
+    // constant it certifies" reasoning the BLE-timeout fault above states at
+    // length, applied to the rail's own overlap boundary instead of to a
+    // duration.
+    ["PROJ_RAIL_X pulled back onto the rows themselves",
+      (c) => ({ PROJ_RAIL_X: c.PROJ_ROW_X + c.PROJ_ROW_W - 1 }),
+      "the rail does not overlap the rows"],
+    ["PROJ_RAIL_X pushed past the panel's right edge",
+      (c) => ({ PROJ_RAIL_X: c.BOARD_W - c.PROJ_RAIL_W + 1 }),
+      "the rail fits on the panel"],
+    ["PROJ_RAIL_MIN_THUMB dropped to zero (no floor at all)",
+      { PROJ_RAIL_MIN_THUMB: 0 }, "the rail's thumb has a stated minimum"],
     // Task 6: the SAME two shapes, over PSESS_ROW_H - proves level 2's own
     // footer/fingertip checks have real teeth, independently of level 1's.
     ["PSESS_ROW_H bumped to 60 (a taller row than PSESS_ROWS was sized for)",

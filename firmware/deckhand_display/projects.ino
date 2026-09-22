@@ -342,6 +342,38 @@ void projScrollTo(int px) {
   projScroll = v;
 }
 
+// ---------- Level 1's rail - drawSessionRail()'s own shape (sessions.ino),
+// mirrored rather than reinvented. FOUR CACHED VALUES there because a session
+// row can move without any of its own drawn fields changing (a scroll step)
+// AND the rail can be wiped by a full clear that leaves the thumb's own y/h
+// unchanged (sessions.ino's own header note on why the naive two-value cache
+// has a hole); this level only needs Y/H/COUNT - there is no separate "total"
+// term the way sessionsTotal exceeds sessionCount (a reply past PROJ_SLOTS is
+// counted and logged, never shown as its own overflow strip - see
+// projectsPending's header note), so projectCount alone is what a fresh
+// reply can change that Y/H might not.
+int projRailYCache = -1, projRailHCache = -1, projRailCountCache = -1;
+void drawProjRail() {
+  if (!projScrollActive()) {
+    projRailYCache = projRailHCache = projRailCountCache = -1;
+    return;
+  }
+  const int trackY = PROJ_ROW_Y0;
+  const int trackH = PROJ_AVAIL;
+  const int contentH = projScrollContentH();
+  int thumbH = contentH > 0 ? (int) ((long) trackH * PROJ_SCROLL_VIEW_H / contentH) : trackH;
+  if (thumbH < PROJ_RAIL_MIN_THUMB) thumbH = PROJ_RAIL_MIN_THUMB;
+  if (thumbH > trackH) thumbH = trackH;
+  const int mx = projScrollMax();
+  const int thumbY = trackY + (mx > 0 ? (int) ((long) (trackH - thumbH) * projScroll / mx) : 0);
+  if (thumbY == projRailYCache && thumbH == projRailHCache &&
+      projectCount == projRailCountCache) return;
+  projRailYCache = thumbY; projRailHCache = thumbH;
+  projRailCountCache = projectCount;
+  tft.fillRect(PROJ_RAIL_X, trackY, PROJ_RAIL_W, trackH, COLOR_CARD);
+  tft.fillRect(PROJ_RAIL_X, thumbY, PROJ_RAIL_W, thumbH, COLOR_LABEL);
+}
+
 // "14:32" for a moment that WAS today, "old" (never an ellipsis - the fonts
 // are ASCII 0x20..0x7E and nothing else) for one that was not - the same
 // -1-means-not-today convention host/project-replies.mjs's
@@ -580,6 +612,37 @@ int psessRowAtY(int sy) {
   return pos;
 }
 
+// ---------- Level 2's rail - drawProjRail()'s own shape, over psess*/PSESS_*.
+// FOUR terms this time (Y/H/COUNT/TOTAL), not three: psessTotal can exceed
+// psessCount (psessHasMore()'s own honesty row), so - sessionsTotal's own
+// reasoning in sessions.ino's drawSessionRail() - a reply that changes the
+// TOTAL without moving psessCount at all still changes psessScrollContentH(),
+// and Y/H alone would not necessarily change enough to notice by themselves.
+// PROJ_RAIL_X/W/MIN_THUMB, not a second set of PSESS_RAIL_* constants -
+// PSESS_ROW_X/W already alias PROJ_ROW_X/W (board_es3c35p.h), so the rail
+// sits in the identical gutter at this level too.
+int psessRailYCache = -1, psessRailHCache = -1, psessRailCountCache = -1, psessRailTotalCache = -1;
+void drawPSessRail() {
+  if (!psessScrollActive()) {
+    psessRailYCache = psessRailHCache = psessRailCountCache = psessRailTotalCache = -1;
+    return;
+  }
+  const int trackY = PSESS_ROW_Y0;
+  const int trackH = PSESS_AVAIL;
+  const int contentH = psessScrollContentH();
+  int thumbH = contentH > 0 ? (int) ((long) trackH * PSESS_SCROLL_VIEW_H / contentH) : trackH;
+  if (thumbH < PROJ_RAIL_MIN_THUMB) thumbH = PROJ_RAIL_MIN_THUMB;
+  if (thumbH > trackH) thumbH = trackH;
+  const int mx = psessScrollMax();
+  const int thumbY = trackY + (mx > 0 ? (int) ((long) (trackH - thumbH) * psessScroll / mx) : 0);
+  if (thumbY == psessRailYCache && thumbH == psessRailHCache &&
+      psessCount == psessRailCountCache && psessTotal == psessRailTotalCache) return;
+  psessRailYCache = thumbY; psessRailHCache = thumbH;
+  psessRailCountCache = psessCount; psessRailTotalCache = psessTotal;
+  tft.fillRect(PROJ_RAIL_X, trackY, PROJ_RAIL_W, trackH, COLOR_CARD);
+  tft.fillRect(PROJ_RAIL_X, thumbY, PROJ_RAIL_W, thumbH, COLOR_LABEL);
+}
+
 // WHOLESALE REPAINT OF ONE ROW - drawProjectRow()'s own split, gated by the
 // caller's signature check. TWO LINES, not one (board_es3c35p.h's own
 // derivation of PSESS_ROW_H): a title line, trimmed with fitText() against
@@ -739,7 +802,14 @@ void renderProjLevel0() {
       projScrollCache = projScroll;
       tft.fillRect(0, CONTENT_Y, tft.width(), contentBottom() - CONTENT_Y, COLOR_BG);
       for (int i = 0; i < PROJ_SLOTS; i++) projRowSigCache[i][0] = '\0';
+      projRailYCache = -1; // the clear above wiped the rail with everything else
     }
+    // ONE CALL PER RENDER PASS, after every clear path above has had its say -
+    // drawSessionRail()'s own placement (sessions.ino), for the identical
+    // reason: it has to run unconditionally so the rail APPEARS the moment
+    // projScrollActive() goes true, which is a COUNT change and moves neither
+    // the scroll offset nor busts projScrollCache on its own.
+    drawProjRail();
     for (int pos = 0; pos < projectCount; pos++) {
       if (!projRowVisible(pos)) continue;
       const ProjInfo& p = projects[pos];
@@ -808,7 +878,10 @@ void renderPSessLevel() {
       psessScrollCache = psessScroll;
       tft.fillRect(0, CONTENT_Y, tft.width(), contentBottom() - CONTENT_Y, COLOR_BG);
       for (int i = 0; i <= PSESS_SLOTS; i++) psessRowSigCache[i][0] = '\0';
+      psessRailYCache = -1; // the clear above wiped the rail with everything else
     }
+    // drawProjRail()'s own placement, one level down.
+    drawPSessRail();
     for (int pos = 0; pos < psessListLen(); pos++) {
       if (!psessRowVisible(pos)) continue;
       char sig[80];

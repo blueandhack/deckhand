@@ -1464,6 +1464,18 @@ const int PROJ_SCROLL_VIEW_H = PROJ_ROWS * PROJ_STEP - PROJ_ROW_GAP;
 // same reasoning, as SESSION_DRAG_TAP_PX just above, and reused rather than
 // re-judged: a project row is not a smaller target than a session row.
 const int PROJ_DRAG_TAP_PX = SESSION_DRAG_TAP_PX;
+// THE RAIL - ALIASED, not re-derived, PROJ_DRAG_TAP_PX's own precedent just
+// above. PROJ_ROW_X and PROJ_ROW_W literally alias SESSION_ROW_X/W (both
+// lists draw at the same x and width on this board), so the 10px gutter
+// SESSION_RAIL_X already sits in - between a row's right edge (12+296=308)
+// and the panel edge (320) - is the SAME gutter here, free: nothing about
+// either row's width has to move to fit it. One rail geometry for both
+// lists rather than a second one that could drift out of step with it.
+// PSESS_ROW_X/W alias PROJ_ROW_X/W in turn (see below), so level 2's own
+// rail reuses these same three constants rather than declaring its own.
+const int PROJ_RAIL_X = SESSION_RAIL_X;
+const int PROJ_RAIL_W = SESSION_RAIL_W;
+const int PROJ_RAIL_MIN_THUMB = SESSION_RAIL_MIN_THUMB;
 // The row's own left/right text inset, matched to the session row's visual
 // margin inside its rounded card - used by projects-geom-check.mjs to bound
 // the name lane against the meta lane and the row's own edges.
