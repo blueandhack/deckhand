@@ -5354,6 +5354,13 @@ void handleLine(const String& line) {
     if (!hist["seq"].isNull()) {
       int seq = hist["seq"] | 0;
       int of  = hist["of"]  | 1;
+      // scrollReset() ALSO ZEROES scrollNextSeq (scrollback.ino) - a fresh
+      // stream's own chunk 0 must be compared against 0, not against whatever
+      // the PREVIOUS transcript's continuity counter last reached. Before that,
+      // this line cleared the store but left scrollNextSeq stale, so a second
+      // stream's chunk 0 (`seq=0`) was compared against the first stream's
+      // tail (e.g. `want=25`) and declared a hole every time - a completely
+      // successful fetch reported as "could not reach the Mac".
       if (seq == 0) scrollReset();
       if (seq != scrollNextSeq) {
         // A HOLE. Clear rather than assemble a transcript with a gap in it: a
@@ -9231,6 +9238,34 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
       buf = "";
       return;
     }
+    // THE DEDUPE ITSELF - PROJOPEN's own guard above, verbatim shape: the host
+    // writes every trigger-file command to every live transport, so this
+    // handler is reached twice for one tap. scrollFetch()'s busy guard and
+    // "already held" branch only cover the case where the second copy lands
+    // WHILE the first fetch is still in flight - a 261KB, 504-entry transcript
+    // takes ~7.5s, ample time for the device to reach the second copy AFTER
+    // the first has already completed and cleared scrollPending. Without this,
+    // the second copy started a genuinely SECOND scrollFetch(), which
+    // scrollReset() (this file's own fix, above) would now absorb cleanly
+    // rather than seqgap - but two fetches for one tap is still a wasted
+    // 7.5s re-download, so it is dropped here the same way PROJOPEN drops its
+    // own duplicate. A re-open of the SAME session later must still work, so
+    // this is a time-windowed drop, not a permanent one - identical shape to
+    // PROJOPEN's `lastProjOpenIdx`/`lastProjOpenMs` pair, 2000ms for the same
+    // reason: comfortably longer than the host's own (device,verb,key) dedupe
+    // window, so this side never re-opens before the host's own copy has
+    // already been dropped.
+    static int lastPSessOpenIdx = -1;
+    static unsigned long lastPSessOpenMs = 0;
+    unsigned long nowPSessOpenMs = millis();
+    if (si == lastPSessOpenIdx && nowPSessOpenMs - lastPSessOpenMs < 2000) {
+      Serial.printf("PSESSOPEN: dropped a duplicate open of session %d - the host writes "
+                    "each command to every live transport and a re-open is not idempotent\n", si);
+      buf = "";
+      return;
+    }
+    lastPSessOpenIdx = si;
+    lastPSessOpenMs = nowPSessOpenMs;
     // scrollProjLive SET FIRST - scrollOpenById()'s own header note: its
     // two-argument signature has no room for the wire's `live` bit, so the
     // caller states it here, immediately before the call, the same

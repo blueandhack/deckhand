@@ -270,6 +270,26 @@ void scrollReset() {
   scrollTotalLines = 0;
   scrollTotal = 0;
   scrollDropped = 0;
+  // scrollNextSeq BELONGS HERE, not left for scrollFetch() alone to zero: this
+  // function's own job is "a fresh stream starts from nothing", and the
+  // continuity counter is exactly that kind of state. Without this line, the
+  // seq==0 handler in deckhand_display.ino called scrollReset() (clearing the
+  // STORE) while scrollNextSeq stayed at whatever the PREVIOUS transcript last
+  // reached - so a second, later stream's own chunk 0 was compared against the
+  // first stream's tail and declared a hole (`SCROLL seqgap got=0 want=25`)
+  // even though the fetch that produced it was complete and correct. Measured:
+  // `PSESSOPEN 1` fetched entries=504/lines=10438 in full, then reported
+  // "could not reach the Mac" from this exact mismatch.
+  // Checked every caller before landing this here - scrollBegin() (which
+  // immediately follows with scrollFetch()'s own explicit `scrollNextSeq = 0`,
+  // making this redundant but harmless there), scrollEnd() (the store is being
+  // torn down; nothing reads scrollNextSeq again until the next scrollFetch()
+  // sets it explicitly), and the hole-handler itself (the fetch is already
+  // being abandoned - scrollFetchFailed is about to be set - so nothing
+  // continues a stream past this point). None of them depend on scrollNextSeq
+  // surviving a reset, so there is no call site where this could turn a
+  // continuing stream into a falsely-reset one.
+  scrollNextSeq = 0;
 }
 
 bool scrollBegin() {
