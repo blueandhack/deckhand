@@ -1304,14 +1304,21 @@ void drawSessionRow(int pos) {
   int i = sessionAt(pos);
   const SessionInfo& s = sessions[i];
   bool working = strcmp(s.status, "working") == 0;
-  uint16_t color = colorForStatus(s.status);
+  // Task 8: the ghost row. `ended` is read from s.status alone - the same field
+  // the row signature below already carries - so there is no second flag that
+  // could fall out of step with what the wire actually said.
+  bool ended = strcmp(s.status, "ended") == 0;
+  uint16_t color = colorForStatus(s.status); // COLOR_UNKNOWN when ended
 
   uiFillRound(SESSION_ROW_X, y, SESSION_ROW_W, rowH, R_MD, COLOR_CARD, COLOR_BG);
   // Working rows get a quiet grey border; colored borders are reserved for
   // the two states that want the user's eyes.
   uint16_t border = working ? COLOR_LABEL : color;
-  // One even 2px ring; two nested outlines leave holes where their arcs collide.
-  uiStrokeRound(SESSION_ROW_X, y, SESSION_ROW_W, rowH, R_MD, BORDER_CARD, border, COLOR_BG);
+  // Task 8: DASHED rather than the usual even ring - a row that is on its way
+  // out reads differently from one that is merely quiet. Only the shape of the
+  // stroke changes; `border` (and so its colour) is unchanged from the line above.
+  if (ended) uiStrokeDashed(SESSION_ROW_X, y, SESSION_ROW_W, rowH, border);
+  else       uiStrokeRound(SESSION_ROW_X, y, SESSION_ROW_W, rowH, R_MD, BORDER_CARD, border, COLOR_BG);
   // ---- THE STATUS BAND (band card only) ----
   // Drawn FIRST, because the body below starts where it ends: the name block's
   // top IS SESSION_BAND_H, and every block after it is a cursor step. The band is
@@ -1466,6 +1473,19 @@ void drawSessionRow(int pos) {
 
   // 36, not 26: buildSessionSubline's "who" can now be "CC/studio" (9 chars) instead of
   // just "CC", and "CC/studio opus-5 (main)" runs to 23 - still comfortably inside 36.
+  // Task 8: NOT overridden for a ghost row, and that is deliberate rather than an
+  // omission. drawSessionRow only runs when the row's SIGNATURE changes (the
+  // `if (strncmp(sig, ...))` guard in renderSessionsList below), so a live
+  // "ended Ns ago" baked into THIS line would ink once at the moment the row
+  // turned ghost and then sit frozen - "ended 0s ago" forever - because nothing
+  // else about an ended row's signature ever changes again to earn it a repaint.
+  // The elapsed time that word "ago" needs belongs to the corner duration field
+  // instead (unchanged below): it already re-reads statusSinceMillis and repaints
+  // through drawIfChanged on EVERY tick, signature or no, which is the one
+  // mechanism on this tab actually built to keep a number moving without a
+  // wholesale redraw. "ENDED" (the pill, just below) plus that ticking "4m" is
+  // the same information "ended 4m ago" would carry, correctly live instead of
+  // stale.
   char sub[36];
   buildSessionSubline(i, sub, sizeof(sub));
   setUIFont(1);
@@ -1674,7 +1694,12 @@ void drawSessionRow(int pos) {
       fitText(subFit, sizeof(subFit), sub, subMaxW);
       tft.drawString(subFit, nameX, y + sessionSubcYAt(rowH));
     }
-    const char* label = working ? "WORKING" : (strcmp(s.status, "asking") == 0 ? "INPUT" : "READY");
+    // Task 8: ENDED checked first, ahead of the existing three-way ternary it
+    // otherwise leaves untouched - INPUT stays INPUT rather than becoming
+    // shortLabelForStatus's longer NEEDS INPUT, which this lane was never sized
+    // for.
+    const char* label = ended ? "ENDED"
+                       : working ? "WORKING" : (strcmp(s.status, "asking") == 0 ? "INPUT" : "READY");
     drawStatusPill(SESSION_ROW_X + SESSION_ROW_W - 16, y + SESSION_PILLC_Y, label, s.status, true);
   }
 
@@ -1682,6 +1707,23 @@ void drawSessionRow(int pos) {
   // it opens the answer screen.
   drawChevron(SESSION_ROW_X + SESSION_ROW_W, y + rowH / 2,
               strcmp(s.status, "asking") == 0 ? COLOR_ACCENT : COLOR_LABEL);
+}
+// Task 8: the PROJECTS count line's y - below the LAST DRAWN ROW, DERIVED rather
+// than a constant, which is the whole point: it floats for free. With the list
+// full (five or six live rows) the last row's bottom already sits near
+// contentBottom() and this comes out past it, so the line is simply never drawn
+// (see the caller's own fit check) - no space reserved, no row given up. With the
+// measured normal case (one session, the expanded band card) the card's own
+// content-derived height leaves most of the panel free, and this floats right
+// under it, prominent.
+//
+// Only meaningful outside the scrolling regime (see the caller): with zero
+// sessions there is no "last row" to float under, so it sits under the empty-state
+// message instead - the same vertical centre that message itself uses.
+int countLineY() {
+  if (sessionCount == 0) return (CONTENT_Y + contentBottom()) / 2 + 20;
+  const int lastPos = sessionCount - 1;
+  return sessionRowYAt(lastPos) + sessionRowHAt(lastPos) + SESSION_ROW_GAP;
 }
 void renderSessionsList() {
   int hiddenCount = sessionsTotal - sessionCount;
@@ -1722,6 +1764,7 @@ void renderSessionsList() {
     tft.fillRect(0, CONTENT_Y, tft.width(), contentBottom() - CONTENT_Y, COLOR_BG);
     for (int i = 0; i < sessionSlotCount; i++) rowSigCache[i][0] = '\0';
     overflowCache[0] = '\0';
+    countLineCache[0] = '\0'; // Task 8: the count line's Y is a LAYOUT property too
     if (sessionCount == 0) {
       int cy = (CONTENT_Y + contentBottom()) / 2 - 20;
       drawSparkle(tft.width() / 2, cy, 10, COLOR_LABEL);
@@ -1760,6 +1803,7 @@ void renderSessionsList() {
     tft.fillRect(0, CONTENT_Y, tft.width(), contentBottom() - CONTENT_Y, COLOR_BG);
     for (int i = 0; i < sessionSlotCount; i++) rowSigCache[i][0] = '\0';
     overflowCache[0] = '\0';
+    countLineCache[0] = '\0'; // Task 8: the expanded card's height moved it too
   }
 #if BOARD_SESSIONS_SCROLL
   // THE SCROLL POSITION GETS THE SAME WHOLESALE TREATMENT THE CARD'S HEIGHT DOES,
@@ -1779,6 +1823,7 @@ void renderSessionsList() {
     tft.fillRect(0, CONTENT_Y, tft.width(), contentBottom() - CONTENT_Y, COLOR_BG);
     for (int i = 0; i < sessionSlotCount; i++) rowSigCache[i][0] = '\0';
     overflowCache[0] = '\0';
+    countLineCache[0] = '\0'; // Task 8: same bust, for when scrolling stops
     railYCache = -1;   // the clear above wiped the rail with everything else
   }
   // ONE CALL PER RENDER PASS, after every clear path above has had its say, and it
@@ -1821,9 +1866,23 @@ void renderSessionsList() {
     // whose Mac's icon changes (or appears/disappears) has none of its other fields
     // change, so without this it would keep drawing the old icon (or the old text
     // tag) forever.
+    // Task 8: ENDED-NESS, ITS OWN TERM - belt and braces over sessions[i].status
+    // already being field 2 above. THE TRAP this guards: the ghost row's dot,
+    // spine, band fill and outlined pill are all DERIVED from status via
+    // colorForStatus() (drawSessionRow, drawSessionSpine, drawSessionBand,
+    // drawStatusPill) rather than read from a value this string carries verbatim
+    // - so if a future change ever stopped writing "ended" into
+    // sessions[i].status itself (say, kept the last LIVE status there and added a
+    // separate `ended` flag elsewhere on SessionInfo instead), the dot would keep
+    // its live colour under a row that claims to be ended, and NOTHING here would
+    // notice: a colour-only change reaches no text-comparing cache at all. Signing
+    // the word explicitly means that mistake fails by leaving a stale ghost row
+    // on the glass, not by silently passing.
+    bool endedRow = strcmp(sessions[i].status, "ended") == 0;
     char sig[SESSION_ROW_SIG_LEN];
-    snprintf(sig, sizeof(sig), "%s|%s|%s|%s|%s|%d", sessions[i].name, sessions[i].status, sub,
-             sessions[i].title, dispMacTag(sessions[i].hostSlot), emojiIdForLink(sessions[i].hostSlot));
+    snprintf(sig, sizeof(sig), "%s|%s|%s|%s|%s|%d|%s", sessions[i].name, sessions[i].status, sub,
+             sessions[i].title, dispMacTag(sessions[i].hostSlot), emojiIdForLink(sessions[i].hostSlot),
+             endedRow ? "ended" : "");
     // The expanded row draws the LAST PROMPT and the PATH, so both belong in its
     // signature - a row repaints only when this string changes, and a field drawn
     // but not signed is exactly the staleness the title itself shipped once.
@@ -1942,6 +2001,55 @@ void renderSessionsList() {
       // bust exists for, reached by a different route.
       overflowCache[0] = '\0';
     }
+  }
+
+  // ---- Task 8: THE PROJECTS COUNT LINE ----
+  // sessionTotalAll is EVERY session this Mac has ever run (Task 3's PROJECTS
+  // inventory total) - NOT sessionsTotal/hiddenCount above, which is this tab's
+  // OWN live-list overflow (0 except with 7+ concurrently active sessions). So
+  // this line is the ordinary case's answer to "where did everything go": with
+  // one open session and 131 ended ones it reads "131 more in PROJECTS" even
+  // though nothing here overflowed a six-row list at all.
+  //
+  // SUPPRESSED WHILE SCROLLING (sessionsScrollActive()), deliberately: that
+  // regime already has its own "+N more" strip parked at the list's own last
+  // element, at exactly the y this line would float to, and the two would sit on
+  // top of each other rather than beside each other. Outside it, sessionRowVisible()
+  // is unconditionally true, so countLineY()'s "last row" is always on screen.
+  // BOARD_HAS_PROJECTS IS THE FIRST TERM, and it is not decoration: this line
+  // POINTS AT A TAB. Board 1 is BOARD_HAS_PROJECTS 0 - PROJECTS is out of scope
+  // there by design - so its TAB 2 renders nothing at all, and "131 more in
+  // PROJECTS" on that board advertises a destination that does not exist. The
+  // flag is a #define (never a const int - "#if on a const int is silently
+  // false" has shipped twice here), so on board 1 this whole branch folds away
+  // at compile time along with its format string, while the `else` arm that
+  // keeps the cache honest is shared by both boards - written as one condition
+  // rather than an #if/#else pair precisely because an #if that opens a brace in
+  // both arms is what breaks every brace-counting checker in this repo
+  // (CLAUDE.md).
+  if (BOARD_HAS_PROJECTS && !sessionsScrollActive() && sessionTotalAll > sessionCount) {
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%d more in PROJECTS", sessionTotalAll - sessionCount);
+    padTo(buf, sizeof(buf), 26);
+    int cy = countLineY();
+    // Fits WHOLLY inside the list area or not drawn at all - the same rule the
+    // "+N more" strip above follows, and for the same reason: drawString clips to
+    // the SCREEN, not to this tab's content area, so a line hanging past the
+    // bottom would paint into the footer, where nothing wipes it. This is also
+    // what makes the line cost nothing on a full list: with it off the bottom,
+    // this is false and nothing is drawn - no row reserved, no space spent.
+    if (cy + SESSION_OVERFLOW_H <= contentBottom()) {
+      drawIfChanged(countLineCache, sizeof(countLineCache), buf, SESSION_ROW_X + 2,
+                    cy, 1, 1, COLOR_LABEL, COLOR_BG);
+    } else {
+      // Off the bottom. Cleared rather than left alone so that a layout change
+      // that brings it back on screen (a session ends, shortening the list) does
+      // not compare equal to stale text and skip the repaint - the same trap the
+      // overflow strip's own out-of-view branch exists for, above.
+      countLineCache[0] = '\0';
+    }
+  } else {
+    countLineCache[0] = '\0';
   }
 #if !BOARD_USES_TFT_ESPI
   // This is the leaf that actually draws session rows, reached from both

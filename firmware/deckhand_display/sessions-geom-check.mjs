@@ -163,6 +163,43 @@ const SOURCE_FAULTS = [
   ["board 1 is quietly given a seventh slot it has neither the heap nor the renderer for",
     "board_e32r28t.h", (t) => t.replace(/(#define SESSION_SLOTS )6/, "$17"),
     "exactly the ladder's"],
+  // ---- Task 8: the ghost row and the floating count line ----
+  ["renderSessionsList() stops signing ended-ness, leaving only sessions[i].status to carry it",
+    "sessions.ino",
+    (t) => t
+      .replace(/"%s\|%s\|%s\|%s\|%s\|%d\|%s", sessions\[i\]\.name/,
+               '"%s|%s|%s|%s|%s|%d", sessions[i].name')
+      .replace(/emojiIdForLink\(sessions\[i\]\.hostSlot\),\n             endedRow \? "ended" : ""\);/,
+               "emojiIdForLink(sessions[i].hostSlot));"),
+    "row signature carries ended-ness as its OWN term"],
+  ["colorForStatus() loses its ended branch, so the ghost row's dot/border/spine/band/pill keep a live colour",
+    "deckhand_display.ino",
+    (t) => t.replace(/\n  if \(strcmp\(status, "ended"\) == 0\) return COLOR_UNKNOWN;\n  return COLOR_GOOD;/,
+                     "\n  return COLOR_GOOD;"),
+    'colorForStatus() maps "ended" to COLOR_UNKNOWN'],
+  ["board 2's drawStatusDot() drops the ended override, so the mark falls back to COLOR_LABEL",
+    "deckhand_display.ino",
+    (t) => t.replace(
+      /const uint16_t markColor =\n      working \? colorForStatus\(status\) : \(ended \? COLOR_UNKNOWN : COLOR_LABEL\);/,
+      "const uint16_t markColor = working ? colorForStatus(status) : COLOR_LABEL;"),
+    "forces the mark to COLOR_UNKNOWN when ended"],
+  ["countLineY() is pinned to a fixed y instead of floating under the last row",
+    "sessions.ino",
+    (t) => t.replace(/return sessionRowYAt\(lastPos\) \+ sessionRowHAt\(lastPos\) \+ SESSION_ROW_GAP;/,
+                     "return 200;"),
+    "derives its y from the LAST ROW"],
+  ["the count line is gated on sessionsTotal (this tab's own live overflow count) instead of sessionTotalAll",
+    "sessions.ino",
+    (t) => t.replace(/if \(BOARD_HAS_PROJECTS && !sessionsScrollActive\(\) && sessionTotalAll > sessionCount\) \{/,
+                     "if (BOARD_HAS_PROJECTS && !sessionsScrollActive() && sessionsTotal > sessionCount) {"),
+    "gated on sessionTotalAll"],
+  // The board gate dropped, which is how it shipped: board 1 drawing a line that
+  // names a tab it does not have.
+  ["the count line loses its BOARD_HAS_PROJECTS gate, so board 1 points at a tab it has not got",
+    "sessions.ino",
+    (t) => t.replace(/if \(BOARD_HAS_PROJECTS && !sessionsScrollActive\(\)/,
+                     "if (!sessionsScrollActive()"),
+    "gated on BOARD_HAS_PROJECTS"],
   // The prose's two figures, one fault each, because they are two claims: the
   // parenthesis drifted on its own once already.
   ["board-1-known-state.md's sessions allowlist ENTRY count is nudged off KNOWN[1].length",
@@ -483,16 +520,17 @@ const LADDER_SHAPE = { 1: "tttncc", 2: "ttttsn" };
 // i.e. no leading and no rules, which is the "card of air" §4 forbids. Refused
 // deliberately, not by omission.
 const EXPANDED_H = { 1: [256, 0, 0, 0, 0, 0], 2: [336, 307, 0, 0, 0, 0] };
-// THE THREE WORDS EACH BOARD'S BAND ACTUALLY DRAWS, a third hand-written string for
+// THE FOUR WORDS EACH BOARD'S BAND ACTUALLY DRAWS, a third hand-written string for
 // the same reason as the two above: which FORM a board lands on is a consequence of
 // its panel width, and it should cost a deliberate edit to change. Board 2's 199px
 // word lane holds labelForStatus()'s full phrases; board 1's 141px lane holds only
-// "WORKING", so its band falls back to shortLabelForStatus() for the other two -
-// the words its own tall-row pill already draws. bandStatusWord() picks by
-// MEASUREMENT, so this table is the outcome, never the input.
+// "WORKING" and "ENDED", so its band falls back to shortLabelForStatus() for the
+// other two - the words its own tall-row pill already draws. bandStatusWord() picks
+// by MEASUREMENT, so this table is the outcome, never the input. Task 8 added the
+// third position, "ENDED" - short on both boards, so it costs neither one a fallback.
 const BAND_WORDS = {
-  1: "WORKING / NEEDS INPUT / READY",
-  2: "WORKING / NEEDS YOUR INPUT / WAITING FOR YOU",
+  1: "WORKING / NEEDS INPUT / ENDED / READY",
+  2: "WORKING / NEEDS YOUR INPUT / ENDED / WAITING FOR YOU",
 };
 // §7's META LINE, the same kind of table for the same reason. drawSessionDetail
 // composes `model - branch - HH:MM`, measures it against the lane the Mac cluster
@@ -2475,11 +2513,15 @@ for (const b of [1, 2]) {
     // or a greyscale capture can see. MUTATED and it went unnoticed: collapsing
     // the asking and waiting arms to one string left this checker at zero
     // failures, on the card this whole feature is built around.
+    // FOUR since Task 8's "ended" joined working/asking/waiting - a session that
+    // has ended draws no pill of its own vocabulary either (the ghost row's pill
+    // says ENDED, its own fourth word - see shortStatusLabels() below), so this
+    // card's word is still the only non-hue carrier for it too.
     const LBL = statusLabels();
-    chk(LBL.length === 3,
-        `labelForStatus() returns three status words (${LBL.join(" / ")})`);
+    chk(LBL.length === 4,
+        `labelForStatus() returns four status words (${LBL.join(" / ")})`);
     chk(new Set(LBL).size === LBL.length && LBL.every((w) => w.trim().length > 0),
-        `the band's three status words are DISTINCT, non-empty strings ` +
+        `the band's four status words are DISTINCT, non-empty strings ` +
         `(${LBL.join(" / ")}) - the band card has no pill and no shape, so this ` +
         `word is its only carrier that is not hue`);
     // ... and the band really does draw THAT string, rather than a fourth copy of
@@ -2531,9 +2573,9 @@ for (const b of [1, 2]) {
     {
       const LONGW = statusLabels().map((w) => w.toUpperCase());
       const SHORTW = shortStatusLabels();
-      chk(SHORTW.length === 3 && new Set(SHORTW).size === 3 &&
+      chk(SHORTW.length === 4 && new Set(SHORTW).size === 4 &&
           SHORTW.every((w) => w.trim().length > 0),
-          `shortLabelForStatus() returns three DISTINCT, non-empty words (${SHORTW.join(" / ")})`);
+          `shortLabelForStatus() returns four DISTINCT, non-empty words (${SHORTW.join(" / ")})`);
       // THE FALLBACK IS MEASURED IN THE FUNCTION'S OWN BODY, not modelled here. The
       // widths below would go on agreeing with themselves after the firmware
       // stopped choosing between the two forms at all.
@@ -2835,9 +2877,14 @@ for (const b of [1, 2]) {
       chk(/drawAgentMark\(cx - SPARK_SIZE \/ 2, cy - SPARK_SIZE \/ 2,/.test(b2),
           "the mark's origin is derived from SPARK_SIZE, not a transcribed 16");
       // The rest pose, which is the part a reader will be tempted to simplify:
-      // dim and unanimated, full status colour and animated only while working.
-      chk(/working \? colorForStatus\(status\) : COLOR_LABEL, bg, working\);/.test(b2),
-          "at rest the mark is COLOR_LABEL and unanimated; while working it is the status colour and animated");
+      // dim and unanimated, full status colour and animated only while working -
+      // EXCEPT ended, Task 8's one deliberate exception (see markColor below).
+      chk(/const uint16_t markColor =\s*\n\s*working \? colorForStatus\(status\) : \(ended \? COLOR_UNKNOWN : COLOR_LABEL\);/.test(b2),
+          "at rest the mark is COLOR_LABEL (COLOR_UNKNOWN when ended) and unanimated; while working " +
+          "it is the status colour and animated");
+      chk(/drawAgentMark\(cx - SPARK_SIZE \/ 2, cy - SPARK_SIZE \/ 2, codex, markColor, bg, working\);/.test(b2),
+          "drawAgentMark() is called with that same markColor - not a second, re-inlined ternary " +
+          "that could disagree with it");
     }
 
     // ---- THE BAND CARD'S MARK MUST ACTUALLY MOVE ----
@@ -4660,6 +4707,69 @@ for (const b of [1, 2]) {
   // both are DRAWN on that card, and a field drawn but not signed is the staleness
   // the title itself shipped once. Only a board that expands pays for them.
   if (c.SESSION_EXP_MIN_H !== undefined) rowSig += 1 + CAP.prompt + 1 + CAP.path;
+  // ---- Task 8: THE GHOST ROW ----
+  // Three things proven here, each able to fail by its own name: the row
+  // signature carries ended-ness as an explicit term (not merely via
+  // sessions[i].status, which is field 2 above but is read INDIRECTLY - through
+  // colorForStatus() - by everything that would actually need to notice a
+  // change), the ghost row's colour readers are forced to COLOR_UNKNOWN, and the
+  // new count line floats rather than pinning to a constant y.
+  {
+    const strip = (f) => readSource(`${f}`).replace(/^[ \t]*\/\/.*$/gm, "");
+    // ---- the signature term ----
+    const rlBody = fnSrc("void renderSessionsList() {");
+    const sigCall = (rlBody.match(/snprintf\(sig, sizeof\(sig\)[\s\S]*?;/) || [""])[0];
+    chk(sigCall.startsWith("snprintf(sig, sizeof(sig)"),
+        "renderSessionsList() builds the row signature with snprintf(sig, sizeof(sig), ...) - " +
+        "a rewritten call site is invisible to every assertion below it");
+    // PARSED, not transcribed: the literal word IS "ended" ("ended".length below),
+    // the same word colorForStatus()/labelForStatus() write - if the firmware's
+    // word ever changed, this substring check (and the byte count it feeds
+    // rowSig) would need to change with it, and this line is where that happens.
+    const endedTerm = sigCall.includes('endedRow ? "ended" : ""');
+    // THE TRAP THIS TASK'S OWN PLAN NAMES: the ghost row's dot/border/spine/band/
+    // pill colour is DERIVED from status via colorForStatus(), never read out of
+    // this string - so if a future refactor ever stopped writing "ended" into
+    // sessions[i].status ITSELF (kept the last live status there instead, with
+    // ended-ness carried some other way), the row would keep its live colour
+    // forever: a colour-only change reaches no text-comparing cache at all, this
+    // file's oldest rule. Signing the word here explicitly is what makes THAT
+    // mistake fail by name instead of by a stale dot nobody is asserting on.
+    chk(endedTerm,
+        'the row signature carries ended-ness as its OWN term (`endedRow ? "ended" : ""`), ' +
+        "not only via sessions[i].status already being field 2");
+    if (endedTerm) rowSig += 1 + "ended".length; // the "|ended" separator + word, worst case
+    // ---- the dot, forced rather than merely "not the live colour" ----
+    const csf = fnBody(strip("deckhand_display.ino"),
+                       "uint16_t colorForStatus(const char* status) {", "deckhand_display.ino");
+    chk(/if \(strcmp\(status, "ended"\) == 0\) return COLOR_UNKNOWN;/.test(csf),
+        'colorForStatus() maps "ended" to COLOR_UNKNOWN - the shared root every reader ' +
+        "(the dot, the spine, the band fill, the outlined pill) goes through");
+    const dotBody = fnBody(strip("deckhand_display.ino"),
+                           "void drawStatusDot(int cx, int cy, int r, const char* status",
+                           "deckhand_display.ino");
+    chk(/ended \? COLOR_UNKNOWN : COLOR_LABEL/.test(dotBody),
+        "board 2's drawStatusDot() forces the mark to COLOR_UNKNOWN when ended, rather than " +
+        "falling into the COLOR_LABEL every OTHER non-working status shares there (colour is " +
+        "not that mark's carrier - see its own comment - so ended has to be a deliberate exception)");
+    // ---- the count line floats ----
+    const clBody = fnSrc("int countLineY() {");
+    chk(/return sessionRowYAt\(lastPos\) \+ sessionRowHAt\(lastPos\) \+ SESSION_ROW_GAP;/.test(clBody),
+        "countLineY() derives its y from the LAST ROW (sessionRowYAt/sessionRowHAt), not a fixed " +
+        "constant - a pinned y would cost a permanent row on a five-row list that cannot spare one");
+    chk(/if \(BOARD_HAS_PROJECTS && !sessionsScrollActive\(\) && sessionTotalAll > sessionCount\) \{/.test(rlBody),
+        "the count line is gated on sessionTotalAll (Task 3's PROJECTS total) exceeding " +
+        "sessionCount, not sessionsTotal (this tab's OWN live-list overflow count, which is " +
+        'what the existing "+N more session(s)" strip already answers)');
+    // AND ON BOARD_HAS_PROJECTS, its FIRST term. This is shared code and the line
+    // POINTS AT A TAB: board 1 is BOARD_HAS_PROJECTS 0, its TAB 2 renders nothing,
+    // and "131 more in PROJECTS" there advertises a destination that does not
+    // exist. Bound separately from the gate above so the two failures read
+    // differently - "wrong counter" and "wrong board" are different defects.
+    chk(/if \(BOARD_HAS_PROJECTS &&/.test(rlBody),
+        "the count line is gated on BOARD_HAS_PROJECTS - board 1 has no PROJECTS tab for it " +
+        "to point at, so on that board the branch (and its format string) must fold away");
+  }
   // THE MARGIN, PARSED FROM THE SKETCH RATHER THAN CHOSEN HERE. "Holds its worst
   // case" is the assertion that let both signature caches drift to within a
   // handful of bytes of silent truncation: rowSigCache had SIX bytes spare at 304

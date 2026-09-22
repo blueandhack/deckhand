@@ -53,7 +53,7 @@ panel, which reads as a layout bug rather than a build mistake.
 | mic / beeper | both fitted and working | both work, via the ES8311 |
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64 |
-| size today | flash 1422736, RAM 72044 | flash 1069712, RAM 54964 |
+| size today | flash 1425680, RAM 72100 | flash 1161440, RAM 65564 |
 
 **FOUR of the six numbers this file quotes about the binaries are BOUND and two are not.**
 `node firmware/board-baseline.mjs --doc-check` asserts the two **hashes** and the two **sizes**
@@ -64,7 +64,105 @@ are `arduino-cli`'s own "Global variables use N bytes", are NOT bound by anythin
 hand-maintained: check them after any compile that moves `.bss`. **Board 2's fell 16,896
 bytes on 2026-09-14** and that is not a typo: `sessions[]` moved to PSRAM when the
 sessions list learned to scroll, so ~23.5KB of `SessionInfo` left `.bss` and ~6.6KB of
-per-row caches grew to `SESSION_SLOTS`. `arduino-cli`'s "Sketch uses N" is a
+per-row caches grew to `SESSION_SLOTS`. It then **rose 480 bytes on 2026-09-20**, when
+`SDPROBE` linked the FATFS + SDMMC stack for the first time (that also cost 76,304 bytes of
+flash - board 1 took +704 for the same change, all of it the refusal's own cause string in
+`.flash.rodata`, with `.flash.text` byte-identical). It then **rose 3,512 bytes on
+2026-09-21**, when the PROJECTS tab's level 1 (the project list) landed: `ProjInfo
+projects[PROJ_SLOTS]` (24 x 96 bytes = 2,304) and its per-row signature cache
+`projRowSigCache[PROJ_SLOTS][48]` (1,152) account for nearly all of it, with the rest a
+handful of scalar globals (`projectCount`, `projScroll` and its caches). Board 1 took none of
+it - the struct, the array and every function around them sit behind `#if BOARD_HAS_PROJECTS`,
+which is a real `0` there. It then **rose another 32 bytes on 2026-09-21** (fix round 1 on the
+same task): a lost PROJECTS reply left `projectsPending` stuck true forever with no way to
+retry, so the fetch gained a timeout (`tickProjectsFetch()`, mirroring `tickScrollFetch()`'s own
+shape) and a named on-glass failure state, whose two message lines (`projMsgCache[32]`,
+`projMsg2Cache[16]`) plus one new bool account for it. Board 1 took none of this either, for the
+same reason. It then **rose 4,776 bytes on 2026-09-21** (later the same day), when PROJECTS'
+level 2 (one project's own sessions) landed: `PSessInfo psess[PSESS_SLOTS]` (30 x 72 bytes =
+2,160) and its per-row signature cache `psessRowSigCache[PSESS_SLOTS + 1][80]` (31 x 80 =
+2,480 - one row longer than `PSESS_SLOTS` itself, for the "N more, showing X of Y" honesty row
+past a capped list) account for most of it, the rest level 2's own independent fetch-timeout
+trio (`psessPending`, `psessFetchStart`, `psessFetchFailed` - a SEPARATE pair from level 1's,
+not a shared one, even though both route through the same `checkFetchTimeout()`) plus
+`projLevel`, `projOpenKey[64]`, `psessCount`/`psessTotal`/`psessEverReceived` and two more
+message caches. Board 1 took none of it - same `#if BOARD_HAS_PROJECTS` boundary. It then **rose
+1,632 bytes on 2026-09-21** (the final fix pass on that same branch), and almost all of it is one
+buffer: `ProjInfo.key` went from 64 to `PROJ_KEY_MAX` (128) because the real worst case on this
+Mac is an **80-character** project directory name and FOUR of sixteen were 64 or longer - a
+silent truncation that listed the project correctly and then asked the host for a directory that
+does not exist. 64 x `PROJ_SLOTS`(24) = 1,536, plus 64 for `projOpenKey` (the same constant, so
+the two cannot drift), plus `HostLink.resumeNonce[20]` x `MAX_LINKS`(2) for the credential a
+signed `RESUME` is HMAC'd against, plus one `bool`. Board 1 took none of it: the key buffers sit
+behind `#if BOARD_HAS_PROJECTS` and the nonce behind `#if BOARD_HISTORY_SCROLL`, both `0` there -
+its RAM is byte-identical across that change, measured, and its flash fell 192 bytes (`.flash.text`
+1,006,932 -> 1,006,764) because the SESSIONS count line ("N more in PROJECTS") now folds away on a
+board with no PROJECTS tab to point at. It then **rose 32 bytes on 2026-09-21** (the PROJECTS
+scroll rail, SESSIONS' own `drawSessionRail()` mirrored onto both PROJECTS levels): level 1's
+`drawProjRail()` carries a three-int cache tuple (`projRailYCache`/`H`/`CountCache` - no `total`
+term, unlike SESSIONS, because a PROJECTS reply past `PROJ_SLOTS` is counted and logged rather
+than shown as its own overflow strip) and level 2's `drawPSessRail()` carries the full four
+(`psessRailYCache`/`H`/`CountCache`/`TotalCache`, `psessTotal` able to exceed `psessCount` the same
+way `sessionsTotal` can) - seven `int`s total, 28 bytes, rounded to 32 by alignment. Board 1 took
+none of it - the rail sits behind the same `#if BOARD_HAS_PROJECTS` boundary as everything else in
+`projects.ino`, and its own binary measured byte-identical across this change. It then **rose 8
+bytes on 2026-09-21** (later the same day: `PROJOPEN`'s own double-delivery dedupe, fixing a
+spurious timeout on a fetch that had already succeeded - the host delivers every trigger-file
+command over both transports, and the second copy of `PROJOPEN <n>` was resetting
+`psessEverReceived`/`psessCount` and re-requesting a list the first copy had already loaded and
+drawn, which the host's own (device,verb,key) dedupe then correctly dropped as a duplicate,
+leaving the device to time out over data it already had). `lastProjOpenIdx` (`int`) and
+`lastProjOpenMs` (`unsigned long`) - a static index/timestamp pair inside the `PROJOPEN` arm
+itself, `refuseUnavailableCommand()`'s own `lastVerb`/`lastVerbMs` shape - account for all of it.
+Flash rose 208 bytes in the same change (1,160,512 -> 1,160,720): the dedupe's own code and
+message, plus renaming `PROJSESS`'s own busy/timeout diagnostics to `PSESSFETCH` (two characters
+longer) so a lost reply's own report can no longer be read back as a request - see this file's
+own command table note on `PROJSESS`'s reply shape, and `commands-check.mjs`'s new assertion that
+a diagnostic's first token can never prefix-match a verb the host dispatches on. Board 1 took
+none of it - both fixes sit behind the same `#if BOARD_HAS_PROJECTS` boundary, and its own binary
+measured byte-identical across this change. It then **rose 8 bytes on 2026-09-21** (fix round 2,
+the SAME bug one level up: `TAB 2`'s own double delivery ran `switchTab()`'s PROJECTS arm - and so
+`requestProjects()` - twice, the first copy's fetch succeeding and loading level 1's list before
+the second copy re-requested it, which the host's own dedupe dropped, timing out over data already
+on screen). `projectsLastLoadMs` (`unsigned long`) - set only where a `projs` reply succeeds,
+read only by `requestProjects()` to tell a genuine re-open from the double delivery's own echo -
+is the one new global; the fix lives inside `requestProjects()` itself (not any one caller) so
+all three callers (the `PROJFETCH` command, a real tab switch, and the dead-end retry tap) are
+covered at once. Flash rose 160 bytes in the same change (1,160,720 -> 1,160,880): the new
+window check's own code and messages, plus renaming level 1's own `PROJECTS busy`/`timeout`
+diagnostics to `PROJSFETCH` - fix round 1 had left them alone as "safe today" only because
+host/index.mjs's own `PROJECTS` check happens to be exact-match rather than `startsWith`, which
+`commands-check.mjs`'s section (9) now treats as no safer than a prefix match, on either side of
+the wire. Board 1 took none of it - the same `#if BOARD_HAS_PROJECTS` boundary, binary measured
+byte-identical. It then **rose 176 bytes on 2026-09-21** (later the same day: the seqgap task,
+the NET of two fix rounds - fix round 1's own board-2 baseline was left deliberately
+un-updated pending review, so this entry is their combined effect against the last RECORDED
+checkpoint above, not two separate ones). The bug: `PSESSOPEN 1` fetched a 504-entry transcript
+COMPLETELY (`SCROLL done entries=504 lines=10438`) and the glass still read "could not reach the
+Mac" - `scrollReset()` cleared the store on every fresh stream (`seq==0`) but never
+`scrollNextSeq`, so a SECOND stream's own chunk 0 (the host's double-delivered `PSESSOPEN`) was
+compared against the FIRST stream's stale tail and declared a false hole. Fix round 1: zeroed
+`scrollNextSeq` inside `scrollReset()` itself, and gave `PSESSOPEN` a time-windowed dedupe
+(`lastPSessOpenIdx`/`lastPSessOpenMs`, PROJOPEN's own 2000ms shape). Fix round 2: the window was
+wrong for this path - PROJOPEN's own fetch is ~200ms, PSESSOPEN's is a full transcript, measured
+at 7.5s, and a duplicate landing after the window (which it reliably did) still started a
+genuinely second stream, which host/index.mjs's own per-link generation counter
+(`nextScrollGen`/`link.scrollGen`) can silently SUPERSEDE the first, still-streaming fetch -
+discarding whatever it had accumulated the moment the superseding stream's own `seq=0` reset the
+store (fix round 1's own mechanism, just as effective at absorbing an illegitimate second stream
+as a legitimate one). Round 2 replaced the time window with a STATE guard inside
+`scrollOpenById()` itself - the SAME identity `scrollFetch()`'s own "already held" branch checks
+(a non-empty store, the same id, the same chat filter) plus `scrollActive`, checked BEFORE the
+function touches any of its own state - which also closes the identical exposure for
+`scrollOpenById()`'s OTHER caller (a level-2 row TAP, `projects.ino`) that a `PSESSOPEN`-only
+time window never covered at all. RAM is back to exactly what it was before EITHER round
+(65,548): round 1's two statics are gone, and the round-2 guard adds no new persistent storage -
+it reuses existing globals. Flash is +176 net: round 1's own dedupe code and message minus round
+2's removal of it, plus round 2's own (smaller) guard condition, message and call site. Board 1
+took none of it - the same `#if BOARD_HISTORY_SCROLL`/`#if BOARD_HAS_PROJECTS` boundary,
+confirmed by a same-day rebuild of the untouched prior commit matching the recorded baseline
+exactly, byte for byte. `arduino-cli`'s
+"Sketch uses N" is a
 slightly smaller number than the `.bin` - the same image without its trailing padding - so do
 not expect the compile summary to print these.
 
@@ -126,7 +224,7 @@ arduino-cli compile --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app" \
 node firmware/board-baseline.mjs /tmp/b1/deckhand_display.ino.bin --check 1
 ```
 
-Today: `b4ec506ab8718b7b...`, size 1422736 (board 2: `d4c17d115a70a6f1...`, size 1069712).
+Today: `326a36e3d8dd9189...`, size 1425680 (board 2: `80b63d525fb38b02...`, size 1161440).
 
 It compares **BYTES, not sizes**, and that matters: a default argument on a shared function
 once changed board 1's codegen with **no size change whatsoever** - invisible to a size
@@ -261,7 +359,7 @@ one is neither handled nor refused.
 | command | what it does |
 |---|---|
 | `RECAL` / `MICTEST` / `MICMON` / `MICREC` / `MICSTREAM` | touch calibration; mic level, live meter, one-shot and streaming capture. **The four MIC verbs REFUSE BY NAME while a full-screen surface is up** (compose, reader, history, emoji grid, pairing panel) - a capture paints its pill over whatever is there and swallows that surface's taps as stop votes; they had no such guard until 2026-09-13. **`RECAL` is BOARD 1 ONLY** and board 2 refuses it BY NAME (`BOARD_TOUCH_NEEDS_CAL`): its touch is inside the ST77922 and factory-aligned, so there is no mapping to fit, no `runCalibration()` compiled and no `CALIBRATE TOUCH` on its Device group. It used to be handled on both with a stub behind it that printed and returned - from the Mac, indistinguishable from a run that worked |
-| `TAB 0..2` / `PAGE 0..SET_GROUP_COUNT` (`0` is the SETTINGS HOME menu, `1..SET_GROUP_COUNT` its groups, the same ids on BOTH boards now - and the firmware DERIVES that bound rather than writing it, under a `static_assert` tying `SET_DANGER` to it. `SET_GROUP_COUNT is 6 today`, and that numeral is the only transcription in this row: `commands-check.mjs` parses this line against both headers and fails by name if it drifts, because the group set has already been re-cut three times on this branch. Out of range, a non-numeric argument, and "SETTINGS is not the live tab" all REFUSE BY NAME, the first two quoting the range they checked) / `KBTEST` / `EMOJITEST` / `EMOJITEST off` / `READTEST` | put a surface on the glass, since a capture can only record what is already there. **`EMOJITEST off` is the escape** - the flag gates payload absorption AND the tick, and without it a `TAB` painted over the grid left a board that looked alive with a frozen footer, recoverable only by reflashing. `TAB` now clears the grid and REFUSES over a reader/transcript rather than stranding its flag |
+| `TAB 0..3` (`2` is now PROJECTS, not SETTINGS - `enum Tab` gained a fourth member between SESSIONS and SETTINGS. Safe in code: every site names `TAB_SETTINGS` symbolically rather than comparing the literal, and this refusal's own `%d` prints `TAB_COUNT - 1` so it self-updates; `commands-check.mjs` now parses `enum Tab` against this row and fails by name if the two disagree) / `PAGE 0..SET_GROUP_COUNT` (`0` is the SETTINGS HOME menu, `1..SET_GROUP_COUNT` its groups, the same ids on BOTH boards now - and the firmware DERIVES that bound rather than writing it, under a `static_assert` tying `SET_DANGER` to it. `SET_GROUP_COUNT is 6 today`, and that numeral is the only transcription in this row: `commands-check.mjs` parses this line against both headers and fails by name if it drifts, because the group set has already been re-cut three times on this branch. Out of range, a non-numeric argument, and "SETTINGS is not the live tab" all REFUSE BY NAME, the first two quoting the range they checked) / `KBTEST` / `EMOJITEST` / `EMOJITEST off` / `READTEST` | put a surface on the glass, since a capture can only record what is already there. **`EMOJITEST off` is the escape** - the flag gates payload absorption AND the tick, and without it a `TAB` painted over the grid left a board that looked alive with a frozen footer, recoverable only by reflashing. `TAB` now clears the grid and REFUSES over a reader/transcript rather than stranding its flag |
 | `DETAIL <n>` | session `n`'s detail card, or its ask screen, WITHOUT the keyboard over it - the only route to either from the Mac (`KBTEST msg` opens the keyboard over it). Refuses by name on no sessions, an out-of-range `n`, or another full-screen surface |
 | `COMPOSE` + `type <text>` / `chip <n>` / `page` / `keys` / `back` / `sent` / `recent <t>` / `off` | the reply panel over the first pending ask, then the draft, a token tap, the pager, the two SCREEN MOVES, the receipt state and the recents ring. `sent` and `recent` SEND NOTHING. `chip`/`page` dedupe the double delivery BY NAME (an insert is not idempotent); opening and the screen moves do not, and say why (they are). **Nothing here can tap a control** - see `KBBUBBLE` |
 | `THEME dark\|light` | which palette is live, so "confirm this reads in both themes" stops needing a person at the device. NOT persisted - a reboot restores the stored setting |
@@ -273,7 +371,11 @@ one is neither handled nor refused.
 | `POWERPROBE <label>` | mV/h in the current state; **battery only**, refuses on USB with the cause |
 | `AUDIOPROBE` / `TONETEST [vol]` / `TONELADDER` | a ladder of claims: on the bus / configured and playing / find the audible floor |
 | `SCROLLFETCH` / `SCROLLOPEN` / `SCROLLTO [line]` / `SCROLLPERF [top\|code\|line]` / `SCROLLCLOSE` | board 2 transcript: fetch without drawing, open, park, measure, close |
+| `PROJFETCH` / `PROJOPEN <n>` / `PSESSOPEN <n>` | board 2 PROJECTS: fetch level 1 without a tap, open project `n`'s own sessions (level 2), open session `n`'s transcript (level 3, the EXISTING scrollback surface via `scrollOpenById()` - no new reader). Each refuses BY NAME on a non-numeric or out-of-range index, PROJECTS not being the live tab, `PSESSOPEN` additionally on level 2 not being open yet or another full-screen surface being up. `PROJOPEN <n>` also DEDUPES a repeat of the SAME `n` within 2000ms and says so BY NAME (`projOpenLevel1()` is not idempotent against its own double delivery: it resets `psessEverReceived`/`psessCount` and re-fetches, which the host's own request dedupe then drops, timing out over a list already loaded) - a later re-open of the same project still works. `PSESSOPEN` needs no such guard: its fetch (`scrollFetch()`, shared with SCROLLFETCH/SCROLLOPEN) already answers a repeat from what is already held in PSRAM rather than re-fetching it. `PROJFETCH` - and `TAB 2`'s own background refresh, and the dead-end retry tap, since all three route through the SAME `requestProjects()` - carries the identical dedupe one level up: a request landing within 2000ms of the LAST successful `projs` reply (`projectsLastLoadMs`) is a no-op that reports "PROJSFETCH held N project(s)" rather than re-fetching, because level 1's own fetch has no per-request key the host could dedupe by identity the way `PSESSOPEN`'s does - only a time window tells a double-delivered echo from a genuine, later re-open (leaving PROJECTS and coming back a minute later still fetches for real). Board 1 refuses all three from `UNAVAILABLE_COMMANDS[]` |
+| `RESUME <text>` | a HEADLESS continuation (`claude -p --resume <id> <text>`) of whichever transcript is open, addressed to `scrollLoadedId`. **This does not open a session on the Mac** - one turn runs, replies, and exits; the session hook republishes the record afterwards, which is how it reappears in the live list. Refuses BY NAME on no transcript open, on a LIVE session (a headless turn would become a second, concurrent author of it - `scrollFromProjects`/`scrollProjLive` gate this), and on empty text. Board 1 refuses it from `UNAVAILABLE_COMMANDS[]`. Not yet reachable from a tap - see `docs/reference/scrollback.md` |
 | `BLEMTU` | board 2: the negotiated ATT MTU per link |
+| `SDPROBE` | board 2: mount the microSD over SDMMC, report, unmount. Tries 4-bit then 1-bit and REPORTS WHICH WIDTH WON - "4-bit failed, 1-bit worked" is a wiring story and "both failed" is a card-or-slot story. `CARD_NONE` after a successful mount is a THIRD outcome (the slot is empty), not a failure. Measured 2026-09-20: `ok width=4 type=SDHC size=14911MB`. Leaves GPIO 2..7 as it found them, which nothing else in this firmware touches. Board 1 refuses it from `UNAVAILABLE_COMMANDS[]` - and that refusal is NOT "board 1 has no slot", it has one, wired for SPI rather than SDMMC |
+| `SDPERF` | board 2: times SD writes, reads and an APPEND, from a PSRAM source buffer because that is where `scrollText` lives - a DRAM-sourced write measures a path the real code never takes. Measured 2026-09-20: write 2048/49152/262144 B in 9/23/66ms, read in 2/9/40ms, append 2048 to a 262144 B file in 9ms, open+close 5ms. **The append costing the same as a small write, not the same as the 66ms rewrite, is what the offline-sessions hybrid write policy stands on.** Board 1 refuses it from `UNAVAILABLE_COMMANDS[]` |
 | `SESSIONSCROLL <n>` | board 2: park the SCROLLING session list at step `n` so a capture can see a position other than the top. The unit is STEPS, not pixels - the offset is only ever a multiple of `SESSION_SCROLL_STEP` - and it reports the rows now on screen. Refuses BY NAME on a non-numeric or out-of-range argument (quoting the range), on SESSIONS not being the live tab, on a full-screen surface, and on a list of six or fewer that is not scrolling at all. Board 1 refuses it from `UNAVAILABLE_COMMANDS[]` |
 | `MSGPRI` / `MSGPRI now\|next\|later` | report or set how a message sent FROM this device lands in the Mac's session queue. NVS-backed, on the SETTINGS tab; the device announces it at boot and on `WHOAMI`, and the host asks for it when a HELLO names a link it has no priority for |
 | `WHOAMI` | re-emits the boot `HELLO <name> v2` line on demand, over USB. Both boards. The host sends it to an anonymous link before considering a reset - `HELLO` is a boot-only burst, so a host that attached to an already-running board otherwise had to REBOOT it to learn its name |

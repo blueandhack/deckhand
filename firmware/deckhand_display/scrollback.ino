@@ -33,6 +33,44 @@ unsigned long scrollTailPolledAt = 0;
 int scrollNewBelow = 0;
 char scrollLoadedId[16] = "";
 bool scrollLoadedChat = true;
+// TRUE when the CURRENTLY OPEN transcript was reached through scrollOpenById()
+// rather than openScrollback() - a PROJECTS level-2 row, whose id may not be
+// (and, for the whole point of that entry point, very often is not) in
+// sessions[] at all. Read by drawScrollback() (there is no
+// sessions[detailIndex] to draw a title from), by exitScrollback() (there is
+// no SESSIONS detail card to return to - PROJECTS level 2 is), by
+// scrollRefetch() (detailIndex names the wrong session to re-ask for), and by
+// the RESUME command's own guard (deckhand_display.ino) - see scrollProjLive.
+bool scrollFromProjects = false;
+// Set by the CALLER, IMMEDIATELY BEFORE scrollOpenById() - projOpenKey's own
+// precedent (projects.ino): scrollOpenById()'s two-argument signature has no
+// room for a third fact its caller already knows (PSessInfo.live, the wire's
+// own bit), so the caller states it here rather than scrollOpenById() trying
+// to re-derive it from nothing. DEFAULTS TRUE - "assume live" - so a caller
+// that forgets to set it gets RESUME refused rather than silently offered on
+// a session somebody may be driving interactively right now (the design's
+// own warning: a headless run would become a SECOND, concurrent author of
+// it). The safe direction for a flag nobody remembered to set.
+bool scrollProjLive = true;
+// The header's title when scrollFromProjects is true - sessions[detailIndex].name
+// has no meaning for an id sessions[] does not hold. Sized to PSessInfo.title's
+// own shape (host caps at 40, +NUL, +3 spare) - the same margin every other
+// fixed buffer here keeps past its measured worst case.
+char scrollProjTitle[48] = "";
+// SCROLL's OWN DIAGNOSTIC TAG for the NEXT outgoing HISTORY request - set by
+// the CALLER, IMMEDIATELY BEFORE requestScrollback()/scrollFetch()
+// (scrollProjLive's own precedent, right above: a fact only the caller knows,
+// stated ahead of the call rather than re-derived inside it). NOT a fourth
+// parameter on scrollFetch() itself: scrollback-check.mjs binds that
+// function's signature with an exact-text structural match
+// (`body(INO, "void scrollFetch(const char* id, uint8_t hostSlot, bool
+// broadcast)", ...)`), so widening it would break that assertion rather than
+// extend it. A global read at the one place a request actually goes out gets
+// the same "caller states it, callee reads it" shape without touching a
+// bound signature - this task's whole deliverable: one hardware run must be
+// able to match an unwanted "SCROLL recv" (deckhand_display.ino) to the
+// "SCROLL req why=..." that caused it, BY NAME.
+const char* scrollFetchWhy = "?";
 
 const char* scrollMark(uint8_t r) {
   // ASCII ONLY. Claude Code's own markers are U+23FA and U+257C, and Spleen
@@ -246,6 +284,26 @@ void scrollReset() {
   scrollTotalLines = 0;
   scrollTotal = 0;
   scrollDropped = 0;
+  // scrollNextSeq BELONGS HERE, not left for scrollFetch() alone to zero: this
+  // function's own job is "a fresh stream starts from nothing", and the
+  // continuity counter is exactly that kind of state. Without this line, the
+  // seq==0 handler in deckhand_display.ino called scrollReset() (clearing the
+  // STORE) while scrollNextSeq stayed at whatever the PREVIOUS transcript last
+  // reached - so a second, later stream's own chunk 0 was compared against the
+  // first stream's tail and declared a hole (`SCROLL seqgap got=0 want=25`)
+  // even though the fetch that produced it was complete and correct. Measured:
+  // `PSESSOPEN 1` fetched entries=504/lines=10438 in full, then reported
+  // "could not reach the Mac" from this exact mismatch.
+  // Checked every caller before landing this here - scrollBegin() (which
+  // immediately follows with scrollFetch()'s own explicit `scrollNextSeq = 0`,
+  // making this redundant but harmless there), scrollEnd() (the store is being
+  // torn down; nothing reads scrollNextSeq again until the next scrollFetch()
+  // sets it explicitly), and the hole-handler itself (the fetch is already
+  // being abandoned - scrollFetchFailed is about to be set - so nothing
+  // continues a stream past this point). None of them depend on scrollNextSeq
+  // surviving a reset, so there is no call site where this could turn a
+  // continuing stream into a falsely-reset one.
+  scrollNextSeq = 0;
 }
 
 bool scrollBegin() {
@@ -338,8 +396,14 @@ uint8_t scrollHostSlot = 0;
 uint32_t scrollY = 0;             // pixel scroll offset from the top of the transcript
 int scrollTapX = 0;                // sx carried from PRESS to release, for the rail tap
 
-void requestScrollback(int idx) {
-  if (idx < 0 || idx >= sessionCount) return;
+// THE SHARED CORE of every scrollback fetch - requestScrollback() (a
+// sessions[] index, addressed to that session's OWN Mac) and scrollOpenById()
+// (any id, BROADCAST - see that function's own note on why) each build one
+// call to this rather than duplicating the busy guard, the "already held in
+// PSRAM" cache check and the wire line itself. `broadcast` selects
+// sendLineToHost's one- vs two-argument form; `hostSlot` is read only when it
+// is false.
+void scrollFetch(const char* id, uint8_t hostSlot, bool broadcast) {
   // A SECOND REQUEST WHILE ONE IS IN FLIGHT IS A NO-OP, and this is not a
   // nicety: the host delivers every trigger-file command over BOTH transports,
   // so one SCROLLFETCH reaches loop() twice. Two fetches then interleave chunks
@@ -350,19 +414,25 @@ void requestScrollback(int idx) {
   if (scrollPending) {
     // Via sendLineToHost, NOT Serial.printf: with the cable out Serial reaches
     // NOTHING, and a BLE-only session is exactly when a refusal needs to be
-    // visible. Same reason BATT goes through this helper.
-    char m[80];
-    snprintf(m, sizeof(m), "SCROLL busy chunks=%d/%d ms=%lu",
-             scrollChunksIn, scrollChunksOf, millis() - scrollFetchStart);
+    // visible. Same reason BATT goes through this helper. why= names the
+    // CALLER that hit this busy return - scrollFetchWhy, set immediately
+    // before this call (this file's globals, above).
+    char m[100];
+    snprintf(m, sizeof(m), "SCROLL busy why=%s chunks=%d/%d ms=%lu",
+             scrollFetchWhy, scrollChunksIn, scrollChunksOf, millis() - scrollFetchStart);
     sendLineToHost(m);
     return;
   }
   // Already held: answer from PSRAM. The filter is part of the identity because
   // CHAT and ALL are different entry sets, so a toggle must genuinely re-fetch.
+  // NO WIRE LINE GOES OUT ON THIS PATH - which is exactly why the absorption
+  // side (deckhand_display.ino) can treat "scrollPending false" as "nothing
+  // is legitimately outstanding" for a stray/duplicate reply that arrives
+  // after this cache hit.
   if (scrollCount > 0 && histChatOnly == scrollLoadedChat &&
-      strcmp(scrollLoadedId, sessions[idx].id) == 0) {
-    char m[64];
-    snprintf(m, sizeof(m), "SCROLL held entries=%d", scrollCount);
+      strcmp(scrollLoadedId, id) == 0) {
+    char m[80];
+    snprintf(m, sizeof(m), "SCROLL held why=%s entries=%d", scrollFetchWhy, scrollCount);
     sendLineToHost(m);
     scrollPending = false;
     scrollFetchFailed = false;
@@ -378,16 +448,59 @@ void requestScrollback(int idx) {
   scrollChunksIn = 0;
   scrollChunksOf = 1;
   scrollFetchStart = millis();
-  scrollHostSlot = sessions[idx].hostSlot;
-  strncpy(scrollLoadedId, sessions[idx].id, sizeof(scrollLoadedId) - 1);
+  scrollHostSlot = hostSlot;
+  strncpy(scrollLoadedId, id, sizeof(scrollLoadedId) - 1);
   scrollLoadedId[sizeof(scrollLoadedId) - 1] = '\0';
   scrollLoadedChat = histChatOnly;
+  // WHO ASKED AND WHY, logged BEFORE the wire line itself so a hardware run
+  // can always match an incoming "SCROLL recv" (deckhand_display.ino) to the
+  // "SCROLL req" that caused it - this task's own deliverable.
+  {
+    char req[110];
+    snprintf(req, sizeof(req), "SCROLL req why=%s id=%s chat=%d broadcast=%d slot=%d budget=%ld",
+             scrollFetchWhy, id, histChatOnly ? 1 : 0, broadcast ? 1 : 0, (int) hostSlot, budget);
+    sendLineToHost(req);
+  }
   char line[72];
-  snprintf(line, sizeof(line), "HISTORY %s %s tail:%ld", sessions[idx].id,
+  snprintf(line, sizeof(line), "HISTORY %s %s tail:%ld", id,
            histChatOnly ? "chat" : "all", budget);
-  // Addressed to the session's own Mac - only it holds that transcript.
-  sendLineToHost(line, sessions[idx].hostSlot);
+  if (broadcast) sendLineToHost(line);
+  else sendLineToHost(line, hostSlot);   // addressed to the session's own Mac
 }
+
+void requestScrollback(int idx) {
+  if (idx < 0 || idx >= sessionCount) return;
+  scrollFetch(sessions[idx].id, sessions[idx].hostSlot, false);
+}
+
+// THE RETRY/RE-FETCH THIS SCREEN'S OWN TWO CALLERS SHARE (the dead-end tap and
+// the CHAT/ALL filter toggle, both in handleScrollTouch()) - requestScrollback
+// (detailIndex) is WRONG here whenever scrollFromProjects is true: detailIndex
+// names whichever session SESSIONS' own detail card is behind, which has no
+// relationship to a PROJECTS-opened id and can even be -1 (no card open at
+// all). scrollLoadedId is what THIS screen is actually showing, however it got
+// opened, so it is what "re-fetch the same thing" has to mean here.
+//
+// AND THAT CLAIM IS NOW TRUE. It was written when only ONE caller used this:
+// the dead-end tap ran its own inlined copy of the same two lines, because it
+// has to call scrollEnd() first (to drop an empty store so the fetch
+// re-allocates) and scrollEnd() CLEARS scrollLoadedId - so a no-argument
+// refetch called afterwards would broadcast for "" and fetch nothing. A comment
+// claiming a shared predicate that was not shared is worse than the duplication
+// it describes (this branch's own finding, one file over), so the id became an
+// ARGUMENT: the tap passes the copy it snapshotted before scrollEnd(), the
+// filter toggle passes what is loaded now, and there is exactly one statement
+// of "which id, addressed how".
+void scrollRefetch(const char* id) {
+  scrollFetchWhy = "refetch";      // the retry tap or the CHAT/ALL toggle
+  if (scrollFromProjects) scrollFetch(id, 0, true);
+  else requestScrollback(detailIndex);
+}
+// An OVERLOAD, not a default argument: a default argument on a shared function
+// has silently changed board 1's codegen here before, with no size change to
+// notice it by (CLAUDE.md, the baseline's own story). This file is board 2 only,
+// so the risk is theoretical - the habit is not.
+void scrollRefetch() { scrollRefetch(scrollLoadedId); }
 
 // Called from loop(). A stalled fetch must say so rather than leaving
 // "fetching" on the glass forever.
@@ -434,6 +547,12 @@ bool scrollAtBottom() {
 // interleave with it through the same parser.
 void tickScrollTail() {
   if (!scrollActive || scrollPending || scrollFetchFailed || scrollCount == 0) return;
+  // OUT OF SCOPE FOR A PROJECTS-OPENED TRANSCRIPT: detailIndex names
+  // whichever session SESSIONS' own detail card is behind, not the id this
+  // screen is actually showing, and sessions[detailIndex] is the wrong (or,
+  // with no card open, an out-of-range) read for it. A PROJECTS-opened
+  // transcript simply does not live-tail today - see this task's own report.
+  if (scrollFromProjects) return;
   if (detailIndex < 0 || detailIndex >= sessionCount) return;
   if (millis() - scrollTailPolledAt < (unsigned long) SCROLL_TAIL_POLL_MS) return;
   scrollTailPolledAt = millis();
@@ -946,13 +1065,16 @@ void drawScrollback() {
   // what is left - the same order the detail card's meta line uses, and the
   // reason is the same: a change-only field that MOVES cannot be cached, so the
   // fixed-width one is measured first and the flexible one takes the remainder.
-  if (detailIndex >= 0 && detailIndex < sessionCount) {
+  // scrollProjTitle WHEN THIS CAME FROM PROJECTS - sessions[detailIndex].name
+  // has no meaning for an id sessions[] does not hold, and detailIndex itself
+  // can be stale or -1 here (scrollFromProjects's own header note).
+  if (scrollFromProjects || (detailIndex >= 0 && detailIndex < sessionCount)) {
     const int nameW = SCROLL_POS_X - 8 - SCROLL_NAME_X;
     char nm[SCROLL_NAME_COLS + 6];
     // setUIFont BEFORE fitText: it measures with tft.textWidth, so the font has
     // to be the one the string will actually be drawn in.
     setUIFont(1);
-    fitText(nm, sizeof(nm), sessions[detailIndex].name, nameW);
+    fitText(nm, sizeof(nm), scrollFromProjects ? scrollProjTitle : sessions[detailIndex].name, nameW);
     tft.setTextColor(COLOR_VALUE, COLOR_BG);
     tft.drawString(nm, SCROLL_NAME_X, SCROLL_HDR_TEXT_Y);
   }
@@ -1094,7 +1216,7 @@ bool handleScrollTouch(int sx, int sy) {
     if (sx >= tft.width() - 12 - HIST_CHIP_W_CHAT - 8) {
       histChatOnly = !histChatOnly;
       scrollY = 0;
-      requestScrollback(detailIndex);   // entry counts differ per filter
+      scrollRefetch();   // entry counts differ per filter
       drawScrollback();
       return true;
     }
@@ -1106,8 +1228,20 @@ bool handleScrollTouch(int sx, int sy) {
     // a second meaning for the gesture so much as the only one available here.
     if (scrollDeadEnd()) {
       scrollFetchFailed = false;
+      // SNAPSHOT BEFORE scrollEnd(): that call clears scrollLoadedId itself
+      // ("the store is gone; it holds nothing" - its own comment), so
+      // scrollRefetch()'s broadcast arm would otherwise read the id AFTER it
+      // has already been wiped to "" and re-fetch nothing.
+      char savedId[16];
+      strncpy(savedId, scrollLoadedId, sizeof(savedId) - 1);
+      savedId[sizeof(savedId) - 1] = '\0';
       scrollEnd();                 // drop the empty store so the fetch re-allocates
-      requestScrollback(detailIndex);
+      // THROUGH scrollRefetch(), not a second copy of its body - it takes the
+      // id precisely so this caller can hand it the pre-scrollEnd() snapshot.
+      // scrollFromProjects is untouched by scrollEnd(), so the shared function
+      // still reads the right one; the local `wasFromProjects` this used to
+      // keep was only ever needed by the inlined copy.
+      scrollRefetch(savedId);
       drawScrollback();
       return true;
     }
@@ -1120,12 +1254,33 @@ bool handleScrollTouch(int sx, int sy) {
 
 void exitScrollback() {
   scrollActive = false;
+  // READ, THEN CLEARED, BEFORE scrollEnd() (which touches neither, but the
+  // order is stated because scrollEnd() DOES clear scrollLoadedId, and a
+  // future edit moving this flag's own clear next to that one should not
+  // silently start reading it after it is already gone).
+  const bool wasFromProjects = scrollFromProjects;
+  scrollFromProjects = false;
   scrollEnd();                    // 304KB of PSRAM back; only one session is ever open
   histActive = false;
   tft.fillScreen(COLOR_BG);
   drawTabBar();
   drawFooterChrome();
-  if (showingDetail && detailIndex >= 0 && detailIndex < sessionCount) {
+  if (wasFromProjects) {
+    // BACK TO PROJECTS LEVEL 2, NOT SESSIONS - this transcript was opened
+    // from a psess row, and detailIndex (SESSIONS' own "which card is open")
+    // has no relationship to it and can even be -1. projLevel is untouched by
+    // any of this (level 2 is still "open" the whole time the transcript was
+    // on top of it), so returning to it needs no re-fetch - only a repaint.
+    // projLevelPainted FORCED STALE: the fillScreen above just wiped the
+    // pixels renderProjectsTab()'s own row-signature caches still believe are
+    // on the glass, and without this its level-2 branch would see "nothing
+    // changed" and redraw NOTHING - a wholesale-clear-and-bust case
+    // (CLAUDE.md, the same shape switchTab()'s own tab-change clear needs),
+    // reusing renderProjectsTab()'s EXISTING level-transition bust rather
+    // than duplicating it.
+    projLevelPainted = -1;
+    renderProjectsTab();
+  } else if (showingDetail && detailIndex >= 0 && detailIndex < sessionCount) {
     drawSessionDetail(detailIndex);
     buildDetailSignature(detailIndex, detailSigCache, sizeof(detailSigCache));
   } else {
@@ -1140,6 +1295,12 @@ void exitScrollback() {
 // drag/tap machinery lives in scrollDragLoop()/handleScrollTouch(), not here.
 void openScrollback(int idx) {
   if (idx < 0 || idx >= sessionCount) return;
+  // DEFENSIVE, belt and braces (projFetchFailed()'s own reasoning: it costs
+  // nothing): exitScrollback() always clears this on the way out, but a path
+  // that opens straight through here (SCROLLPERF, SCROLLOPEN) rather than via
+  // exitScrollback first must not inherit a stale TRUE left by a PROJECTS open
+  // that never got a chance to close cleanly.
+  scrollFromProjects = false;
   scrollActive = true;
   // histActive TOO, and this is not redundancy. Roughly ten guard lists in shared
   // code already name histActive as "the history surface owns the glass", and
@@ -1152,6 +1313,7 @@ void openScrollback(int idx) {
   // sitting in the text.
   histActive = true;
   scrollY = 0;
+  scrollFetchWhy = "open";         // a SESSIONS row tap, or SCROLLPERF/SCROLLOPEN
   requestScrollback(idx);
   // LAND AT THE NEWEST EVEN WHEN THE FETCH DID NOT RUN. requestScrollback
   // answers locally when the transcript is already held in PSRAM, and that path
@@ -1160,6 +1322,151 @@ void openScrollback(int idx) {
   // job, not the fetch's, which is why it is here and not in both branches.
   if (!scrollPending) scrollY = scrollMaxY();
   drawScrollback();
+}
+
+// OPENS THIS SAME SURFACE FOR AN ID THAT MAY NOT BE IN sessions[] AT ALL - a
+// PROJECTS level-2 row (projects.ino's handlePSessTouch(), or the PSESSOPEN
+// trigger-file command, deckhand_display.ino), live or long ended. This is
+// the whole point of Task 7: no new reader. requestScrollback()/openScrollback()
+// stay exactly as they were, addressed by a sessions[] INDEX to that session's
+// own Mac; this is their sibling, addressed by an ID DIRECTLY, broadcast,
+// because a PROJECTS-opened id may belong to any paired Mac's own
+// ~/.claude/projects/ tree and may not be live at all - there is no hostSlot
+// on file for it the way there is for a sessions[] row.
+//
+// scrollLoadedId IS SET FROM id12 - THE ARGUMENT - NEVER FROM
+// sessions[detailIndex].id, and this function's own body is where that has to
+// be checked: detailIndex names whichever session SESSIONS' own detail card
+// is behind, which has NO relationship to which project row was tapped (the
+// two can disagree - a PROJECTS open can happen with an unrelated, or no,
+// detail card behind it) - reading through it here would silently show the
+// WRONG transcript. scrollback-check.mjs binds this to THIS function's own
+// body and fails BY NAME if a later edit routes the id through sessions[] or
+// detailIndex instead of its own id12 parameter.
+void scrollOpenById(const char* id12, const char* title) {
+  // ALREADY OPEN, RIGHT NOW - A GENUINE NO-OP, NAMING ITSELF, checked BEFORE
+  // this function touches ANY state (fix round 2 of the seqgap task).
+  //
+  // NOT "call scrollFetch() and trust ITS OWN already-held branch to save
+  // us" - that branch (scrollFetch()'s "SCROLL held" fast path, this file,
+  // above) is a correct, safe, READ-ONLY answer on its own and stays exactly
+  // as it was. But this function calling INTO it every time still means a
+  // second open re-touches scrollY (jumping the view back to the newest,
+  // discarding wherever the reader had scrolled to) and re-sends a
+  // "HISTORY ... tail:" wire line even when the cache hit means nothing NEEDS
+  // to go out. THAT line is the actual hazard fix round 1 undersized a time
+  // window for: host/index.mjs's sendScrollback() tracks a PER-LINK
+  // generation counter and lets a LATER "HISTORY ... tail:" request on the
+  // SAME link silently SUPERSEDE an earlier one still streaming - the older
+  // call notices at its next chunk and abandons ("Scrollback: superseded at
+  // chunk N - abandoning this fetch"), no error reaches the device, and
+  // whatever the abandoned stream had accumulated is thrown away the moment
+  // the superseding stream's own seq=0 arrives and resets the store (exactly
+  // the mechanism fix round 1 made SAFE for a legitimate fresh stream - it
+  // is just as effective at safely absorbing an ILLEGITIMATE one). The one
+  // wire line this function no longer sends for an already-open session is
+  // what removes the ABILITY for that supersede path to ever fire here at
+  // all, rather than trusting the host's own recovery from it every time.
+  //
+  // A GENUINE re-open must still work: closing (exitScrollback(), which
+  // clears scrollActive AND frees the store together) or opening a
+  // DIFFERENT session (a different id12, or a different histChatOnly filter)
+  // both fail this condition and fall through to the real open below -
+  // scrollFetch()'s own identity check (id + filter + a non-empty store) is
+  // reused VERBATIM here, so the two can never disagree about what "the
+  // same transcript" means. scrollActive is required IN ADDITION: without
+  // it, a transcript merely CACHED from a session that was already closed
+  // (scrollActive false, but scrollEnd() has NOT necessarily run - the store
+  // can still be held from the SESSIONS tab's own transcript) would wrongly
+  // read as "already open" and skip re-showing it.
+  if (scrollActive && scrollFromProjects && scrollCount > 0 &&
+      histChatOnly == scrollLoadedChat && strcmp(scrollLoadedId, id12) == 0) {
+    char m[64];
+    snprintf(m, sizeof(m), "SCROLL open: %s already open, %d entries - no-op", id12, scrollCount);
+    sendLineToHost(m);   // not Serial.printf alone - a BLE-only double-tap needs this too
+    return;
+  }
+  scrollFromProjects = true;
+  strncpy(scrollProjTitle, title, sizeof(scrollProjTitle) - 1);
+  scrollProjTitle[sizeof(scrollProjTitle) - 1] = '\0';
+  scrollActive = true;
+  histActive = true;             // openScrollback()'s own note on why this joins too
+  scrollY = 0;
+  scrollFetchWhy = "projopen";   // a PROJECTS level-2 row tap, or PSESSOPEN
+  scrollFetch(id12, 0, true);    // broadcast - see this function's own header note
+  // LAND AT THE NEWEST EVEN WHEN THE FETCH DID NOT RUN - openScrollback()'s
+  // own reasoning, verbatim: scrollFetch() answers locally when the
+  // transcript is already held in PSRAM, and that path has no completion
+  // callback to place the view.
+  if (!scrollPending) scrollY = scrollMaxY();
+  drawScrollback();
+}
+
+// ---------- RESUME: a SIGNED headless turn ----------
+// Base64 of an arbitrary buffer. kbBase64() (keyboard.ino) does exactly this
+// over kbText and nothing else - it reads kbLen/kbText directly - and the
+// keyboard has no part in a RESUME typed from the Mac, so this is the same
+// three-bytes-to-four loop over a caller's own buffer rather than a second
+// global's. Lives in THIS file, which is board 2 only: board 1 has no RESUME
+// and must not carry the code for one.
+void resumeBase64(const char* src, int len, char* out, size_t outSize) {
+  int o = 0;
+  for (int i = 0; i < len && o + 4 < (int) outSize; i += 3) {
+    uint32_t v = (uint32_t) (uint8_t) src[i] << 16;
+    if (i + 1 < len) v |= (uint32_t) (uint8_t) src[i + 1] << 8;
+    if (i + 2 < len) v |= (uint8_t) src[i + 2];
+    out[o++] = B64[(v >> 18) & 63];
+    out[o++] = B64[(v >> 12) & 63];
+    out[o++] = (i + 1 < len) ? B64[(v >> 6) & 63] : '=';
+    out[o++] = (i + 2 < len) ? B64[v & 63] : '=';
+  }
+  out[o] = '\0';
+}
+
+// SENDS ONE SIGNED FRAME PER LIVE LINK, each with that Mac's OWN nonce and
+// signed with that Mac's OWN key, addressed to it. Returns how many went out.
+//
+// WHY NOT ONE BROADCAST LINE, which is what the unsigned version sent: a
+// signature is over ONE secret. The device cannot know which paired Mac's disk
+// holds a PROJECTS-opened transcript (scrollOpenById()'s own reasoning - a
+// project inventory is not owned by whichever Mac ticked last), so the unsigned
+// line went to everyone and only the Mac that HAD the transcript acted. Signing
+// keeps exactly that property by sending each Mac its own frame: the one that
+// holds the session verifies and runs, the others verify and find no transcript
+// (host/index.mjs's transcriptPathFor refuses by name), and no Mac is ever
+// handed a signature it cannot check. sendPromptToHost()'s "sign with the
+// session's OWN Mac" rule, applied where the session's Mac is not yet known.
+//
+// EVERY SKIPPED LINK SAYS WHY. From the Mac, a link that was skipped and a link
+// that was never there are indistinguishable, which is the rule this whole
+// command surface is built on.
+int sendResumeSigned(const char* id12, const char* text) {
+  const int len = (int) strlen(text);
+  String sha = sha256Hex16(text);
+  char b64[204];                       // 150 bytes -> 200 chars + NUL
+  resumeBase64(text, len, b64, sizeof(b64));
+  int sent = 0;
+  for (int i = 0; i < MAX_LINKS; i++) {
+    if (!hostLinks[i].used) continue;
+    if (hostLinks[i].resumeNonce[0] == '\0') {
+      Serial.printf("RESUME: link %d (%s) has published no rnonce yet - not sending to it "
+                    "(its host predates signed RESUME, or no tick has arrived from it)\n",
+                    i, hostLinks[i].hostId);
+      continue;
+    }
+    const int slot = pairingSlotForLink(i);
+    String mac = authHmacFor(slot, String(hostLinks[i].resumeNonce) + ":" + id12 + ":RESUME:" + sha);
+    if (mac.length() == 0) {
+      Serial.printf("RESUME: no pairing key for link %d (%s) - not sending to it; an unsigned "
+                    "resume is refused by the host rather than run\n", i, hostLinks[i].hostId);
+      continue;
+    }
+    char line[280];
+    snprintf(line, sizeof(line), "RESUME %s %s %s", id12, b64, mac.c_str());
+    sendLineToHost(line, i);
+    sent++;
+  }
+  return sent;
 }
 
 #endif  // BOARD_HISTORY_SCROLL

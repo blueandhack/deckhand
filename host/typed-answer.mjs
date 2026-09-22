@@ -106,3 +106,48 @@ export function verifyPrompt({ secret, nonce, id12, b64, mac }) {
   const ok = crypto.timingSafeEqual(Buffer.from(mac), Buffer.from(want));
   return ok ? { ok: true, why: "", text } : { ok: false, why: "bad hmac" };
 }
+
+// ---- A headless RESUME of a session that is not live ----
+//
+// SAME KEY, SAME NONCE SHAPE, SAME SANITISING, A THIRD LABEL. RESUME runs
+// `claude -p --resume <id> <text>`: it injects device-authored text into a
+// conversation and lets Claude act on it, which is the same class of
+// consequence PROMPT and TYPED are signed for - it shipped unsigned and
+// un-nonced, which meant anything that could write one line to a paired Mac's
+// serial port or BLE characteristic could start a headless turn in any session
+// on that Mac's disk. The label is what stops a signature minted for one form
+// being replayed as another: "RESUME" can never authenticate as "PROMPT", so a
+// message the operator signed for a READY session cannot be re-sent as a
+// headless turn against a DEAD one (whose live-session guard is the device's,
+// and which the host deliberately does not re-derive).
+//
+// THE NONCE IS THE HOST'S OWN, not a session's. PROMPT signs against a
+// per-SESSION nonce published in the tick for exactly the sessions that may be
+// messaged; a resumable session is by definition NOT in that list (it ended, or
+// it belongs to a project this Mac has never had live), so there is no record
+// to hang one off. index.mjs publishes one rolling `rnonce` per host process
+// instead and rotates it on every accepted RESUME, which is the same
+// single-use, no-replay property consumeSessionNonce() gives the other two.
+export function resumeHmac(secret, nonce, id12, sha16) {
+  return crypto
+    .createHmac("sha256", secret)
+    .update(`${nonce}:${id12}:RESUME:${sha16}`)
+    .digest("hex")
+    .slice(0, 16);
+}
+
+// Mirrors verifyPrompt exactly, reason string included - see its own note on why
+// a rejection has to say WHICH failure it was.
+export function verifyResume({ secret, nonce, id12, b64, mac }) {
+  if (!secret || !nonce || !id12) return { ok: false, why: "missing pairing/nonce state" };
+  if (typeof mac !== "string" || !/^[0-9a-f]{16}$/.test(mac)) return { ok: false, why: "malformed mac" };
+  const text = decodeTypedText(b64);
+  if (text === null) return { ok: false, why: "malformed base64" };
+  if (!typedTextOk(text)) {
+    return { ok: false, why: "text is empty, over the cap, or not printable ASCII" };
+  }
+  const want = resumeHmac(secret, nonce, id12, voiceSha(text));
+  // Equal lengths are guaranteed by the mac regex above, so this cannot throw.
+  const ok = crypto.timingSafeEqual(Buffer.from(mac), Buffer.from(want));
+  return ok ? { ok: true, why: "", text } : { ok: false, why: "bad hmac" };
+}

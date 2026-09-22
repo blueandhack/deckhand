@@ -55,6 +55,14 @@
 #endif
 #include <ArduinoJson.h>
 #include <SPI.h>
+#if BOARD_HAS_SD
+// SDPROBE's only dependency, and BEHIND THE CAPABILITY FLAG rather than behind
+// !BOARD_USES_TFT_ESPI, which agrees today and is not the reason: what this
+// include needs is a slot on the SDMMC bus, which is exactly what BOARD_HAS_SD
+// claims. Board 1 is BOARD_HAS_SD 0, so it links no FATFS and no SDMMC driver
+// and its binary must not move by a byte when this lands.
+#include <SD_MMC.h>
+#endif
 #if BOARD_TOUCH_NEEDS_CAL
 // Board 1's resistive panel only. Board 2's controller lives inside the
 // ST77922 display IC and speaks I2C - see st77922_touch.h, included from
@@ -307,7 +315,7 @@ StreamBufferHandle_t bleRxStream = nullptr;
 // prototypes and inserts them before these types would otherwise be defined,
 // which breaks compilation for any function taking/returning them. (Keep
 // these enums above the first function definition in the file.)
-enum Tab { TAB_USAGE = 0, TAB_SESSIONS = 1, TAB_SETTINGS = 2 };
+enum Tab { TAB_USAGE = 0, TAB_SESSIONS = 1, TAB_PROJECTS = 2, TAB_SETTINGS = 3 };
 Tab currentTab = TAB_USAGE;
 enum BattState { BATT_NONE = 0, BATT_DISCHARGING = 1, BATT_CHARGING = 2, BATT_FULL = 3 };
 
@@ -869,6 +877,12 @@ struct HostLink {
   bool  remoteAnswer = true;
   int   sessionsTotal = 0;
   int   hiddenAsking = 0;
+  // Task 8: EVERY session this Mac has ever run, live or ended (doc["sessionTotal"],
+  // Task 3's PROJECTS inventory total) - NOT sessionsTotal above, which is this
+  // tab's own live-list overflow count. Summed across links the same way, into
+  // the bare global below, so the SESSIONS tab's floating count line counts every
+  // Mac this device is paired with.
+  int   sessionTotalAll = 0;
   Usage usage;
   // Host-LIFETIME counter, so it restarts at 1 when that host process does.
   // It MUST be per-link: shared as one high-water mark, two independent
@@ -879,6 +893,18 @@ struct HostLink {
   // (a legacy host old enough to send no hostId) falls back to the bare
   // globals voiceSeq/voiceSeqShown declared near line 1082, the same fallback
   // pattern pairingSlotForRow() uses for answer signing.
+#if BOARD_HISTORY_SCROLL
+  // THE RESUME NONCE THIS MAC LAST PUBLISHED (its `rnonce`, refreshed every
+  // tick and rotated by the host the moment a RESUME is accepted). 16 hex
+  // characters + NUL + 3 spare, the headroom shape every other fixed buffer
+  // here keeps. PER LINK, not one global: with two Macs paired, each issues
+  // its own and signs with its own key, so one shared field would sign half
+  // the resumes against the wrong Mac's credential. Behind BOARD_HISTORY_SCROLL
+  // because RESUME is - board 1 has no scrollback, refuses the verb from
+  // UNAVAILABLE_COMMANDS[], and must not carry the storage for a credential it
+  // can never use.
+  char resumeNonce[20] = "";
+#endif
   long voiceSeq = 0;
   long voiceSeqShown = 0;
   // Highest seq whose TRANSCRIPT has been inserted into the compose draft. Kept
@@ -1011,6 +1037,28 @@ inline void uiFillRound(int x, int y, int w, int h, int r, uint16_t fill, uint16
 inline void uiStrokeRound(int x, int y, int w, int h, int r, int thickness,
                           uint16_t stroke, uint16_t behind) {
   tft.drawSmoothRoundRect(x, y, r, r - thickness + 1, w, h, stroke, behind);
+}
+// Task 8: a DASHED rectangle, for a card that is going away rather than merely
+// sitting there - the SESSIONS tab's ended-session ghost row. Ignores the corner
+// radius the card's own fill was drawn with (four straight dashed edges over a
+// rounded fill) rather than mitring dashes around an arc: this border is on
+// screen for at most SESSION_ENDED_GRACE_MS (host/index.mjs), and nobody has
+// asked whether its corners are exactly as round as a live row's in that time.
+// drawFastHLine/drawFastVLine, not a generic line primitive: both boards
+// implement them directly (TFT_eSPI natively, PanelShim in panel_shim.cpp), so
+// this needs no board-specific arm.
+inline void uiStrokeDashed(int x, int y, int w, int h, uint16_t stroke) {
+  const int dash = 4, gap = 3, step = dash + gap;
+  for (int px = 0; px < w; px += step) {
+    int len = min(dash, w - px);
+    tft.drawFastHLine(x + px, y, len, stroke);
+    tft.drawFastHLine(x + px, y + h - 1, len, stroke);
+  }
+  for (int py = 0; py < h; py += step) {
+    int len = min(dash, h - py);
+    tft.drawFastVLine(x, y + py, len, stroke);
+    tft.drawFastVLine(x + w - 1, y + py, len, stroke);
+  }
 }
 // Circular ring, same idea: a full 0-360 arc with an outer and inner radius is
 // one even annulus, where drawCircle(r) + drawCircle(r-1) is not.
@@ -1438,6 +1486,148 @@ int sessionCount = 0;
 // working, then recency); these say what it had to leave out.
 int sessionsTotal = 0;
 int hiddenAskingCount = 0;
+// Task 8: the SUM of every hostLink's sessionTotalAll above - every session this
+// device's Mac(s) have ever run, live or ended. Compared against sessionCount (the
+// rows actually on screen, not sessionsTotal's own live-overflow count) to decide
+// whether the SESSIONS tab's floating count line is drawn at all.
+int sessionTotalAll = 0;
+
+// ---------- Projects tab (board 2 only; see projects.ino) ----------
+// The struct lives here rather than in projects.ino because handleLine()'s
+// `projs` absorption, further down in THIS file, needs the full type before
+// projects.ino's own text appears - projects.ino is concatenated AFTER
+// deckhand_display.ino (power.ino < projects.ino alphabetically), so a plain
+// forward reference would not compile. `projects[]` and `projectCount` are
+// DEFINED in projects.ino and merely declared `extern` here, the same shape
+// CLAUDE.md documents for scrollback.ino's own globals ("the .ino files are
+// one translation unit... a global defined in a later file needs an extern").
+//
+// Guarded by BOARD_HAS_PROJECTS, a #define (never a const int - "#if on a
+// const int is silently false" has shipped twice already), stated as 0 in
+// board_e32r28t.h - PROJECTS is out of scope on board 1 by design
+// (docs/superpowers/specs/2026-09-20-sessions-manager-design.md, "Out of
+// scope: Board 1") and that header has no PROJ_* constants this struct
+// could size itself from - see board_es3c35p.h's own note on why the flag
+// is stated explicitly there rather than left for the preprocessor's
+// undefined-is-0 default to cover.
+#if BOARD_HAS_PROJECTS
+struct ProjInfo {
+  char key[PROJ_KEY_MAX];
+                  // opaque directory name - NEVER decoded, split, or shown;
+                  // see host/project-replies.mjs. Sent back verbatim to ask
+                  // for this project's sessions (PROJOPEN and a level-1 row
+                  // tap both go through projOpenLevel1(), projects.ino).
+                  // SIZED FROM THE HEADER, never a literal: at 64 this
+                  // truncated four of this Mac's sixteen real projects at 63
+                  // characters and the tap that followed asked the host for a
+                  // directory that does not exist - see PROJ_KEY_MAX's own
+                  // note in board_es3c35p.h for the measurement and the
+                  // arithmetic. projOpenKey below holds the SAME string and
+                  // is sized from the SAME constant, so the two cannot drift.
+  char name[24];  // host caps at 22 (deviceText(label, 22)) plus NUL and one
+                  // spare byte
+  uint16_t count; // transcripts in this project (jsonl files, not turns)
+  long tod;       // seconds since LOCAL midnight of the newest transcript's
+                  // mtime, or -1 when that moment was not today - the same
+                  // unit and the same "-1 means not today" rule every other
+                  // on-device clock field uses.
+};
+extern ProjInfo projects[PROJ_SLOTS];
+extern int projectCount;
+extern bool projectsPending;
+extern bool projectsEverReceived;
+// A fetch that timed out - see tickProjectsFetch() (projects.ino) and
+// board_es3c35p.h's PROJ_FETCH_TIMEOUT_MS. Distinct from projectsPending
+// (which it always follows: the tick clears one and sets the other in the
+// same breath), so the tab can show a NAMED failure instead of leaving
+// "Loading projects..." on the glass with nothing that ever changes it.
+extern bool projectsFetchFailed;
+// millis() OF THE LAST SUCCESSFUL `projs` REPLY - set only where projectsPending
+// is cleared on success (this file's own `projs` absorption below), read only by
+// requestProjects() (projects.ino) to tell a genuine re-open from the double
+// delivery's own echo of the SAME request. See requestProjects()'s own header
+// note for why this cannot be a plain "already held" cache the way PSESSOPEN's
+// scrollFetch() is: PROJECTS' own design deliberately re-fetches on a real
+// re-open (projBack()'s note: "the list could genuinely be stale by then"), so
+// this needs a WINDOW, not an indefinite hold.
+extern unsigned long projectsLastLoadMs;
+void requestProjects();
+
+// ---------- PROJECTS level 2: one project's sessions ----------
+// 0 = the project list (level 1 in the task briefs' own numbering, though
+// this file's variable calls it what it IS - the level PROJECTS opens on),
+// 1 = a project's own sessions. Never anything else - level 3 (a session's
+// transcript, opened by tapping a row here) is a later task's interface,
+// the same boundary level 1 itself had for THIS level until now.
+extern int projLevel;
+// The level last actually PAINTED (never rendered = -1), read by
+// renderProjectsTab()'s own level-change cache bust (projects.ino) and
+// force-invalidated from here and from scrollback.ino's exitScrollback() -
+// both wholesale-clear-and-bust sites need to write it, not only read it,
+// so (like projLevel just above) it needs its own extern: projects.ino
+// defines it but is concatenated AFTER this file (CLAUDE.md: "a global
+// defined in a later file needs an extern in deckhand_display.ino").
+extern int projLevelPainted;
+// The key of the project level 1 is currently open on - OPAQUE, exactly
+// like ProjInfo.key: never decoded, only ever echoed back on the wire and
+// compared against an incoming `projsess` reply's own `k` to catch a stale
+// reply landing after the level moved on (projects.ino's own JSON
+// absorption). PROJ_KEY_MAX, matching ProjInfo.key's own size - it holds the
+// SAME string, and both read the one constant rather than two literals that
+// once agreed.
+extern char projOpenKey[PROJ_KEY_MAX];
+
+struct PSessInfo {
+  char id[16];    // the wire's 12-char session id + NUL, +3 spare - the
+                  // same headroom shape ProjInfo.key keeps over its own
+                  // real maximum.
+  char title[44]; // host caps at 40 (deviceText(info.title, 40),
+                  // host/project-replies.mjs) plus NUL and 3 spare - sized
+                  // for fitText()'s own worst case (the full cap PLUS an
+                  // ellipsis) the same way SESSION_ROW_SIG_LEN's own note
+                  // reasons about margin.
+  uint16_t turns; // the REAL user-turn count (countUserTurns(), never a
+                  // raw line count - Ruling T3-C, host/project-replies.mjs:
+                  // a raw count over-reported by 64x on this Mac's own
+                  // largest transcript). Displayed, not second-guessed.
+  long tod;       // seconds since LOCAL midnight of this session's own
+                  // mtime, or -1 - the same convention ProjInfo.tod uses.
+  uint8_t live;   // is this session in the CURRENT sessions[] list right
+                  // now - the HOST's own check (against its live-ranked
+                  // list), not a device-side forward-encoding heuristic
+                  // like projectIsLive() has to use for level 1, because
+                  // the wire actually carries this bit at level 2. A
+                  // COLOUR difference (drawPSessRow colours the title and
+                  // the tag by it), so it belongs in the row's own
+                  // signature same as level 1's `live` does - CLAUDE.md: a
+                  // colour-only change reaches no text-comparing cache
+                  // unless it is signed explicitly.
+};
+extern PSessInfo psess[PSESS_SLOTS];
+extern int psessCount;   // how many of `psess[]` actually hold data (<= PSESS_SLOTS)
+// The TRUE count the host held before capping to PROJSESS_CAP(60) or this
+// device further capping to PSESS_SLOTS - never the capped count re-stated
+// as though it were the total. "A capped list that shows the capped number
+// as the total is a silent lie" (this task's own brief).
+extern int psessTotal;
+extern bool psessEverReceived;
+// Level 2's own fetch-timeout state - projects.ino's checkFetchTimeout()/
+// tickProjectsFetch() own note on why these are a SEPARATE pair from
+// level 1's projectsPending/projectsFetchFailed rather than a shared one.
+// psessPending is read (and cleared) here in handleLine()'s own `projsess`
+// absorption below, the same way projectsPending is by the `projs` block
+// just above it.
+extern bool psessPending;
+extern bool psessFetchFailed;
+// Set by the `projsess` absorption below when the reply carries `e` - the Mac
+// naming a key it does not know, rather than failing to answer. Defined in
+// projects.ino beside its two neighbours; see PROJ_STATE_REFUSED there for why
+// it is a THIRD state and not a second spelling of psessFetchFailed.
+extern bool psessRefused;
+void requestProjSessions(const char* key);
+void projOpenLevel1(int pos);
+void projBack();
+#endif
 
 // Per-row render caches: a row only redraws when its own signature changes,
 // so one session flipping status doesn't flash the whole list. The duration
@@ -1477,6 +1667,10 @@ const int SESSION_SIG_MARGIN = 64;
 char rowSigCache[SESSION_SLOTS][SESSION_ROW_SIG_LEN]; // sized per board - see the header
 char rowDurCache[SESSION_SLOTS][8];
 char overflowCache[32] = "";
+// Task 8: the floating "N more in PROJECTS" line - same drawIfChanged pattern as
+// overflowCache above (change-only text at a change-only y), sized the same way:
+// "%d more in PROJECTS" padded to 26 plus room for a 4-digit count and the NUL.
+char countLineCache[32] = "";
 int rowCountCache = -1; // layout code: sessionCount*2 + overflow-strip flag
 
 // Session detail screen (tap a row in the SESSIONS list to open it).
@@ -1778,6 +1972,36 @@ extern int      scrollTotal;
 extern int      scrollDropped;
 extern uint8_t  scrollHostSlot;
 extern int      scrollNewBelow;
+// Task 7's own additions to the same forward-declared set, for the same
+// reason: projects.ino (BEFORE scrollback.ino in the concatenation order)
+// sets scrollProjLive ahead of scrollOpenById(), and the RESUME command
+// below (this file) reads scrollLoadedId/scrollFromProjects/scrollProjLive
+// directly, all three defined for real in scrollback.ino.
+extern char scrollLoadedId[16];
+extern bool scrollFromProjects;
+extern bool scrollProjLive;
+// This task's own addition to the same forward-declared set, for the same
+// reason: the hist parser's chunk arm below reads scrollLoadedId (already
+// forward-declared above) and this file's SCROLLFETCH handler writes
+// scrollFetchWhy, the diagnostic tag scrollFetch() (scrollback.ino) logs
+// against its own outgoing request - both need it visible before that later
+// file's real definition.
+extern const char* scrollFetchWhy;
+// THE CAP IS THE HOST'S OWN. host/typed-answer.mjs's typedTextOk() rejects
+// anything over ANSWER_TEXT_MAX_BYTES (150) or outside printable ASCII, and
+// verifyResume() runs that same check - so a longer or non-ASCII prompt would
+// be signed on this side, travel, and be refused there as "text is empty, over
+// the cap, or not printable ASCII", which from the Mac reads as an
+// authentication failure on a frame that was signed perfectly well. Refused
+// HERE instead, by name, with the number quoted.
+//
+// A #define AND IT LIVES HERE, not beside sendResumeSigned() in scrollback.ino:
+// a macro is TEXTUAL and the .ino files are one translation unit concatenated
+// with this one FIRST (CLAUDE.md), so a definition in the later file would not
+// exist yet at the RESUME command handler below - unlike a function, which gets
+// an auto-generated prototype from anywhere in the sketch. That asymmetry is
+// exactly the ordering trap this file's own header note describes.
+#define RESUME_TEXT_MAX 150
 #endif
 
 // Second level: ONE entry, in full, in its own pager. The list rows are previews, and an
@@ -2187,20 +2411,33 @@ bool drawIfChanged(char* cache, size_t cacheSize, const char* text, int x, int y
 }
 
 
-// Three states a session can be in, from ~/.claude/deckhand-session-hook.mjs:
+// Four states a session can be in, from ~/.claude/deckhand-session-hook.mjs:
 //   "working" - actively processing a turn
 //   "asking"  - paused for your input (permission prompt, AskUserQuestion,
 //               ExitPlanMode) or an idle nudge
+//   "ended"   - the session is over (SessionEnd marks the record rather than
+//               deleting it - see the hook - so a ghost row can say where a
+//               session went instead of it just vanishing). Task 8.
 //   anything else ("waiting") - turn finished, waiting for your next message
 uint16_t colorForStatus(const char* status) {
   if (strcmp(status, "working") == 0) return COLOR_WARN;
   if (strcmp(status, "asking") == 0) return COLOR_BAD;
+  // NEITHER a live colour nor COLOR_LABEL's plain grey: COLOR_UNKNOWN is the
+  // palette's own "no data yet / stale" colour, and a session that ended is
+  // exactly that - stale by definition, not merely quiet the way "waiting" is.
+  // Every reader of this function (the dot, the spine, the band fill, the
+  // outlined pill) gets the grey-and-dashed ghost look for free from this one
+  // branch; only drawStatusDot's board-2 mark needs its own copy, because that
+  // one path draws COLOR_LABEL for every non-working status without calling
+  // this function at all.
+  if (strcmp(status, "ended") == 0) return COLOR_UNKNOWN;
   return COLOR_GOOD;
 }
 
 const char* labelForStatus(const char* status) {
   if (strcmp(status, "working") == 0) return "working";
   if (strcmp(status, "asking") == 0) return "needs your input";
+  if (strcmp(status, "ended") == 0) return "ended";
   return "waiting for you";
 }
 // THE SAME THREE STATES IN THE SHORT FORM - the words a tall row's status pill
@@ -2217,6 +2454,7 @@ const char* labelForStatus(const char* status) {
 const char* shortLabelForStatus(const char* status) {
   if (strcmp(status, "working") == 0) return "WORKING";
   if (strcmp(status, "asking") == 0) return "NEEDS INPUT";
+  if (strcmp(status, "ended") == 0) return "ENDED";
   return "READY";
 }
 
@@ -2559,8 +2797,15 @@ void drawStatusDot(int cx, int cy, int r, const char* status, uint16_t bg = COLO
   // so the indicator does not jump sideways when a session changes status, and so
   // the checker's blit-clearance model still describes what is drawn.
   const bool working = strcmp(status, "working") == 0;
-  drawAgentMark(cx - SPARK_SIZE / 2, cy - SPARK_SIZE / 2, codex,
-                working ? colorForStatus(status) : COLOR_LABEL, bg, working);
+  // Task 8: THE ONE EXPLICIT FORCE. Every other non-working status shares
+  // COLOR_LABEL here on purpose (colour is not the carrier at the indicator - see
+  // above), but "ended" has to be told apart from "waiting" even though neither
+  // is working, so it is checked before falling into that shared grey rather than
+  // routed through colorForStatus() the way the working branch is.
+  const bool ended = strcmp(status, "ended") == 0;
+  const uint16_t markColor =
+      working ? colorForStatus(status) : (ended ? COLOR_UNKNOWN : COLOR_LABEL);
+  drawAgentMark(cx - SPARK_SIZE / 2, cy - SPARK_SIZE / 2, codex, markColor, bg, working);
   (void) r;   // the shape vocabulary's radius; board 2 draws a fixed-size mark
 #endif
 }
@@ -2623,7 +2868,7 @@ void drawSparkle(int cx, int cy, int r, uint16_t color) {
   tft.fillTriangle(cx + r, cy, cx, cy - a, cx, cy + a, color);
 }
 
-const int TAB_COUNT = 3;
+const int TAB_COUNT = 4;
 
 // The easter-egg flag lives further down with the crab code; forward-declared so
 // fabVisible() can hide the button while the crab has the screen.
@@ -2700,7 +2945,7 @@ void tickAutoTheme() {
 
 void drawTabBar() {
   tft.fillRect(0, 0, tft.width(), TAB_BAR_H, COLOR_CARD);
-  const char* labels[TAB_COUNT] = {"USAGE", "SESSIONS", "SETTINGS"};
+  const char* labels[TAB_COUNT] = {"USAGE", "SESSIONS", "PROJECTS", "SETTINGS"};
   int tabW = tabsW() / TAB_COUNT;   // the record slot owns the rest
   for (int i = 0; i < TAB_COUNT; i++) {
     bool active = (i == (int) currentTab);
@@ -2709,7 +2954,8 @@ void drawTabBar() {
     tft.setTextDatum(MC_DATUM);
     tft.drawString(labels[i], i * tabW + tabW / 2, TAB_BAR_H / 2);
     if (active) {
-      tft.fillRect(i * tabW + 8, TAB_BAR_H - 3, tabW - 16, 3, COLOR_ACCENT);
+      tft.fillRect(i * tabW + TAB_UNDERLINE_INSET, TAB_BAR_H - 3,
+                   tabW - 2 * TAB_UNDERLINE_INSET, 3, COLOR_ACCENT);
     }
   }
   tft.setTextDatum(TL_DATUM);
@@ -3951,6 +4197,8 @@ void stopOctopus() {
     renderUsageTab();
   } else if (currentTab == TAB_SESSIONS) {
     drawSessionsAll();
+  } else if (currentTab == TAB_PROJECTS) {
+    renderProjectsTab();
   } else {
     drawSettingsTab();
   }
@@ -3958,6 +4206,19 @@ void stopOctopus() {
 }
 
 // ---------- Tab switching ----------
+// PROJECTS is filled in for real now (level 1, the project list) -
+// renderProjectsTab() and handleProjectsTouch() are no longer the empty
+// scaffolding Task 4 left here. Both are DEFINED IN projects.ino instead of
+// here, because every dispatch site below (switchTab(), forceFullRepaint(),
+// stopOctopus(), handleTouch(), the once-a-second tick further down) already
+// calls them with no `#if` of its own - Arduino auto-prototypes a plain
+// function regardless of which .ino file defines it, so nothing here needs
+// to know that. Each definition's own BODY carries the `#if BOARD_HAS_
+// PROJECTS`, never its signature or its outer braces, so board 1 still links
+// against a real (empty) body: an `#if`/`#else` that opened a brace in each
+// arm would leave any brace-counting checker here seeing one more `{` than
+// `}` (CLAUDE.md; it has broken an unrelated assertion this way once
+// already), where a guard confined to the body's own fragment cannot.
 // Repaint the current tab from scratch. Needed after the floating button MOVES:
 // the change-only redraw discipline has no record of what the button was covering,
 // so the only correct way to reveal it is a full repaint of the tab. Moving is
@@ -3978,6 +4239,8 @@ void forceFullRepaint() {
     renderUsageTab();
   } else if (currentTab == TAB_SESSIONS) {
     drawSessionsAll();
+  } else if (currentTab == TAB_PROJECTS) {
+    renderProjectsTab();
   } else {
     drawSettingsStatic(); // resets its own caches
     renderSettingsTab();
@@ -4094,6 +4357,40 @@ void switchTab(Tab newTab) {
 #endif
   } else if (currentTab == TAB_SESSIONS) {
     drawSessionsAll();
+  } else if (currentTab == TAB_PROJECTS) {
+    // THE LEVEL OPENED - fetch, never on the tick (the design's own wire
+    // section: "Request/response when a level opens, like the scrollback").
+    // Guarded here rather than inside renderProjectsTab() itself: that
+    // function also runs from forceFullRepaint()/stopOctopus() (recovering
+    // an ALREADY-open tab from a full-screen overlay closing over it, not
+    // opening it fresh) and from the once-a-second tick, and none of those
+    // is "the level opened" - only a genuine tab switch is, which is exactly
+    // what switchTab() reaching this branch means (the early return above
+    // already declined a same-tab call).
+    //
+    // ALWAYS BACK TO LEVEL 0 ON A FRESH TAB SWITCH, even if the user had
+    // drilled into a project's sessions before leaving PROJECTS - a switch
+    // AWAY and back is not the same gesture as the in-tab "back" (tapping
+    // PROJECTS again while already on it, handleTouch()'s own "same tab is
+    // still back" arm), which is the one place level 1 is re-entered
+    // WITHOUT this reset and WITHOUT a re-fetch.
+#if BOARD_HAS_PROJECTS
+    projLevel = 0;
+    // projLevelPainted FORCED STALE: the fillRect above (this function's own,
+    // just above the if-ladder) just wiped the pixels renderProjectsTab()'s
+    // row-signature caches still believe are on the glass. projLevel is being
+    // set to 0 here, and if the tab being LEFT also ended at level 0 (the
+    // common case - SESSIONS <-> PROJECTS with no drill-in), projLevelPainted
+    // is ALREADY 0 from before this switch, so renderProjectsTab()'s own
+    // `projLevelPainted != projLevel` guard sees no change and busts NOTHING -
+    // onto a content area that was just cleared. Blank tab, no rows, no
+    // loading/failed/empty state, nothing (CLAUDE.md: "a field whose CHROME is
+    // repainted must have its cache reset or the value is left BLANK").
+    // exitScrollback()'s exact idiom, for the identical reason.
+    projLevelPainted = -1;
+    requestProjects();
+#endif
+    renderProjectsTab();
   } else {
     drawSettingsTab();
   }
@@ -4374,6 +4671,21 @@ void handleTouch() {
     // screen where the tab bar itself is inert.
     int tabW = tabsW() / TAB_COUNT;
     Tab tapped = (Tab) constrain(sx / tabW, 0, TAB_COUNT - 1);
+#if BOARD_HAS_PROJECTS
+    // SAME TAB IS STILL BACK, PROJECTS' own instance of the rule the
+    // SESSIONS detail card already established two branches up this same
+    // function: the underline says PROJECTS, so a tap on PROJECTS meaning
+    // "the PROJECTS tab" is what the bar already claims, and level 1 (one
+    // project's own sessions) is not that - it is a screen INSIDE the tab.
+    // projBack() repaints from the project list already held in
+    // projects[], never a re-fetch (see projBack()'s own note) - a fresh
+    // fetch belongs to switchTab()'s "the level opened" rule, and tapping
+    // the tab you are already on opens nothing.
+    if (tapped == currentTab && currentTab == TAB_PROJECTS && projLevel == 1) {
+      projBack();
+      return;
+    }
+#endif
     switchTab(tapped);
     return;
   }
@@ -4429,6 +4741,8 @@ void handleTouch() {
     int row = sessionRowAtY(sy);
     if (row >= 0) openSessionDetail(sessionAt(row));
   }
+
+  if (currentTab == TAB_PROJECTS) handleProjectsTouch(sx, sy);
 
   if (currentTab == TAB_SETTINGS) handleSettingsTouch(sx, sy);
 }
@@ -4511,9 +4825,20 @@ const char* dispMacTag(int hostSlot) {
 // deliberately: a SessionInfo is 2.2KB and a value sort would memmove tens of
 // KB every tick.
 uint8_t sessionOrder[SESSION_SLOTS];
+// ENDED IS ITS OWN RANK, BELOW EVERY LIVE ONE - not the default bucket it used
+// to share with "working". The hook stamps updated_at when it writes the ghost
+// record, so an ended session is the FRESHEST thing in the list for the whole
+// of its grace period; in bucket 2 it therefore outsorted every session that is
+// actually doing something and took the expanded hero card. The ghost row exists
+// to say "that session did not just vanish", not to be the most prominent thing
+// on the screen. The host ranks it the same way (host/index.mjs's readSessions),
+// and BOTH are needed: the host decides which sessions are sent in full, this
+// decides which row is drawn where. sessions-rank-check.mjs PARSES this table,
+// so the rank it asserts is this one and not a copy.
 int urgencyRank(const char* status) {
   if (strcmp(status, "asking") == 0) return 0;
   if (strcmp(status, "waiting") == 0) return 1;
+  if (strcmp(status, "ended") == 0) return 3;
   return 2;
 }
 int sessionAt(int displayPos) {
@@ -4759,6 +5084,14 @@ void handleLine(const String& line) {
     hostLinks[curLink].lastPayloadMillis = millis();
     copyField(hostLinks[curLink].tag, sizeof(hostLinks[curLink].tag), doc["hostTag"] | "");
     copyField(hostLinks[curLink].emoji, sizeof(hostLinks[curLink].emoji), doc["hostEmoji"] | "");
+#if BOARD_HISTORY_SCROLL
+    // The credential a RESUME is signed against, published by THIS Mac in
+    // THIS tick - see HostLink::resumeNonce. Stored per link because each Mac
+    // issues (and rotates) its own, and a resume signed against the wrong
+    // Mac's nonce is rejected by the only Mac that could have run it.
+    copyField(hostLinks[curLink].resumeNonce, sizeof(hostLinks[curLink].resumeNonce),
+              doc["rnonce"] | "");
+#endif
   }
 
   // May we DECIDE a prompt, or only display it? The Mac owns this policy,
@@ -4816,6 +5149,164 @@ void handleLine(const String& line) {
     return;
   }
 
+#if BOARD_HAS_PROJECTS
+  // PROJECTS reply: its own line, `projs` the only key. Handled here, beside
+  // `sdetail` and `hist`, for the identical reason: everything past this
+  // point parses a TICK, and falling through would reset every usage field
+  // to "missing" over a payload that carries none of them. Wholesale
+  // replace, never a merge - the host's own list is already the complete,
+  // most-active-first inventory (host/project-replies.mjs's
+  // buildProjectsReply has no per-project identity for a merge to key on
+  // that would be cheaper than just re-filling the array).
+  JsonObject projs = doc["projs"];
+  if (!projs.isNull()) {
+    projectsPending = false;
+    projectsEverReceived = true;
+    projectsLastLoadMs = millis();
+    JsonArray items = projs["items"].as<JsonArray>();
+    int n = 0, overflow = 0, toolong = 0;
+    if (!items.isNull()) {
+      for (JsonObject it : items) {
+        // PROJ_SLOTS IS THIS DEVICE'S OWN CEILING, not a mirror of a host-side
+        // cap - buildProjectsReply ships every project with a transcript,
+        // uncapped. An item past the ceiling is COUNTED rather than silently
+        // walked off the end of the array, the same "say what did not fit"
+        // rule SESSIONS' hiddenCount follows.
+        if (n >= PROJ_SLOTS) { overflow++; continue; }
+        ProjInfo& p = projects[n];
+        // A KEY THAT WOULD TRUNCATE IS REFUSED BY NAME, NOT STORED SHORT.
+        // copyField() truncates silently, and a truncated key is worse than a
+        // missing row: it LISTS (the name comes from the transcript's cwd, not
+        // from the key) and then asks the host for a directory that does not
+        // exist, which is exactly the "No sessions found for a project that
+        // says it has N" defect PROJ_KEY_MAX was raised to abolish. Unreachable
+        // at 128 against the 80 measured - stated rather than assumed
+        // impossible, the same rule the overflow counter below follows.
+        const char* kk = it["k"] | "";
+        if (strlen(kk) >= sizeof(p.key)) {
+          Serial.printf("PROJECTS: a project key of %u chars exceeds PROJ_KEY_MAX(%u) and was "
+                        "NOT stored - it would have been truncated and could never be opened\n",
+                        (unsigned) strlen(kk), (unsigned) sizeof(p.key));
+          toolong++;
+          continue;
+        }
+        copyField(p.key, sizeof(p.key), kk);
+        copyField(p.name, sizeof(p.name), it["n"] | "");
+        p.count = it["c"] | 0;
+        p.tod = it["t"] | -1L;
+        n++;
+      }
+    }
+    projectCount = n;
+    // Unreached today - PROJ_SLOTS(24) is over the 16 measured
+    // (docs/superpowers/specs/2026-09-20-sessions-manager-design.md) - but
+    // named rather than assumed impossible, per this codebase's "every
+    // refusal must name its cause" rule applied to a truncation instead.
+    if (overflow > 0)
+      Serial.printf("PROJECTS: %d project(s) beyond PROJ_SLOTS(%d) were not stored\n",
+                    overflow, PROJ_SLOTS);
+    if (toolong > 0)
+      Serial.printf("PROJECTS: %d project(s) with a key longer than PROJ_KEY_MAX(%d) were not stored\n",
+                    toolong, (int) PROJ_KEY_MAX);
+    // Repaint only if this tab is actually showing - the same rule sdetail's
+    // reply follows above, and for the same reason: a reply that lands while
+    // the user is on a different tab must not paint over it.
+    if (currentTab == TAB_PROJECTS) renderProjectsTab();
+    return;
+  }
+
+  // PROJSESS reply: its own line, `projsess` the only key. Level 2 of the
+  // same tab, same "bail out before the usage parsing below" reason `projs`
+  // states above.
+  JsonObject projsess = doc["projsess"];
+  if (!projsess.isNull()) {
+    const char* k = projsess["k"] | "";
+    // THE ECHOED KEY MUST MATCH projOpenKey, OR THIS REPLY IS STALE AND IS
+    // DISCARDED RATHER THAN DRAWN - AND THAT DISCARD MUST TOUCH NO STATE AT
+    // ALL, THE FLAG INCLUDED. projOpenLevel1() sets projOpenKey to the key
+    // it is about to request BEFORE calling requestProjSessions(), so under
+    // ordinary operation the two always agree - but PROJSESS carries no
+    // sequence number the way SCROLL's chunked fetch does, and this is the
+    // one guard standing between a slow, since-superseded reply and it
+    // silently overwriting whatever project the screen has moved on to
+    // showing. Never decoded either side of this comparison - see
+    // ProjInfo.key's own note and host/project-replies.mjs's header on why
+    // that would be unsafe.
+    //
+    // psessPending IS CLEARED ONLY INSIDE THIS BRANCH - fix round 1's own
+    // finding, and worth stating exactly why the unconditional version was
+    // wrong rather than merely that it was: clearing it BEFORE the key
+    // check means a late, STALE reply for a project the level has already
+    // moved on from (timed out, then re-opened as a DIFFERENT project) would
+    // force psessPending back to false out from under the NEW, genuinely
+    // in-flight request for the CURRENT key - defeating requestProjSessions()'s
+    // own busy guard (a re-open now fires a second wire request) and, worse,
+    // making checkFetchTimeout() return early on `!pending` forever after,
+    // so the NEW request's own timeout could never fire again. That is the
+    // exact stuck-forever defect this whole mechanism exists to prevent,
+    // re-entered through the one door it was not watching - discarding a
+    // stale reply must change NO state at all, the pending flag included,
+    // exactly as it already changes none of psess[]/psessCount/psessTotal.
+    if (strcmp(k, projOpenKey) == 0) {
+      psessPending = false;
+      // A REFUSAL IS NOT AN EMPTY PROJECT, and this is where the two used to be
+      // indistinguishable. host/project-replies.mjs answers an unknown key with
+      // `e` now (its own note on why the old empty-list reply was a lie the
+      // staleness strcmp below could not catch: the key echoes back UNCHANGED,
+      // so it matched and level 2 drew "No sessions found" for a project whose
+      // row had just claimed N). psessEverReceived is deliberately NOT set: the
+      // list is unknown, not known-to-be-empty, and leaving it false is what
+      // keeps renderPSessLevel() in its message branch.
+      const char* perr = projsess["e"] | "";
+      if (perr[0]) {
+        psessRefused = true;
+        psessFetchFailed = true;   // psessDeadEnd(), so the tap still retries
+        Serial.printf("PROJSESS: the Mac REFUSED \"%s\" (%u chars): %s - this device asked with "
+                      "the key it holds; if that key is short, it was truncated on the way in\n",
+                      k, (unsigned) strlen(k), perr);
+        if (currentTab == TAB_PROJECTS) renderProjectsTab();
+        return;
+      }
+      psessEverReceived = true;
+      JsonArray items = projsess["items"].as<JsonArray>();
+      int n = 0, overflow = 0;
+      if (!items.isNull()) {
+        for (JsonObject it : items) {
+          // PSESS_SLOTS IS THIS DEVICE'S OWN CEILING - see its own note in
+          // board_es3c35p.h. The host may already have capped at
+          // PROJSESS_CAP(60) before this ever reached the wire; either way
+          // an item past OUR ceiling is COUNTED, not silently dropped,
+          // exactly as `projs`' own overflow counter above does.
+          if (n >= PSESS_SLOTS) { overflow++; continue; }
+          PSessInfo& s = psess[n];
+          copyField(s.id, sizeof(s.id), it["id"] | "");
+          copyField(s.title, sizeof(s.title), it["t"] | "");
+          s.turns = it["n"] | 0;
+          s.tod = it["w"] | -1L;
+          s.live = (it["live"] | 0) ? 1 : 0;
+          n++;
+        }
+      }
+      psessCount = n;
+      // THE WIRE'S OWN `total`, NOT n - see PSessInfo's own note on
+      // psessTotal and this task's brief: showing the capped count as the
+      // total would be the silent lie CLAUDE.md's cap-honesty rule exists
+      // to prevent. Falls back to n only if the host's own reply is
+      // missing the field, which host/project-replies-check.mjs's own
+      // wire-shape assertion means should not happen in practice.
+      psessTotal = projsess["total"] | n;
+      if (overflow > 0)
+        Serial.printf("PROJSESS: %d session(s) beyond PSESS_SLOTS(%d) were not stored\n",
+                      overflow, PSESS_SLOTS);
+      if (currentTab == TAB_PROJECTS) renderProjectsTab();
+    } else {
+      Serial.printf("PROJSESS: reply for \"%s\" arrived while viewing \"%s\" - discarded as stale\n",
+                    k, projOpenKey);
+    }
+    return;
+  }
+#endif
+
   // History reply: its own line, `hist` the only key. Bail out before any of the usage
   // parsing below, which would otherwise reset every field to "missing".
   JsonObject hist = doc["hist"];
@@ -4870,6 +5361,68 @@ void handleLine(const String& line) {
     if (!hist["seq"].isNull()) {
       int seq = hist["seq"] | 0;
       int of  = hist["of"]  | 1;
+      // INSTRUMENT BEFORE ANYTHING BELOW MUTATES ANY SCROLL STATE - name every
+      // fact a person needs to tell "the next chunk of OUR OWN fetch" apart
+      // from "a stray or duplicated reply", so one hardware run can match this
+      // line to the "SCROLL req why=..." (scrollFetch(), scrollback.ino) that
+      // caused it. idMatches is read here, once, and used by both this log
+      // line and the refusal right below it.
+      const bool histIdMatchesLoaded = (strcmp(hid, scrollLoadedId) == 0);
+      {
+        char m[150];
+        snprintf(m, sizeof(m),
+                 "SCROLL recv seq=%d of=%d id=%s loaded=%s count=%d pend=%d active=%d fromproj=%d match=%d",
+                 seq, of, hid, scrollLoadedId, scrollCount, scrollPending ? 1 : 0,
+                 scrollActive ? 1 : 0, scrollFromProjects ? 1 : 0, histIdMatchesLoaded ? 1 : 0);
+        sendLineToHost(m);
+      }
+      // REFUSE A REPLY THIS DEVICE DID NOT ASK FOR, BY NAME, BEFORE TOUCHING
+      // ANY SCROLL STATE AT ALL - the actual fix, independent of ever finding
+      // this reply's cause. scrollPending is true ONLY inside the window
+      // scrollFetch() (scrollback.ino) opens immediately before its OWN
+      // "HISTORY ..." wire line goes out, and false again the moment that
+      // SAME fetch ends - done (below), timed out (tickScrollFetch()), holed
+      // (the seqgap handler right below this), OR because scrollFetch() found
+      // the answer already held in PSRAM and sent no wire line at all ("SCROLL
+      // held", scrollback.ino - no request means no reply is ever legitimately
+      // outstanding). histIdMatchesLoaded is true only when this reply names
+      // the session currently loaded or being loaded - scrollFetch() sets
+      // scrollLoadedId from its OWN id argument before it sends anything,
+      // never from a reply. So "scrollPending && idMatches" holds for every
+      // real chunk of a fetch this device itself began, and fails for exactly
+      // the two cases this task names as provably wrong: a reply for an id
+      // that is not what is loaded (match=0 above), and a reply arriving
+      // after this device's own fetch already ended, held or completed
+      // (match=1, pend=0). Measured on hardware as the destructive sequence
+      // this task exists for: "SCROLL done entries=504" (the real fetch
+      // finishes, scrollPending drops), "SCROLL open: ... already open -
+      // no-op" (scrollOpenById()'s own dedupe catches a SECOND open, sends no
+      // request), then a THIRD stream's own "SCROLL done entries=0" wiping the
+      // 504 that had just rendered - this refusal never lets that third
+      // stream's seq=0 chunk reach scrollReset() in the first place.
+      //
+      // A GENUINE re-fetch still gets through here: the retry tap, the
+      // CHAT/ALL filter toggle, and a fresh PROJECTS open (scrollRefetch()/
+      // scrollOpenById(), scrollback.ino) all route through scrollFetch(),
+      // which sets scrollPending true and scrollLoadedId to the id it is
+      // about to ask for BEFORE the wire line goes out - so their own first
+      // reply always arrives with both true, and every later chunk of that
+      // SAME fetch keeps scrollPending true until the fetch itself ends.
+      if (!scrollPending || !histIdMatchesLoaded) {
+        char m[110];
+        snprintf(m, sizeof(m),
+                 "SCROLL refused seq=%d id=%s loaded=%s pend=%d - not this device's own fetch",
+                 seq, hid, scrollLoadedId, scrollPending ? 1 : 0);
+        sendLineToHost(m);
+        return;
+      }
+      // scrollReset() ALSO ZEROES scrollNextSeq (scrollback.ino) - a fresh
+      // stream's own chunk 0 must be compared against 0, not against whatever
+      // the PREVIOUS transcript's continuity counter last reached. Before that,
+      // this line cleared the store but left scrollNextSeq stale, so a second
+      // stream's chunk 0 (`seq=0`) was compared against the first stream's
+      // tail (e.g. `want=25`) and declared a hole every time - a completely
+      // successful fetch reported as "could not reach the Mac".
       if (seq == 0) scrollReset();
       if (seq != scrollNextSeq) {
         // A HOLE. Clear rather than assemble a transcript with a gap in it: a
@@ -5135,13 +5688,18 @@ void handleLine(const String& line) {
   if (curLink >= 0) {
     hostLinks[curLink].sessionsTotal = doc["sessionsTotal"] | 0;
     hostLinks[curLink].hiddenAsking = doc["hiddenAsking"] | 0;
+    // Task 3's field, first actually READ here: every session this link's Mac has
+    // ever run (live or ended), for the SESSIONS tab's floating count line below.
+    hostLinks[curLink].sessionTotalAll = doc["sessionTotal"] | 0;
   }
   sessionsTotal = 0;
   hiddenAskingCount = 0;
+  sessionTotalAll = 0;
   for (int i = 0; i < MAX_LINKS; i++) {
     if (!hostLinks[i].used) continue;
     sessionsTotal += hostLinks[i].sessionsTotal;
     hiddenAskingCount += hostLinks[i].hiddenAsking;
+    sessionTotalAll += hostLinks[i].sessionTotalAll;
   }
   if (newlyAsking) {
     Serial.println("BEEP: session newly asking");
@@ -5386,6 +5944,52 @@ void handleLine(const String& line) {
   // and keeps the countdown honest on a tick that arrives between ticks.
   if (pairPanelActive) { renderPairPanel(); renderFooter(); return; }
 #endif
+#if BOARD_HISTORY_SCROLL
+  // THE TRANSCRIPT'S OWN ARM RUNS BEFORE THE histActive ONE BELOW, AND THE ORDER
+  // IS THE WHOLE FIX. The scrollback screen owns the whole panel - unlike every
+  // OTHER tab it reserves no footer strip at all, so without this an ordinary ~5s
+  // tick falls through to `renderSessionsTab()` + `renderFooter()` below and paints
+  // the clock/battery/freshness readout straight over the transcript's own bottom
+  // row. FOUND on the glass: SCROLLPERF's own SCREENSHOT showed "04:49:38 / 1s ago"
+  // where the last visible line of chat should have been. New chunks still reach
+  // the screen - the `hist` reply handler in processCompletedLine() calls
+  // drawScrollback() itself the moment they land - so an ordinary tick carrying no
+  // history has nothing to repaint here.
+  //
+  // THIS BLOCK USED TO SIT *AFTER* THE histActive ARM, AND THAT FROZE THE WHOLE UI -
+  // CONFIRMED ON HARDWARE 2026-09-21 (two captures 45 seconds apart showing the same
+  // footer clock, 04:24:39 / "0s ago", while the host tick still reported
+  // via=usb:Deckhand-C114,ble). Both openers set histActive as well as scrollActive
+  // (openScrollback()'s own note on why), so a PROJECTS-opened transcript reached
+  // the histActive arm first; scrollOpenById() loads an id that is deliberately NOT
+  // in sessions[], detailId is empty, resolveDetailIndex() returns -1, and that arm
+  // painted the SESSIONS list over the open transcript - leaving scrollActive TRUE.
+  // After that the 5s tick returned here every time and the 1s tick is gated on
+  // !scrollActive, so THE FOOTER AND EVERY TAB RENDER STOPPED FOREVER and 304KB of
+  // PSRAM stayed held: a device that still talks to the Mac behind a dead screen.
+  // scrollback-check.mjs binds this ordering and fails BY NAME if it regresses.
+  if (scrollActive) {
+    // THE OTHER ENTRY PATH IS UNCHANGED. A transcript opened the ordinary way
+    // (openScrollback(), from a SESSIONS detail card) keeps the per-tick re-anchor
+    // it has always had: detailIndex is what drawScrollback()'s header, the
+    // CHAT/ALL refetch and the live tail all read, and a reorder between ticks
+    // would otherwise leave it pointing at a different session's row. What it no
+    // longer does on a -1 is call exitReaderToList(), which cleared histActive but
+    // NOT scrollActive - the same freeze by the other door. exitScrollback() is the
+    // one exit that releases both (and the PSRAM), and with showingDetail cleared
+    // first it lands on the sessions list exactly where exitReaderToList() did.
+    //
+    // A PROJECTS-OPENED TRANSCRIPT IS NOT SUBJECT TO ANY OF IT: there is no
+    // sessions[] row for its id by construction, so "resolve the detail index" has
+    // no meaning here and its answer (-1) says nothing about whether this screen is
+    // still valid.
+    if (!scrollFromProjects) {
+      detailIndex = resolveDetailIndex();
+      if (detailIndex < 0) { showingDetail = false; exitScrollback(); }
+    }
+    return;
+  }
+#endif
   // The history reader owns the whole screen. Absorb the tick - without this the
   // periodic repaint paints the detail screen straight over it, the same way it once
   // painted over the settings confirm dialog.
@@ -5405,18 +6009,6 @@ void handleLine(const String& line) {
     exitReaderToList();
     return;
   }
-#if BOARD_HISTORY_SCROLL
-  // The scrollback screen owns the whole panel too - unlike every OTHER tab it
-  // reserves no footer strip at all, so without this an ordinary ~5s tick falls
-  // through to `renderSessionsTab()` + `renderFooter()` below and paints the
-  // clock/battery/freshness readout straight over the transcript's own bottom
-  // row. FOUND on the glass: SCROLLPERF's own SCREENSHOT showed "04:49:38 / 1s
-  // ago" where the last visible line of chat should have been. New chunks still
-  // reach the screen - the `hist` reply handler in processCompletedLine() calls
-  // drawScrollback() itself the moment they land - so an ordinary tick carrying
-  // no history has nothing to repaint here.
-  if (scrollActive) return;
-#endif
 
   if (firstEver) {
     // The standalone screen owns the whole content area (a 64px mark, a wordmark
@@ -5427,6 +6019,7 @@ void handleLine(const String& line) {
     drawFooterChrome();
     if (currentTab == TAB_USAGE) drawUsageStatic();
     else if (currentTab == TAB_SESSIONS) drawSessionsAll();
+    else if (currentTab == TAB_PROJECTS) renderProjectsTab();
     else drawSettingsStatic();
   }
   if (voiceCardActive) { // the card owns the content area until dismissed
@@ -5442,6 +6035,7 @@ void handleLine(const String& line) {
   }
   if (currentTab == TAB_USAGE) renderUsageTab();
   else if (currentTab == TAB_SESSIONS) renderSessionsTab();
+  else if (currentTab == TAB_PROJECTS) renderProjectsTab();
   else renderSettingsTab();
   renderFooter();
   // No drawFab() here any more. It used to be repainted last on every tick,
@@ -6209,6 +6803,24 @@ static const UnavailableCommand UNAVAILABLE_COMMANDS[] = {
     "heap on a board with no PSRAM - see board_e32r28t.h's SESSION_SLOTS note. DETAIL <n> "
     "reaches every row this board has." },
 #endif
+#if !BOARD_HAS_PROJECTS
+  { "PROJFETCH",
+    "it fetches the PROJECTS tab's project list from ~/.claude/projects/. This board is "
+    "BOARD_HAS_PROJECTS 0: PROJECTS is out of scope here by design "
+    "(docs/superpowers/specs/2026-09-20-sessions-manager-design.md, \"Out of scope: Board "
+    "1\") - TAB 2 still switches cleanly to it, but its content area stays empty, so there "
+    "is no project list here to fetch." },
+  { "PROJOPEN",
+    "it opens level 2 of the PROJECTS tab - one project's own sessions - for the n-th "
+    "project in display order. This board is BOARD_HAS_PROJECTS 0, for the identical reason "
+    "PROJFETCH above states: there is no project list here for an index to name a row of, "
+    "and no PSessInfo/psess[] storage compiled in to hold what PROJSESS would answer with." },
+  { "PSESSOPEN",
+    "it opens level 3 - a PROJECTS session's own transcript, in the scrolling scrollback "
+    "surface - for the n-th session of the currently open project. This board is "
+    "BOARD_HAS_PROJECTS 0, for the identical reason PROJOPEN above states: there is no "
+    "psess[] here for an index to name a row of." },
+#endif
 #if BOARD_USES_TFT_ESPI
   { "SHIMBENCH",
     "it times a full-screen and a dirty-rect flush of the PSRAM shadow framebuffer. "
@@ -6338,6 +6950,19 @@ static const UnavailableCommand UNAVAILABLE_COMMANDS[] = {
   { "SCROLLFETCH",
     "the scrolling transcript is BOARD_HISTORY_SCROLL 0 on this board, so there is nothing "
     "to fetch a transcript into; see SCROLLTO." },
+  // RESUME'S HANDLER SITS IN THE SAME NESTED REGION SCROLLFETCH'S DOES - inside
+  // the outer `#if !BOARD_USES_TFT_ESPI` that also wraps BOARD_HAS_WIRELESS_PAIR
+  // and BOARD_BLE_NIMBLE above it in the dispatch chain - so its guard is
+  // `!BOARD_USES_TFT_ESPI && BOARD_HISTORY_SCROLL` too, not BOARD_HISTORY_SCROLL
+  // alone the way SCROLLPERF's is (SCROLLPERF's own handler sits OUTSIDE that
+  // wrapper, elsewhere in the chain - checked by commands-check.mjs, not
+  // assumed, which is what caught this entry sitting in the wrong block on the
+  // first pass).
+  { "RESUME",
+    "it sends a headless `claude -p --resume <id> <text>` turn for whichever transcript "
+    "the scrolling scrollback surface has open. This board is BOARD_HISTORY_SCROLL 0: there "
+    "is no scrollLoadedId here to resume, and no scrolling transcript for one to belong to; "
+    "see SCROLLTO." },
 #endif
 #if !BOARD_HISTORY_SCROLL
   // SCROLLPERF's own guard is BOARD_HISTORY_SCROLL ALONE, where its four neighbours
@@ -6363,6 +6988,23 @@ static const UnavailableCommand UNAVAILABLE_COMMANDS[] = {
     "returned, which answered this verb the way a successful run would. CALIBRATE TOUCH is absent "
     "from the Device group on this board under the same flag, so the button and the verb are gone "
     "together." },
+#endif
+#if !BOARD_HAS_SD
+  { "SDPROBE",
+    "it mounts the microSD over the SDMMC bus and reports the card's width, type and size. "
+    "This board is BOARD_HAS_SD 0, and that is NOT a claim that it has no card slot - it has "
+    "one, and docs/reference/audio-and-voice.md reserves IO18/IO19 for a possible INMP441 mic "
+    "on the strength of the slot being unused. The flag says the slot is wired for SPI (IO18 "
+    "SCK, IO19 MISO, IO23 MOSI, plus a CS), not for SDMMC: board_e32r28t.h declares no PIN_SD_* "
+    "for setPins() to take, SD_MMC.h is not included here, and no FATFS or SDMMC driver is "
+    "linked into this binary at all. Probing this slot needs an SPI-mode probe against the SD "
+    "library, which is a different command and does not exist yet." },
+  { "SDPERF",
+    "it times writes, reads and an append against the microSD over SDMMC, from a PSRAM source "
+    "buffer, to size the offline-sessions write policy. This board is BOARD_HAS_SD 0 - no SDMMC "
+    "slot is wired, no PIN_SD_* are declared in board_e32r28t.h, and it has no PSRAM to source "
+    "such a buffer from either, so neither half of the measurement exists here. SCROLLPERF is "
+    "the timing instrument this board does have, and it is also absent (BOARD_HISTORY_SCROLL 0)." },
 #endif
   // TERMINATOR, and it is what makes an all-#if'd array legal: on board 2 every
   // block above is skipped and `UnavailableCommand[] = {}` would not compile.
@@ -6559,6 +7201,174 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
         setMsgPriority((uint8_t) want);
       }
     }
+#if BOARD_HAS_SD
+  } else if (buf == "SDPROBE") {
+    // MOUNTS, REPORTS, AND UNMOUNTS. Nothing else in this firmware touches
+    // GPIO 2..7: board_es3c35p.h declares the six PIN_SD_* and no other site in
+    // the tree reads them, so the probe has to hand those lines back in the
+    // state it found them or it becomes a standing candidate cause for every
+    // later symptom on this board. Same property BLEMTU claims for itself - a
+    // probe that configures nothing cannot be blamed for a surprising number.
+    //
+    // SITS UNDER BOARD_HAS_SD, not under the !BOARD_USES_TFT_ESPI arm it could
+    // have joined. The two agree today and would stop agreeing the moment a
+    // third board existed, and UNAVAILABLE_COMMANDS[] needs the EXACT NEGATION
+    // of this guard to be a one-flag expression - see that table's own note.
+    //
+    // Via sendLineToHost, NOT Serial.printf, for the reason TEMP gives: Serial
+    // reaches the Mac only over USB, and the state most worth probing is a
+    // board on battery with the cable out - exactly when a printf goes nowhere.
+    //
+    // NOT DEDUPED against the host's double delivery, deliberately. chip/page
+    // dedupe because an insert is not idempotent; mount-report-unmount is, the
+    // two copies run in sequence inside loop(), and end() clears _card so the
+    // second mounts as cleanly as the first. Two identical reports are the
+    // honest answer rather than a second copy silently dropped - commands-check
+    // records one TEMP producing four lines for the same reason.
+    char line[160];
+    // FROM THE HEADER'S CONSTANTS. A literal six-tuple here is the exact defect
+    // the board-2 port paid for three times, and this is its worst shape yet: it
+    // would still compile and still mount on any board wired the same way, so
+    // the first board that was not would report "no card" and send somebody
+    // looking at the slot.
+    if (!SD_MMC.setPins(PIN_SD_CLK, PIN_SD_CMD, PIN_SD_D0, PIN_SD_D1, PIN_SD_D2, PIN_SD_D3)) {
+      snprintf(line, sizeof(line),
+               "SDPROBE failed: setPins(clk=%d cmd=%d d0=%d d1=%d d2=%d d3=%d) was rejected - "
+               "one of those is not routable to the SDMMC host",
+               PIN_SD_CLK, PIN_SD_CMD, PIN_SD_D0, PIN_SD_D1, PIN_SD_D2, PIN_SD_D3);
+      sendLineToHost(line);
+    } else {
+      // FOUR-BIT FIRST, THEN ONE-BIT, AND THE WIDTH THAT WON IS REPORTED. The
+      // two failures are different hardware stories - "4-bit failed, 1-bit
+      // worked" says D1/D2/D3 are not landing, "both failed" says no card or no
+      // CLK/CMD - and a single ok/failed boolean throws away the only
+      // distinction the next person would have to go and rediscover.
+      int width = 4;
+      bool up = SD_MMC.begin("/sd", false);
+      if (!up) {
+        SD_MMC.end();
+        width = 1;
+        up = SD_MMC.begin("/sd", true);
+      }
+      if (!up) {
+        snprintf(line, sizeof(line),
+                 "SDPROBE failed: begin() rejected the bus at 4-bit AND 1-bit - no card seated, "
+                 "or clk=%d/cmd=%d are not this slot's", PIN_SD_CLK, PIN_SD_CMD);
+      } else {
+        const sdcard_type_t t = SD_MMC.cardType();
+        if (t == CARD_NONE) {
+          // ITS OWN OUTCOME, neither ok nor failed. The host controller came up
+          // and the slot answered nothing, which is what an EMPTY slot looks
+          // like - and a reader told "failed" here goes and checks the pins.
+          snprintf(line, sizeof(line),
+                   "SDPROBE none: mounted at width=%d but cardType()==CARD_NONE - the slot is empty",
+                   width);
+        } else {
+          const char* name = t == CARD_MMC  ? "MMC"
+                           : t == CARD_SD   ? "SDSC"
+                           : t == CARD_SDHC ? "SDHC"
+                                            : "UNKNOWN";
+          snprintf(line, sizeof(line), "SDPROBE ok width=%d type=%s size=%lluMB",
+                   width, name, (unsigned long long) (SD_MMC.cardSize() >> 20));
+        }
+      }
+      // ON EVERY PATH. Note this is a NO-OP after a failed begin() - end() is
+      // guarded on _card, which a failure leaves NULL - so the failure arms
+      // release nothing of ours and IDF's mount helper owns that cleanup. It is
+      // the success path that matters here: without this the next SDPROBE would
+      // take begin()'s `if (_card) return true` and report a stale mount.
+      SD_MMC.end();
+      sendLineToHost(line);
+    }
+  } else if (buf == "SDPERF") {
+    // WHAT THE OFFLINE-SESSIONS DESIGN CANNOT BE WRITTEN WITHOUT. Its write policy
+    // turns entirely on how long a write blocks: the loop here is single-threaded,
+    // so a 300KB transcript flush that costs 400ms is ~12 dropped frames and reads
+    // as a RENDERING bug, not a storage one. Guessing the number would be an
+    // assumption load-bearing for a whole subsystem.
+    //
+    // THE SOURCE BUFFER IS PSRAM, DELIBERATELY, because that is where scrollText
+    // lives. A DRAM-sourced write measures a path the real code never takes and
+    // would flatter it: PSRAM read bandwidth and the DMA constraints on it are part
+    // of the cost this is trying to find. If PSRAM turns out to BE the bottleneck,
+    // the answer is a DRAM staging buffer - and that is a design decision this
+    // measurement exists to inform rather than pre-empt.
+    //
+    // Sizes are the three the design actually writes: a delta append, the session
+    // snapshot (~48KB), and a full transcript text blob (SCROLL_TEXT_BYTES).
+    char line[128];
+    if (!SD_MMC.setPins(PIN_SD_CLK, PIN_SD_CMD, PIN_SD_D0, PIN_SD_D1, PIN_SD_D2, PIN_SD_D3) ||
+        !SD_MMC.begin("/sd", false)) {
+      SD_MMC.end();
+      sendLineToHost("SDPERF failed: could not mount at 4-bit - run SDPROBE for the cause");
+    } else {
+      const size_t SIZES[] = { 2048, 49152, 262144 };
+      uint8_t* src = (uint8_t*) heap_caps_malloc(262144, MALLOC_CAP_SPIRAM);
+      if (!src) {
+        // Named, not silent: a failed allocation and a failed write are
+        // indistinguishable from the Mac otherwise.
+        sendLineToHost("SDPERF failed: could not allocate a 262144-byte PSRAM source buffer");
+      } else {
+        for (size_t i = 0; i < 262144; i++) src[i] = (uint8_t) ('a' + (i % 26));
+        SD_MMC.mkdir("/dh");
+        for (unsigned s = 0; s < sizeof(SIZES) / sizeof(SIZES[0]); s++) {
+          const size_t n = SIZES[s];
+          unsigned long t0 = millis();
+          File f = SD_MMC.open("/dh/perf.tmp", FILE_WRITE);
+          if (!f) { snprintf(line, sizeof(line), "SDPERF write %u B: open failed", (unsigned) n);
+                    sendLineToHost(line); continue; }
+          size_t wrote = f.write(src, n);
+          f.close();                       // close() is what flushes FATFS - time it INSIDE
+          unsigned long wms = millis() - t0;
+          // KB/s computed here rather than on the Mac so the line is readable on the
+          // glass too, and so a zero-millisecond result cannot divide by zero there.
+          snprintf(line, sizeof(line), "SDPERF write %u B in %lu ms (%lu KB/s)%s",
+                   (unsigned) n, wms, wms ? (unsigned long) (n / wms) : 0UL,
+                   wrote == n ? "" : " SHORT WRITE");
+          sendLineToHost(line);
+
+          t0 = millis();
+          f = SD_MMC.open("/dh/perf.tmp", FILE_READ);
+          if (!f) { sendLineToHost("SDPERF read: open failed"); continue; }
+          size_t got = 0;
+          while (got < n) {
+            size_t r = f.read(src + got, n - got);
+            if (!r) break;
+            got += r;
+          }
+          f.close();
+          unsigned long rms = millis() - t0;
+          snprintf(line, sizeof(line), "SDPERF read  %u B in %lu ms (%lu KB/s)%s",
+                   (unsigned) got, rms, rms ? (unsigned long) (got / rms) : 0UL,
+                   got == n ? "" : " SHORT READ");
+          sendLineToHost(line);
+        }
+        // THE APPEND IS THE ONE THE DESIGN LEANS ON HARDEST - every transcript delta
+        // is one of these, and if an append costs the same as a rewrite then the
+        // whole hybrid argument collapses back into the snapshot policy it rejected.
+        unsigned long t0 = millis();
+        File f = SD_MMC.open("/dh/perf.tmp", FILE_APPEND);
+        if (f) { f.write(src, 2048); f.close(); }
+        snprintf(line, sizeof(line), "SDPERF append 2048 B to 262144 B file in %lu ms",
+                 millis() - t0);
+        sendLineToHost(line);
+
+        // Open+close with no payload, so the per-call floor is separable from the
+        // per-byte cost rather than being smeared through every number above.
+        t0 = millis();
+        f = SD_MMC.open("/dh/perf2.tmp", FILE_WRITE);
+        if (f) f.close();
+        snprintf(line, sizeof(line), "SDPERF open+close empty in %lu ms", millis() - t0);
+        sendLineToHost(line);
+
+        SD_MMC.remove("/dh/perf.tmp");
+        SD_MMC.remove("/dh/perf2.tmp");
+        heap_caps_free(src);
+        sendLineToHost("SDPERF done (temp files removed)");
+      }
+      SD_MMC.end();
+    }
+#endif
 #if !BOARD_USES_TFT_ESPI
   } else if (buf == "SHIMBENCH") {
     // Board 2 only. Times a full-screen flush and a small dirty-rect flush,
@@ -7288,9 +8098,88 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
       while (*arg == ' ') arg++;
       if (*arg) idx = constrain(atoi(arg), 0, sessionCount - 1);
       detailIndex = idx;              // requestScrollback addresses the session's Mac
+      scrollFetchWhy = "probe";       // the SCROLLFETCH diagnostic itself
       requestScrollback(idx);
       Serial.printf("SCROLLFETCH: asked for session %d (%s)\n", idx, sessions[idx].name);
     }
+  } else if (buf.startsWith("RESUME")) {
+    // A HEADLESS CONTINUATION OF WHICHEVER TRANSCRIPT IS OPEN - COMPOSE's own
+    // `type <text>` shape (compose.ino), applied to scrollLoadedId, because
+    // that is the ONE session this screen is currently showing and the ONE a
+    // person reading it would mean by "resume this". THIS DOES NOT OPEN A
+    // SESSION ON THE MAC: the host runs `claude -p --resume <id> <text>`, ONE
+    // headless turn that starts, replies and exits - there is no interactive
+    // session for this, or any command, to open. The session hook
+    // republishes the record afterwards, which is how a resumed session
+    // reappears in the live list. Stated here so the log carries it even
+    // before this reaches a tappable control on the glass - see this task's
+    // own report for that gap.
+    //
+    // buf = "" before every early return - DETAIL's own note: buf is the
+    // accumulator, taken by REFERENCE, and a refusal that leaves it set
+    // refuses the same text again for ever.
+    if (!scrollActive || scrollLoadedId[0] == '\0') {
+      Serial.println("RESUME refused: no transcript is open (open one from PROJECTS first)");
+      buf = "";
+      return;
+    }
+    // A LIVE SESSION IS REFUSED BY NAME - the design's own warning: a
+    // headless run appending to a session someone may be driving
+    // interactively right now becomes a SECOND, CONCURRENT AUTHOR of the
+    // same conversation, neither able to see the other. scrollFromProjects
+    // is required too: a transcript opened the ordinary way (SESSIONS' own
+    // openScrollback()) is BY DEFINITION live - it came from sessions[] -
+    // and scrollProjLive defaults true besides, so either flag holding its
+    // default still refuses rather than silently allowing this.
+    if (!scrollFromProjects || scrollProjLive) {
+      Serial.println("RESUME refused: this session is LIVE - a headless turn "
+                     "would become a second, concurrent author of it");
+      buf = "";
+      return;
+    }
+    String arg = buf.length() > 6 ? buf.substring(6) : String("");
+    arg.trim();
+    if (arg.length() == 0) {
+      Serial.println("RESUME refused: no text (RESUME <text>)");
+      buf = "";
+      return;
+    }
+    // THE HOST'S OWN TWO TEXT RULES, CHECKED HERE SO THE REFUSAL NAMES THEM.
+    // verifyResume() rejects anything over RESUME_TEXT_MAX bytes or outside
+    // printable ASCII with one message covering both; from the Mac that reads
+    // as an authentication failure on a frame that was signed perfectly well.
+    if (arg.length() > RESUME_TEXT_MAX) {
+      Serial.printf("RESUME refused: %u characters is over the %d-byte cap the host verifies "
+                    "against (host/typed-answer.mjs's ANSWER_TEXT_MAX_BYTES)\n",
+                    (unsigned) arg.length(), RESUME_TEXT_MAX);
+      buf = "";
+      return;
+    }
+    for (unsigned i = 0; i < arg.length(); i++) {
+      const char ch = arg[i];
+      if (ch < 0x20 || ch > 0x7E) {
+        Serial.printf("RESUME refused: byte 0x%02X at offset %u is outside printable ASCII, "
+                      "which the host's own text check rejects\n", (unsigned char) ch, i);
+        buf = "";
+        return;
+      }
+    }
+    // ONE SIGNED FRAME PER PAIRED MAC - see sendResumeSigned() (scrollback.ino)
+    // for why the unsigned broadcast this replaces could not simply be signed
+    // in place: a signature is over ONE secret, and the device does not know
+    // which Mac's disk holds a PROJECTS-opened transcript. Every skipped link
+    // says why there; a run that reached nobody says so here.
+    const int sentTo = sendResumeSigned(scrollLoadedId, arg.c_str());
+    if (sentTo == 0) {
+      Serial.println("RESUME refused: no paired Mac is reachable with a signable frame - "
+                     "see the per-link reasons above. Nothing was sent, because an unsigned "
+                     "resume is refused by the host rather than run");
+      buf = "";
+      return;
+    }
+    Serial.printf("RESUME: sent a SIGNED headless turn for %s (%u chars) to %d Mac(s) - no "
+                  "session opens on the Mac; the reply lands in its log, not here\n",
+                  scrollLoadedId, (unsigned) arg.length(), sentTo);
 #endif
   } else if (buf.startsWith("READTEST")) {
     // THE ASK READER IS OTHERWISE UNCAPTURABLE, and that is the same argument
@@ -8261,6 +9150,188 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     handleLine(line);
     curLineFromUsb = savedFromUsb;
     activeHost = savedActiveHost;
+#if BOARD_HAS_PROJECTS
+  } else if (buf == "PROJFETCH") {
+    // THE OPERATOR'S OWN ROUTE TO THE SAME FETCH switchTab() sends when the
+    // tab is genuinely opened - so a capture of the loading/empty/loaded
+    // states needs no finger on the glass. The double-delivery guard (the
+    // host sends every trigger-file command over BOTH transports) lives
+    // inside requestProjects() itself, the same shape requestScrollback()
+    // uses for the identical reason, so this arm needs none of its own.
+    requestProjects();
+  } else if (buf.startsWith("PROJOPEN")) {
+    // THE OPERATOR'S OWN ROUTE INTO LEVEL 2, DETAIL's own reason applied to
+    // PROJECTS' second level: a capture of a project's own sessions needs
+    // no finger on the glass, and until this existed the only way there
+    // was a tap on a level-1 row. "PROJOPEN <n>" opens the n-th project in
+    // DISPLAY order - projects[], the same order the list draws and the
+    // same indexing DETAIL/SCROLLOPEN already use for their own lists.
+    //
+    // EVERY REFUSAL NAMES ITS CAUSE - three of them: PROJECTS is not the
+    // live tab, a non-numeric argument, an out-of-range index. n is
+    // REFUSED, never clamped, for the identical reason DETAIL refuses
+    // rather than silently opening project 0 - a capture script asking for
+    // project 4 and silently being handed project 0 would report the
+    // wrong screen as the right one.
+    //
+    // EVERY EARLY RETURN CLEARS buf FIRST - see DETAIL's own note above:
+    // processCompletedLine's accumulator is passed by REFERENCE, and a
+    // refusal that returns without emptying it leaves the refused text
+    // sitting there for the next bytes to be appended to, refusing again
+    // forever.
+    //
+    // DEDUPED - NOT "NO DUPLICATE GUARD, DELIBERATELY" AS THIS COMMENT USED TO
+    // CLAIM. That reasoning was measured wrong on hardware: projOpenLevel1() is
+    // NOT idempotent against its own double delivery, because
+    // requestProjSessions()'s busy guard only helps while the FIRST copy's
+    // fetch is still in flight. The observed sequence is worse - the first
+    // copy's PROJSESS fetch SUCCEEDS (232 bytes, list loaded and drawn) before
+    // the second copy is even processed, so psessPending is already false when
+    // it arrives. projOpenLevel1() then resets psessEverReceived/psessCount
+    // (wiping the list that was just drawn) and requestProjSessions() issues a
+    // FRESH "PROJSESS <key>" - which the host's own (device,verb,key) dedupe
+    // (1500ms) correctly drops as a duplicate, since it is byte-identical to
+    // the first copy's request. No reply ever comes for it, so the device
+    // times out 8002ms later over a list it had already loaded.
+    //
+    // COMPOSE chip/page's own precedent (this file, above): an INSERT is not
+    // idempotent, so a repeat within a window is dropped and NAMES ITS CAUSE
+    // rather than silently doing nothing. A re-open of the SAME project index
+    // is the identical shape - projOpenLevel1() resets state and re-fetches,
+    // which is exactly the non-idempotent action a genuine second tap must
+    // still be able to do LATER, just not within the double-delivery window.
+    // 2000ms, not 1500: comfortably longer than the host's own dedupe window,
+    // so this side never re-opens before the host's own copy has already been
+    // dropped.
+    String arg = buf.length() > 8 ? buf.substring(8) : String("");
+    arg.trim();
+    if (currentTab != TAB_PROJECTS) {
+      Serial.println("PROJOPEN refused: PROJECTS is not the live tab (send TAB 2 first)");
+      buf = "";
+      return;
+    }
+    // Character-by-character, not toInt() - SESSIONSCROLL's own reason:
+    // toInt() returns 0 for anything unparseable, so "PROJOPEN abc" would
+    // silently open project 0 and report success.
+    bool numeric = arg.length() > 0;
+    for (unsigned int i = 0; i < arg.length(); i++)
+      if (arg[i] < '0' || arg[i] > '9') numeric = false;
+    if (!numeric) {
+      Serial.printf("PROJOPEN refused: \"%s\" is not a project index (0..%d)\n",
+                    arg.c_str(), projectCount - 1);
+      buf = "";
+      return;
+    }
+    int pi = arg.toInt();
+    if (pi < 0 || pi >= projectCount) {
+      Serial.printf("PROJOPEN refused: project %d is out of range (0..%d)\n", pi, projectCount - 1);
+      buf = "";
+      return;
+    }
+    // THE DEDUPE ITSELF - see this arm's own header note above. A repeat of the
+    // SAME index within the window is a no-op that reports progress rather than
+    // a second open; a DIFFERENT index, or the same index again later, still
+    // opens for real.
+    static int lastProjOpenIdx = -1;
+    static unsigned long lastProjOpenMs = 0;
+    unsigned long nowProjOpenMs = millis();
+    if (pi == lastProjOpenIdx && nowProjOpenMs - lastProjOpenMs < 2000) {
+      Serial.printf("PROJOPEN: dropped a duplicate open of project %d - the host writes "
+                    "each command to every live transport and a re-open is not idempotent\n", pi);
+      buf = "";
+      return;
+    }
+    lastProjOpenIdx = pi;
+    lastProjOpenMs = nowProjOpenMs;
+    projOpenLevel1(pi);
+    Serial.printf("PROJOPEN: project %d (%s)\n", pi, projects[pi].name);
+  } else if (buf.startsWith("PSESSOPEN")) {
+    // THE OPERATOR'S OWN ROUTE INTO LEVEL 3, PROJOPEN's own reason applied
+    // one level deeper: SCROLLOPEN already does this for SESSIONS' own rows
+    // (this file, the BOARD_HISTORY_SCROLL block below), and until this
+    // existed the only way into a PROJECTS-opened transcript was a tap on a
+    // level-2 row. "PSESSOPEN <n>" opens the n-th session of the CURRENTLY
+    // OPEN project in display order - psess[], the same order the list
+    // draws and handlePSessTouch()'s own tap handler indexes.
+    //
+    // EVERY REFUSAL NAMES ITS CAUSE - four of them: PROJECTS is not the live
+    // tab, no project is open yet, a non-numeric argument, an out-of-range
+    // index (the honesty "N more" row past psessCount is not a session and
+    // is refused the identical way). n is REFUSED, never clamped - PROJOPEN's
+    // own reasoning: a capture script asking for session 4 and silently
+    // being handed session 0 would report the wrong screen as the right one.
+    //
+    // EVERY EARLY RETURN CLEARS buf FIRST - see DETAIL's own note above.
+    if (currentTab != TAB_PROJECTS) {
+      Serial.println("PSESSOPEN refused: PROJECTS is not the live tab (send TAB 2 first)");
+      buf = "";
+      return;
+    }
+    if (projLevel != 1) {
+      Serial.println("PSESSOPEN refused: no project is open (send PROJOPEN <n> first)");
+      buf = "";
+      return;
+    }
+    // ANOTHER FULL-SCREEN SURFACE - SCROLLOPEN's own guard, verbatim: opening
+    // the transcript over compose/reader/voice/octopus/the emoji grid would
+    // paint over whatever is there and swallow that surface's own taps as
+    // scrollback's own drag gestures.
+    if (composeActive || readerActive || voiceCardActive || octoActive || emojiTestActive) {
+      Serial.println("PSESSOPEN refused: another full-screen surface is up");
+      buf = "";
+      return;
+    }
+    String arg = buf.length() > 9 ? buf.substring(9) : String("");
+    arg.trim();
+    // Character-by-character, not toInt() - PROJOPEN's own reason: toInt()
+    // returns 0 for anything unparseable, so "PSESSOPEN abc" would silently
+    // open session 0 and report success.
+    bool sNumeric = arg.length() > 0;
+    for (unsigned int i = 0; i < arg.length(); i++)
+      if (arg[i] < '0' || arg[i] > '9') sNumeric = false;
+    if (!sNumeric) {
+      Serial.printf("PSESSOPEN refused: \"%s\" is not a session index (0..%d)\n",
+                    arg.c_str(), psessCount - 1);
+      buf = "";
+      return;
+    }
+    int si = arg.toInt();
+    if (si < 0 || si >= psessCount) {
+      Serial.printf("PSESSOPEN refused: session %d is out of range (0..%d)\n", si, psessCount - 1);
+      buf = "";
+      return;
+    }
+    // NO TIME-WINDOWED DEDUPE HERE ANY MORE - FIX ROUND 2 OF THE SEQGAP TASK
+    // REMOVED IT, AND DELIBERATELY. A 2000ms window (PROJOPEN's own shape,
+    // copied here in fix round 1) works for PROJOPEN because ITS fetch is
+    // ~200ms; PSESSOPEN's is a full transcript, measured at 7.5s for 504
+    // entries, and the host delivers every trigger-file command over BOTH
+    // transports with the SECOND copy sometimes reaching the device only
+    // AFTER the first fetch has fully completed - so a 2000ms window did not
+    // cover the case it existed for. Widening the window is not the fix: any
+    // FIXED duration is wrong for a fetch whose length depends on transcript
+    // size, and a duplicate that lands even one poll cycle late still runs a
+    // second, needless full re-download.
+    //
+    // THE GUARD NOW LIVES IN scrollOpenById() ITSELF (scrollback.ino), keyed
+    // on STATE rather than TIME: "is this exact session, with this exact
+    // filter, already the one open and loaded". That covers a double
+    // delivery arriving ANY number of seconds apart, AND the other caller of
+    // scrollOpenById() (a level-2 row TAP, projects.ino) that this file's
+    // own window never protected at all - a double-tap is a real human
+    // gesture, not a wire artifact, and needed the identical guard. A
+    // genuine re-open of the SAME session still works: closing it, or a
+    // different session/filter, both fail that state check and fall through
+    // to a real fetch there, same as this arm always intended.
+    //
+    // scrollProjLive SET FIRST - scrollOpenById()'s own header note: its
+    // two-argument signature has no room for the wire's `live` bit, so the
+    // caller states it here, immediately before the call, the same
+    // convention projOpenLevel1() already uses for projOpenKey.
+    scrollProjLive = psess[si].live != 0;
+    scrollOpenById(psess[si].id, psess[si].title);
+    Serial.printf("PSESSOPEN: session %d (%s)\n", si, psess[si].title);
+#endif
   } else if (refuseUnavailableCommand(buf)) {
     // A COMMAND THIS BOARD DOES NOT HAVE. Reached only after every real handler
     // has declined the line, so this arm can never shadow one - and placed here,
@@ -8401,6 +9472,9 @@ void loop() {
 #endif
 #if BOARD_HISTORY_SCROLL
   tickScrollTail();
+#endif
+#if BOARD_HAS_PROJECTS
+  tickProjectsFetch();  // no-op unless a PROJECTS fetch is outstanding
 #endif
 #if BOARD_HAS_WIRELESS_PAIR
   pairTick();           // no-op unless a pairing window is open; closes it at 120s
@@ -8602,6 +9676,7 @@ void loop() {
       // Cheap when nothing changed (per-row/per-field caches); keeps the
       // "in this state for Xm" durations ticking between host polls.
       if (everReceived && currentTab == TAB_SESSIONS) renderSessionsTab();
+      if (everReceived && currentTab == TAB_PROJECTS) renderProjectsTab();
 #if !BOARD_USES_TFT_ESPI
       lastTickFlushUs = micros() - tickT0;
 #endif

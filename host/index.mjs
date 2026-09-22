@@ -15,7 +15,8 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import os from "node:os";
 import fs from "node:fs/promises";
-import { createWriteStream, renameSync, statSync, appendFileSync, readFileSync, writeFileSync, mkdirSync, existsSync, realpathSync } from "node:fs";
+import { createWriteStream, createReadStream, renameSync, statSync, appendFileSync, readFileSync, writeFileSync, mkdirSync, existsSync, realpathSync } from "node:fs";
+import readline from "node:readline";
 import crypto from "node:crypto";
 import { SerialPort } from "serialport";
 import noble from "@abandonware/noble";
@@ -25,8 +26,10 @@ import {
   ANSWER_TEXT_MAX_BYTES as VOICE_ANSWER_TEXT_MAX_BYTES,
 } from "./voice-answer.mjs";
 import { resolveSessionId } from "./session-lookup.mjs";
+import { pickTranscript, cwdFromLines, SCAN_LINES } from "./project-index.mjs";
+import { makeProjectReplies, countUserTurns } from "./project-replies.mjs";
 import { postToSessionInbox } from "./session-inbox.mjs";
-import { verifyPrompt, verifyTypedAnswer } from "./typed-answer.mjs";
+import { verifyPrompt, verifyTypedAnswer, verifyResume } from "./typed-answer.mjs";
 import { macTag } from "./host-tag.mjs";
 import { toAscii, deviceText } from "./to-ascii.mjs";
 import { askChips } from "./ask-chips.mjs";
@@ -281,10 +284,34 @@ const OAUTH_429_BACKOFF_MS = 15 * 60_000;
 const OAUTH_CACHE_FILE = path.join(RUNTIME_DIR, "oauth-usage.json");
 
 // Written by ~/.claude/deckhand-session-hook.mjs (registered for SessionStart,
-// UserPromptSubmit, Stop, SessionEnd). One file per session_id; deleted on
-// SessionEnd. This is what powers the SESSIONS tab.
+// UserPromptSubmit, Stop, SessionEnd). One file per session_id; MARKED ENDED
+// (status: "ended"), not deleted, on SessionEnd - see the hook for why. This is
+// what powers the SESSIONS tab.
 const SESSIONS_DIR = path.join(os.homedir(), ".claude", "deckhand-sessions");
 const SESSION_STALE_MS = 20 * 60 * 1000; // 20 min with no update = treat as dead
+// How long an ENDED record survives before this host deletes its file, which is
+// what makes the device's ghost row eventually retire. A deliberate "it ended"
+// signal is unambiguous - unlike SESSION_STALE_MS above, which is a GUESS at a
+// terminal that closed without ever telling us - so this grace period answers a
+// different question and can be far shorter: not "how long before we give up
+// waiting for a heartbeat" but "how long should a session that we KNOW is gone
+// stay visible so a person glancing at the device sees where it went".
+//
+// TWO MINUTES. Short enough that the SESSIONS tab (five rows, or one expanded
+// card - the measured normal case) does not fill up with corpses: at the 5s tick
+// this host runs, a handful of sessions ending in the same couple of minutes is
+// already an unusual burst, and anything older than that is exactly what the
+// new PROJECTS tab (Tasks 5-7) and the floating count line below the list
+// (sessions.ino's countLineY()) exist to answer instead - "ended Nm ago" on the
+// glass is a notice, not an archive. Long enough that it survives at least one
+// missed tick without disappearing before anyone saw it, and that a duration
+// past the first minute ("1m ago") is legible before it's retired - a session
+// that goes stale in under a minute would spend its entire visible life saying
+// "0s ago" through "59s ago" and retire as those digits are still changing.
+const SESSION_ENDED_GRACE_MS = 2 * 60 * 1000;
+// Every transcript ever written, live or long ended - the fallback transcriptPathFor
+// scans when a session isn't in the live map.
+const PROJECTS_DIR = path.join(os.homedir(), ".claude", "projects");
 
 // Must match Serial.begin() in the firmware exactly - a mismatch yields pure
 // garbage, not a degraded link. Stays at 115200: every higher rate silently drops
@@ -745,6 +772,26 @@ function nonceForPid(pid) {
   }
   return e.nonce;
 }
+// THE RESUME NONCE. One per HOST PROCESS, not one per session, and that is
+// forced rather than chosen: a resumable session is by definition not in the
+// live list (it ended, or it belongs to a project on this disk that this Mac
+// has never had live), so there is no record to hang a per-session nonce off
+// and nothing publishing one for it. It rides in every tick payload as
+// `rnonce` - the device stores it per link and signs with the key of the Mac
+// that published it - and it is ROTATED on every accepted RESUME, which gives
+// the same single-use property consumeSessionNonce() gives a typed message:
+// the identical captured frame can never run a second time.
+//
+// Not pruned on a timer, unlike its two neighbours above. Those expire because
+// they are credentials for a specific session that may stop being messageable
+// while the device still holds one; this one names no session at all (the id
+// is signed alongside it, never implied by it), the device is re-issued it
+// every ~5s, and expiring it would only make a resume typed a minute after the
+// last tick fail for a reason nobody could see.
+let resumeNonceValue = crypto.randomBytes(8).toString("hex");
+function resumeNonce() { return resumeNonceValue; }
+function rotateResumeNonce() { resumeNonceValue = crypto.randomBytes(8).toString("hex"); }
+
 function pruneNonces() {
   const now = Date.now();
   for (const [pid, e] of askNonces) if (now - e.seen > 60_000) askNonces.delete(pid);
@@ -1690,6 +1737,77 @@ function histToolSummary(name, input, max = HIST_PREVIEW_CAP) {
 // session id -> transcript path, learned while building each payload (the hook puts the path
 // in the session record; the device only ever sends us the id).
 const transcriptById = new Map();
+
+// ANY session id, live or dead. transcriptById only ever held the live ranked
+// list, so an ended session - which is 131 of 132 of them, because the hook
+// deletes the record on SessionEnd - was unreachable. The live map stays as the
+// fast path; the project scan is the fallback, and it is only ever walked for a
+// row the user actually tapped.
+async function transcriptPathFor(id12) {
+  const live = transcriptById.get(id12);
+  if (live) return live;
+  let dirs = [];
+  try { dirs = await fs.readdir(PROJECTS_DIR); } catch { return null; }
+  for (const d of dirs) {
+    let files = [];
+    try { files = await fs.readdir(path.join(PROJECTS_DIR, d)); } catch { continue; }
+    const hit = pickTranscript(files, id12);
+    if (hit.ok) return path.join(PROJECTS_DIR, d, hit.file);
+  }
+  return null;
+}
+
+// The real, fs-backed reader for host/project-replies.mjs's PROJECTS and
+// PROJSESS builders - host/project-replies-check.mjs wires fakes instead, so
+// this is the only place any of these five functions touch a real file.
+// headLines() streams rather than reading the whole file, because the SAME
+// reader is also used (with a very large `n`) by sessionInfo() below to count
+// a transcript's lines - some of these are multi-megabyte, and loading one
+// whole into a string just to keep the first 40 lines of it would be exactly
+// the "read the whole file to find one field" cost project-index.mjs's own
+// header rejects.
+async function headLines(dir, file, n) {
+  const out = [];
+  try {
+    const rl = readline.createInterface({
+      input: createReadStream(path.join(PROJECTS_DIR, dir, file)),
+      crlfDelay: Infinity,
+    });
+    for await (const line of rl) {
+      out.push(line);
+      if (out.length >= n) { rl.close(); break; }
+    }
+  } catch { /* missing/unreadable file - whatever was collected stands */ }
+  return out;
+}
+// Title comes straight from transcriptInfo() - the existing 64KB-tail read -
+// rather than a second parser here; turn count is the one piece nothing
+// upstream computes, so it is counted from the same streamed lines, via
+// countUserTurns() (host/project-replies.mjs) rather than a raw line count -
+// see that function's own comment for why (a raw count over-reports by ~64x).
+//
+// THE FULL-FILE READ STAYS UNBOUNDED, ON PURPOSE, and was priced rather than
+// assumed: `cat *.jsonl | wc -l`, warm, over this Mac's own largest project
+// directory (~/.claude/projects/-Users-yujia-projects-deckhand, 321,900 KB
+// across 22 files) took 0.103s; the second largest (-Users-yujia-work-
+// synthropic-agent-ui, 311,528 KB across 54 files) is the same order of
+// magnitude. Measured 2026-09-21. Against a PROJSESS request that already
+// costs ~200ms on the wire, that is affordable - and a bounded (tail-only)
+// read would make the turn count approximate for precisely the long sessions
+// where it is most worth having right.
+async function sessionInfo(dir, file) {
+  const tx = await transcriptInfo(path.join(PROJECTS_DIR, dir, file));
+  const lines = await headLines(dir, file, Number.MAX_SAFE_INTEGER);
+  return { title: tx.title, turns: countUserTurns(lines) };
+}
+const { buildProjectsReply, buildProjSessReply, countInventory } = makeProjectReplies({
+  listDirs: () => fs.readdir(PROJECTS_DIR),
+  listFiles: (dir) => fs.readdir(path.join(PROJECTS_DIR, dir)),
+  statMs: async (dir, file) => (await fs.stat(path.join(PROJECTS_DIR, dir, file))).mtimeMs,
+  headLines,
+  sessionInfo,
+});
+
 // id -> { mtimeMs, items } so a transcript is parsed once per version, not once per page
 // turn. Paging through 300 screens must not re-read a megabyte each time.
 // BOUNDED, because a parsed transcript is big: a real one is 2500 entries / ~600KB of
@@ -1700,7 +1818,7 @@ const HIST_CACHE_MAX = 2;
 const histCache = new Map();
 
 async function histItems(id) {
-  const transcript = transcriptById.get(id);
+  const transcript = await transcriptPathFor(id);
   if (!transcript) return [];
   let st;
   try {
@@ -2294,7 +2412,18 @@ async function readSessions() {
     const filePath = path.join(SESSIONS_DIR, file);
     try {
       const record = JSON.parse(await fs.readFile(filePath, "utf8"));
-      if (Date.now() - record.updated_at > SESSION_STALE_MS) {
+      // ENDED IS A DELIBERATE SIGNAL, checked before the general staleness guard
+      // and on its own, shorter clock (SESSION_ENDED_GRACE_MS) - see its
+      // definition for why the two questions differ. `ended_at` falls back to
+      // `updated_at` for a record written before this field existed (an older
+      // hook, or one that raced a host restart); both are set together by the
+      // hook today, so that fallback is only ever exercised by old data.
+      if (record.status === "ended") {
+        if (Date.now() - (record.ended_at ?? record.updated_at) > SESSION_ENDED_GRACE_MS) {
+          await fs.rm(filePath, { force: true }); // ghost row's grace period is over
+          continue;
+        }
+      } else if (Date.now() - record.updated_at > SESSION_STALE_MS) {
         await fs.rm(filePath, { force: true }); // terminal likely closed without SessionEnd
         continue;
       }
@@ -2322,7 +2451,18 @@ async function readSessions() {
 
   // Urgency first, recency second: the display fits 6 sessions, and when
   // there are more, a session that NEEDS INPUT must never be the hidden one.
-  const rank = (r) => (r.status === "asking" ? 0 : r.status === "waiting" ? 1 : 2);
+  // ENDED RANKS BELOW EVERY LIVE SESSION, and that is not cosmetic. The hook
+  // stamps `updated_at` when it writes the "ended" record, so for the whole of
+  // SESSION_ENDED_GRACE_MS a ghost row is the MOST RECENTLY UPDATED thing in
+  // this list - in bucket 2 beside "working" it therefore sorted ABOVE every
+  // session actually doing something, took the device's expanded hero card, and
+  // could push a live session out of SESSION_ROW_CAP into the lean tail. The
+  // ghost row's job is "that session did not just vanish", not "look at me".
+  // The device's own urgencyRank() (deckhand_display.ino) carries the same rank
+  // for the same reason - it re-sorts what it receives, so fixing only this end
+  // would have left the hero card wrong on the glass.
+  const rank = (r) =>
+    r.status === "asking" ? 0 : r.status === "waiting" ? 1 : r.status === "ended" ? 3 : 2;
   records.sort((a, b) => rank(a) - rank(b) || b.updated_at - a.updated_at);
   const top = records.slice(0, SESSION_ROW_CAP);
 
@@ -2464,11 +2604,16 @@ async function readUsage() {
   // supplies only the three token counts, so rejecting as a unit is what let
   // one 20s timeout throw away the hero percentages, the session list and the
   // clock, publish nothing, and freeze the menu bar on the previous reading.
-  const [blocksResp, weeklyResp, rateLimits, sessions] = await Promise.all([
+  // countInventory() is readdir-only (no stat, no content read - see
+  // host/project-replies.mjs) so it is cheap enough to sit on this list too.
+  // The full project listing and a project's own session list are NOT built
+  // here, deliberately - see the note beside hostSecondsSinceMidnight below.
+  const [blocksResp, weeklyResp, rateLimits, sessions, projectInventory] = await Promise.all([
     tryCcusage(["blocks", "--active"]),
     tryCcusage(["weekly"]),
     readRateLimits(),
     readSessions(),
+    countInventory(),
   ]);
 
   const activeBlock = blocksResp?.blocks?.find((b) => b.isActive);
@@ -2537,6 +2682,17 @@ async function readUsage() {
     sessions: sessions.list,
     sessionsTotal: sessions.total,
     hiddenAsking: sessions.hiddenAsking,
+    // How many projects exist and how many transcripts they hold in total -
+    // readdir-cheap counters, not the listing itself. The full project
+    // listing, and any one project's own session list, are BOTH deliberately
+    // absent from this payload: 132 sessions at ~150 bytes is ~20KB every 5s
+    // against a link measured at 6.6 KB/s - three seconds of radio every
+    // five, for a screen that is usually closed. Those two ship ON DEMAND
+    // only, once something on the device asks for them (see the reply
+    // builders host/project-replies.mjs exports, wired in further up this
+    // file).
+    projectCount: projectInventory.projectCount,
+    sessionTotal: projectInventory.sessionTotal,
     // Seconds since local midnight, so the device can render a live clock
     // without needing to know the timezone - it just ticks this forward
     // with millis() between updates and re-syncs on every poll.
@@ -3762,6 +3918,247 @@ async function handleDeviceLine(line, via, pairGen = 0) {
     } else if (want.startsWith("item:"))
       await sendHistoryItem(id, filter, Number.parseInt(want.slice(5), 10) || 0, replyLink);
     else await sendHistory(id, filter, want, histBudget(budgetTok), replyLink);
+    return;
+  }
+  // `PROJECTS` - level 1 of the device's PROJECTS tab, requested when it
+  // opens (firmware/deckhand_display/projects.ino's requestProjects(), also
+  // reachable standalone via the PROJFETCH trigger-file command for
+  // capturing the tab with no finger on the glass). Answered with ONE
+  // `projs` line built by host/project-replies.mjs's own buildProjectsReply
+  // - never re-derived here, the same rule FOCUS's `sdetail` reply and
+  // HISTORY's replies both follow.
+  if (line === "PROJECTS") {
+    const replyLink = replyLinkFor(via);
+    // DEDUPED LIKE HISTORY/FOCUS: the device sends on every live transport,
+    // so a cabled board asks twice within milliseconds. This request takes
+    // no argument, so the whole verb is the dedupe key - two PROJECTS
+    // within the window are the same request, never two different ones.
+    const now = Date.now();
+    for (const [k, t] of scrollReqSeen) if (now - t > SCROLL_REQ_DEDUP_MS) scrollReqSeen.delete(k);
+    const reqKey = `${scrollSenderKey(via)}|projects`;
+    if (scrollReqSeen.has(reqKey)) return scrollReqDropped(via, reqKey);
+    scrollReqSeen.set(reqKey, now);
+    console.log(`[device/${linkLabel(via)}] ${line}`);
+    const reply = await buildProjectsReply();
+    // Through fitPayload for the same reason every other on-demand reply is
+    // - see FOCUS's own comment - though the design's own projection
+    // (~1.1KB for 16 projects, one wire chunk) means this should never
+    // actually have to shed anything.
+    const fitted = fitPayload(reply);
+    if (fitted.dropped.length) console.log(`PROJECTS: shed ${fitted.dropped.join("; ")}`);
+    await sendToLink(replyLink, fitted.line);
+    console.log(
+      `PROJECTS: sent ${fitted.bytes} bytes (${reply.projs.items.length} project(s)) via ${linkLabel(replyLink?.id ?? "none")}`
+    );
+    return;
+  }
+  // `PROJSESS <key>` - level 2 of the device's PROJECTS tab: one project's
+  // own sessions, requested when that level opens
+  // (firmware/deckhand_display/projects.ino's requestProjSessions(), called
+  // from a level-1 row tap or the PROJOPEN trigger-file command). Answered
+  // with ONE `projsess` line built by host/project-replies.mjs's own
+  // buildProjSessReply - never re-derived here, PROJECTS' own rule just
+  // above.
+  //
+  // NOT IN THE ORIGINAL TASK BRIEF'S FILE LIST - task-5-report.md's own
+  // "Deviation 3" precedent for this exact situation: buildProjSessReply()
+  // is exported and imported into this file (the `makeProjectReplies(...)`
+  // call above) but nothing ever CALLED it, so a device PROJOPEN would go
+  // out over the wire and get no answer, stranding level 2 on "Loading
+  // sessions..." forever - a real, observable, on-glass defect, not a
+  // theoretical gap. Added rather than left for a later task, the same
+  // judgment call Task 5 made for PROJECTS itself.
+  //
+  // `key` IS THE OPAQUE PROJECT DIRECTORY NAME, taken verbatim from
+  // everything after the first space - never split, decoded or otherwise
+  // interpreted (project-replies.mjs's own header: a hyphen in a project's
+  // real name is indistinguishable from the path separator that produced
+  // this same key, so it can only ever be handled as one opaque unit).
+  if (line.startsWith("PROJSESS ")) {
+    const key = line.slice("PROJSESS ".length).trim();
+    const replyLink = replyLinkFor(via);
+    // DEDUPED LIKE PROJECTS/HISTORY/FOCUS - the device sends on every live
+    // transport, so a cabled board asks twice within milliseconds. Keyed on
+    // the KEY too (not just the verb), since two DIFFERENT projects opened
+    // in quick succession are two different requests, never the same one.
+    const now = Date.now();
+    for (const [k, t] of scrollReqSeen) if (now - t > SCROLL_REQ_DEDUP_MS) scrollReqSeen.delete(k);
+    const reqKey = `${scrollSenderKey(via)}|projsess|${key}`;
+    if (scrollReqSeen.has(reqKey)) return scrollReqDropped(via, reqKey);
+    scrollReqSeen.set(reqKey, now);
+    console.log(`[device/${linkLabel(via)}] ${line}`);
+    // transcriptById's OWN KEY SET is exactly "every session id currently
+    // in the live ranked list" - it is populated ONLY from that list (the
+    // tick builder and the lean-row loop, both above) and never from
+    // anywhere else, so it is already the `liveIds` buildProjSessReply()
+    // wants, with no separate computation needed.
+    const liveIds = [...transcriptById.keys()];
+    const reply = await buildProjSessReply(key, liveIds);
+    const fitted = fitPayload(reply);
+    if (fitted.dropped.length) console.log(`PROJSESS: shed ${fitted.dropped.join("; ")}`);
+    await sendToLink(replyLink, fitted.line);
+    // A REFUSAL IS LOGGED AS A REFUSAL, not as a successful reply carrying zero
+    // sessions - from this log the two were indistinguishable, which is the same
+    // hole the reply itself had (see buildProjSessReply's own note on `e`). The
+    // key is quoted with its LENGTH, because the way this happens in practice is
+    // a device asking with a TRUNCATED key: the character count is what makes
+    // that visible at a glance rather than something to notice by eye.
+    if (reply.projsess.e) {
+      console.log(
+        `PROJSESS REFUSED for "${key}" (${key.length} chars): ${reply.projsess.e}. ` +
+        `No such directory under ~/.claude/projects on this Mac - either another paired Mac ` +
+        `holds this project, or the key arrived truncated. Told the device so by name; it ` +
+        `shows its own refused state rather than "No sessions found".`
+      );
+      return;
+    }
+    console.log(
+      `PROJSESS: sent ${fitted.bytes} bytes (${reply.projsess.items.length}/${reply.projsess.total} ` +
+      `session(s) for "${key}") via ${linkLabel(replyLink?.id ?? "none")}`
+    );
+    return;
+  }
+  // `RESUME <id> <text>` - a HEADLESS continuation of ANY session, live or
+  // ended, sent by deckhand_display.ino's own RESUME <text> device command
+  // (the id is scrollLoadedId - whichever transcript the scrollback surface
+  // currently has open). THIS IS NOT AN INTERACTIVE SESSION: `claude -p
+  // --resume` runs ONE headless turn and exits - the session hook
+  // republishes the record afterwards, which is how it reappears in the live
+  // list. There is no terminal on the Mac for this to open, and the device's
+  // own RESUME handler refuses before ever sending this line when the
+  // transcript it has open is LIVE (the design's own warning: a headless run
+  // appending to a session someone is actively driving becomes a second,
+  // concurrent author of it) - this handler does not re-derive that guard,
+  // the same division of labour PROJSESS's key-staleness check draws between
+  // device and host.
+  //
+  // `id` IS THE OPAQUE 12-CHAR SESSION ID, taken verbatim - never split,
+  // decoded or otherwise interpreted, PROJSESS's own `key` precedent for why
+  // an id (or here, a directory name derived FROM one) is handled as one
+  // opaque unit.
+  //
+  // SIGNED, AND IT SHIPPED UNSIGNED. The frame is now `RESUME <id12> <b64>
+  // <hmac>` - handleTypedPrompt's own four-token shape, verified through
+  // verifyResume() with the sending device's per-device secret and this
+  // host's rolling `rnonce`. It was `RESUME <id> <plaintext>`, accepted from
+  // anything that could put a line on the wire, while the two OTHER ways of
+  // injecting text into a session (PROMPT and a typed ANSWER) have gone
+  // through an HMAC and a single-use nonce since they existed. Resuming is
+  // the same class of act - it makes Claude run a turn - so it is held to the
+  // same discipline rather than a second, weaker one invented for it. The
+  // RESUME label in the signed string is what keeps a signature minted for a
+  // message from being replayed as a headless turn.
+  if (line.startsWith("RESUME ")) {
+    const parts = line.trim().split(/\s+/);
+    // The ID is logged, the BODY is not: the base64 is the prompt itself and it
+    // is echoed in full below once it has actually authenticated ("accepted N
+    // signed chars"), rather than twice - once unverified and once not.
+    console.log(`[device/${linkLabel(via)}] RESUME ${parts[1] || "?"} <b64> <hmac> (${line.length} bytes)`);
+    if (parts.length !== 4) {
+      // NAMED, and it names the SHAPE: a device still sending the old
+      // plaintext form lands here, and "malformed" alone would read as a wire
+      // fault rather than as firmware that predates the signature.
+      console.log(
+        `RESUME refused: malformed frame - expected "RESUME <id12> <base64> <hmac>" ` +
+        `(4 tokens), got ${parts.length}. An unsigned "RESUME <id> <text>" from older ` +
+        `firmware is refused here rather than run.`
+      );
+      return;
+    }
+    // NO "empty id" BRANCH: the line was trimmed and split on whitespace runs,
+    // so a 4-token frame cannot have an empty second token. A guard that can
+    // never fire is a defect in this repo, not belt and braces - the id's real
+    // check is the signature, which is computed OVER it.
+    const [, id, b64, mac] = parts;
+    // DEDUPED LIKE PROJECTS/PROJSESS/HISTORY, and it matters MORE here: unlike
+    // a read, this is NOT idempotent - it is a real headless turn - and the
+    // trigger-file path delivers every command over BOTH transports, so a
+    // cabled device sends this twice within milliseconds. A missed dedupe
+    // here does not stall a fetch, it sends the SAME prompt into the SAME
+    // conversation twice.
+    const now = Date.now();
+    for (const [k, t] of scrollReqSeen) if (now - t > SCROLL_REQ_DEDUP_MS) scrollReqSeen.delete(k);
+    const reqKey = `${scrollSenderKey(via)}|resume|${id}|${mac}`;
+    if (scrollReqSeen.has(reqKey)) return scrollReqDropped(via, reqKey);
+    scrollReqSeen.set(reqKey, now);
+
+    // VERIFIED AFTER THE DEDUPE, DELIBERATELY. The device sends one line per
+    // paired Mac and each of those still goes out over every live transport,
+    // so a cabled board delivers this Mac's own copy twice within
+    // milliseconds. Verifying first would accept the first copy, ROTATE the
+    // nonce, and then log the second as a hard authentication failure - the
+    // "trains you to ignore the one log line that means something" problem the
+    // duplicate-PROMPT dedup already exists for.
+    const from = deviceNameFor(via);
+    const dev = from ? deviceEntry(from) : null;
+    const v = verifyResume({ secret: dev?.secret, nonce: resumeNonce(), id12: id, b64, mac });
+    if (!v.ok) {
+      console.error(
+        `RESUME REJECTED for session ${id} ${senderDescription(via, from)} - ${v.why}. ` +
+        `Nothing was run.`
+      );
+      return;
+    }
+    const text = v.text;
+    // SINGLE USE, exactly as consumeSessionNonce() is for a typed message: this
+    // frame authenticated once and the identical bytes can never run again. The
+    // next tick (~5s) hands the device the new one.
+    rotateResumeNonce();
+    console.log(`RESUME: accepted ${text.length} signed chars for ${id} from ${from}.`);
+
+    // BROADCAST FROM THE DEVICE, SO RESOLVED THE SAME WAY HERE - the device
+    // does not know which paired Mac's filesystem holds this session
+    // (scrollOpenById()'s own note: the project inventory is not owned by
+    // whichever Mac is "active"), so every paired Mac's host process sees
+    // this line and only the one that actually HAS the transcript acts on
+    // it; the rest refuse below, by name, and do nothing.
+    const transcript = await transcriptPathFor(id);
+    if (!transcript) {
+      console.log(`RESUME ${id}: not found on this Mac - refusing (another paired Mac may hold it)`);
+      return;
+    }
+    // THE SESSION'S OWN cwd, so the resumed turn runs FROM the right project -
+    // buildProjectsReply()'s own cwdForProject() reads this same way (SCAN_LINES
+    // lines, cwdFromLines()), just against the ONE transcript file this request
+    // already resolved rather than the newest in its directory. Left undefined
+    // (execFile's own default: this process's cwd) rather than refused when it
+    // cannot be found - a resume that runs from the wrong cwd is still better
+    // than one refused outright over a field this device does not need to see
+    // succeed.
+    let cwd;
+    try {
+      const dir = path.basename(path.dirname(transcript));
+      const file = path.basename(transcript);
+      cwd = cwdFromLines(await headLines(dir, file, SCAN_LINES)) || undefined;
+    } catch {
+      cwd = undefined;
+    }
+
+    console.log(`RESUME ${id}: claude -p --resume ${id} (headless turn, cwd ${cwd || "unresolved"})`);
+    // Detached, the transcribeAndDispatch() dispatch arm's own shape: a
+    // resumed turn can run for minutes and must not block this poller.
+    // stdin ignored: `claude -p` otherwise waits on it and warns "no stdin
+    // data received in 3s" before proceeding.
+    const child = execFile(
+      CLAUDE_BIN,
+      ["-p", "--resume", id, text],
+      { cwd, maxBuffer: 8 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] },
+      (err, stdout, stderr) => {
+        if (err) {
+          console.error(`RESUME ${id}: claude failed: ${(stderr || err.message).split("\n")[0]}`);
+          return;
+        }
+        // Log the reply itself, not just its length - transcribeAndDispatch()'s
+        // own note: without it a resume is a black hole, and the session hook's
+        // own republish is the only OTHER place this reply becomes visible.
+        const reply = stdout.trim().replace(/\s+/g, " ");
+        console.log(
+          `RESUME ${id}: claude replied (${reply.length} chars): ` +
+            (reply.length > 400 ? reply.slice(0, 400) + " ..." : reply)
+        );
+      }
+    );
+    child.unref?.();
     return;
   }
   // Audio first, and deliberately unlogged - see the note above.
@@ -5500,6 +5897,13 @@ async function tick(generation = tickGeneration) {
     // display text that is not what gets signed - that one is SUPPRESSED instead.
     const wire = asciiFit({
       ...usage, hostId, hostTag, ...(hostEmoji ? { hostEmoji } : {}), remoteAnswer, voice: lastVoice,
+      // rnonce: the credential a RESUME is signed against (see resumeNonce()
+      // above). Published unconditionally rather than "only when the device
+      // has a transcript open", because this end cannot know that and the
+      // device must already hold it when the operator types RESUME - 21 bytes
+      // a tick. A device that has never seen one refuses to send by name
+      // rather than sending something this Mac would reject.
+      rnonce: resumeNonce(),
     });
     if (wire.offenders.length) {
       const sig = wire.offenders.join("|");

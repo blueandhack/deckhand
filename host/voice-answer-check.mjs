@@ -14,6 +14,8 @@ import {
   verifyTypedAnswer,
   promptHmac,
   verifyPrompt,
+  resumeHmac,
+  verifyResume,
 } from "./typed-answer.mjs";
 
 let failed = 0;
@@ -201,6 +203,79 @@ check("the sha is over the EXACT string - a trailing space is a different answer
     !verifyPrompt({ secret, nonce: pNonce, id12, b64: pB64, mac: answerMac }).ok);
   check("TYPED: a PROMPT signature cannot authenticate an answer",
     !verifyTypedAnswer({ secret, nonce: pNonce, pid: id12, b64: pB64, mac: pMac }).ok);
+
+  // ---- RESUME form: a headless turn against a session that is NOT live ----
+  // The same shape as PROMPT, over the host's own rolling nonce rather than a
+  // per-session one (a resumable session is not in the live list, so nothing
+  // publishes a nonce for it). It shipped UNSIGNED - `RESUME <id> <plaintext>`,
+  // run by anything that could put a line on the wire - which is why the
+  // cross-form assertions below matter as much as the happy path: the whole
+  // point of the third label is that the other two signatures cannot reach it.
+  const rMac = resumeHmac(secret, pNonce, id12, pSha);
+  check("RESUME: a valid frame is accepted",
+    verifyResume({ secret, nonce: pNonce, id12, b64: pB64, mac: rMac }).ok);
+  check("RESUME: the accepted text is returned verbatim",
+    verifyResume({ secret, nonce: pNonce, id12, b64: pB64, mac: rMac }).text === pText);
+  check("RESUME: altered text is rejected",
+    !verifyResume({ secret, nonce: pNonce, id12,
+                    b64: Buffer.from(pText + "!", "utf8").toString("base64"), mac: rMac }).ok);
+  check("RESUME: a forged mac is rejected",
+    !verifyResume({ secret, nonce: pNonce, id12, b64: pB64, mac: "0".repeat(16) }).ok);
+  check("RESUME: a rotated (stale) nonce is rejected - no replay of the same frame",
+    !verifyResume({ secret, nonce: "0123456789abcdef", id12, b64: pB64, mac: rMac }).ok);
+  check("RESUME: another session's id is rejected",
+    !verifyResume({ secret, nonce: pNonce, id12: "def123456789", b64: pB64, mac: rMac }).ok);
+  check("RESUME: another device's key is rejected",
+    !verifyResume({ secret: "f".repeat(32), nonce: pNonce, id12, b64: pB64, mac: rMac }).ok);
+  check("RESUME: non-ASCII text is rejected before it can be signed for",
+    !verifyResume({ secret, nonce: pNonce, id12,
+                    b64: Buffer.from("héllo", "utf8").toString("base64"),
+                    mac: resumeHmac(secret, pNonce, id12, voiceSha("héllo")) }).ok);
+  check("RESUME: over the byte cap is rejected",
+    !verifyResume({ secret, nonce: pNonce, id12,
+                    b64: Buffer.from("x".repeat(TYPED_TEXT_MAX_BYTES + 1), "utf8").toString("base64"),
+                    mac: resumeHmac(secret, pNonce, id12, voiceSha("x".repeat(TYPED_TEXT_MAX_BYTES + 1))) }).ok);
+  check("RESUME: missing pairing state is rejected, not skipped",
+    !verifyResume({ secret: "", nonce: pNonce, id12, b64: pB64, mac: rMac }).ok);
+  check("RESUME: missing nonce state is rejected, not skipped",
+    !verifyResume({ secret, nonce: "", id12, b64: pB64, mac: rMac }).ok);
+  // THE THREE-WAY CROSS-FORM CHECK. A signature minted to answer a question or
+  // to message a READY session must not be able to start a HEADLESS turn in a
+  // dead one, and vice versa - which is exactly what one shared label would
+  // allow, since all three sign a 16-hex hash of their text with the same key.
+  check("RESUME: a PROMPT signature cannot authenticate a resume",
+    !verifyResume({ secret, nonce: pNonce, id12, b64: pB64, mac: pMac }).ok);
+  check("RESUME: a TYPED answer's signature cannot authenticate a resume",
+    !verifyResume({ secret, nonce: pNonce, id12, b64: pB64, mac: answerMac }).ok);
+  check("PROMPT: a RESUME signature cannot authenticate a message to a READY session",
+    !verifyPrompt({ secret, nonce: pNonce, id12, b64: pB64, mac: rMac }).ok);
+  check("TYPED: a RESUME signature cannot authenticate an answer",
+    !verifyTypedAnswer({ secret, nonce: pNonce, pid: id12, b64: pB64, mac: rMac }).ok);
+}
+
+// ---- STRUCTURAL: the crypto above binds NOTHING unless index.mjs uses it ----
+// A MIRROR PROVES THE ALGORITHM AND BINDS NOTHING (CLAUDE.md): every assertion
+// above would still pass with host/index.mjs's RESUME handler running `claude -p
+// --resume` on an unverified plaintext line, which is precisely what it did.
+// These read index.mjs's own text, bound to the RESUME handler's own body.
+{
+  const HOST = fs.readFileSync(
+    path.join(path.dirname(url.fileURLToPath(import.meta.url)), "index.mjs"), "utf8");
+  const at = HOST.indexOf('if (line.startsWith("RESUME ")) {');
+  const body = at < 0 ? "" : HOST.slice(at, HOST.indexOf('\n  // Audio first', at));
+  check("RESUME: the handler is findable in index.mjs (not renamed out from under this)",
+    at >= 0 && body.length > 200);
+  check("RESUME: the handler verifies through verifyResume() before doing anything",
+    /verifyResume\(\{[^}]*secret[^}]*nonce[^}]*\}\)/.test(body));
+  check("RESUME: a failed verification returns without running claude",
+    /if \(!v\.ok\) \{[\s\S]*?return;/.test(body) &&
+      body.indexOf("if (!v.ok)") < body.indexOf("execFile("));
+  check("RESUME: the text that is run is the VERIFIED text, never a wire token",
+    /const text = v\.text;/.test(body) && !/rest\.slice\(sp \+ 1\)/.test(body));
+  check("RESUME: the nonce is consumed (rotated) on acceptance - no replay",
+    /rotateResumeNonce\(\);/.test(body));
+  check("RESUME: the host publishes the nonce the device signs against",
+    /rnonce: resumeNonce\(\)/.test(HOST));
 }
 
 // A --selftest, which this file has never had - and it must INJECT A FAULT, not
@@ -230,6 +305,14 @@ if (process.argv.includes("--selftest")) {
                                            "${nonce}:${pid}:PROMPT:${sha16}"),
       (m) => m.typedAnswerHmac("s".repeat(32), "n", "p", "0".repeat(16))
              !== m.promptHmac("s".repeat(32), "n", "p", "0".repeat(16))],
+    // The RESUME label, swapped rather than deleted - the same reasoning the
+    // TYPED fault above states: deleting it still leaves a string that differs
+    // from PROMPT's, so the fault would not express the collision it claims.
+    ["the RESUME label becomes PROMPT, so a message signature can start a headless turn",
+      "typed-answer.mjs", (t) => t.replace("${nonce}:${id12}:RESUME:${sha16}",
+                                           "${nonce}:${id12}:PROMPT:${sha16}"),
+      (m) => m.resumeHmac("s".repeat(32), "n", "i", "0".repeat(16))
+             !== m.promptHmac("s".repeat(32), "n", "i", "0".repeat(16))],
     ["capUtf8 stops walking back to a codepoint boundary", "voice-answer.mjs",
       (t) => t.replace(/while \(end > 0 && \(buf\[end\] & 0xc0\) === 0x80\) end--;.*/, ""),
       (m) => Buffer.from(m.capUtf8("\u2014".repeat(60), 151), "utf8").length === 150],

@@ -443,3 +443,78 @@ then a prose heading with no bar, then the bar resuming).
 - **`scrollFindCode()` NOW LANDS ON THE LANGUAGE ROW** rather than the first line of code text,
   because the label row also carries `SCROLL_F_CODE`. Diagnostic-only (`SCROLLPERF code`'s
   parking position), no assertion binds it either way.
+
+---
+
+#### SCROLLBACK OPENED BY ID: a dead session, and RESUME (2026-09-21)
+
+`scrollOpenById(const char* id12, const char* title)` is this surface's SECOND entry point,
+beside `openScrollback(int idx)` - the same renderer, wrap, index, drag and CHAT/ALL filter, now
+addressable by an id that need not be (and, for `docs/superpowers/specs/2026-09-20-sessions-
+manager-design.md`'s whole point, very often is not) in `sessions[]` at all. `projects.ino`'s
+`handlePSessTouch()` is the tap route (a level-2 row); `PSESSOPEN <n>` and `RESUME <text>`
+(both `deckhand_display.ino`) are the Mac-drivable ones. `scrollFetch()` is the busy-guard/
+already-held/wire-line core both `requestScrollback()` and `scrollOpenById()` now build one
+call to; the latter's is BROADCAST (no `hostSlot` on file for an id that may not be live),
+`requestProjects()`'s own reasoning applied one level deeper.
+
+**RESUME IS SIGNED** - `RESUME <id12> <b64> <hmac>`, `verifyPrompt`'s own frame shape with a
+third label. It shipped as `RESUME <id> <plaintext>`, which ran `claude -p --resume` for anything
+that could put one line on the wire, while the two other ways of injecting text into a session
+(`PROMPT`, a typed `ANSWER`) had been HMAC'd against a per-device secret and a single-use nonce
+since they existed. The nonce is the HOST's own rolling `rnonce`, published in every tick payload
+and rotated on every accepted resume - a resumable session is by definition not in the live list,
+so there is no session record to hang a per-session nonce off. The device sends ONE frame per
+paired Mac, each signed with that Mac's own key and its own nonce and ADDRESSED to it (a signature
+is over one secret, and the device cannot know which Mac's disk holds a PROJECTS-opened
+transcript); every skipped link says why, and a resume that could reach nobody refuses by name
+rather than sending an unsigned line the host would drop. Text is capped and ASCII-checked on the
+device against the host's own `ANSWER_TEXT_MAX_BYTES` (150), so an over-cap prompt reads as a cap
+refusal rather than as an authentication failure. Checked by `host/voice-answer-check.mjs` (the
+crypto, the three-way cross-form rejections, and structurally that `index.mjs` verifies before it
+runs anything) and by `scrollback-check.mjs` (the firmware's half, `SB_FAULT=resume-nolabel`).
+
+**RESUME IS WIRE-COMPLETE AND NOT YET A TAP.** `RESUME <text>` sends a headless `claude -p
+--resume <scrollLoadedId> <text>` for whichever transcript is open, refusing by name with no
+transcript open, on a LIVE one (`scrollFromProjects`/`scrollProjLive`, defaulting to the SAFE
+"live" reading so a caller that forgets to set the latter gets a refusal rather than a silent
+turn on a session someone may be driving interactively), or on empty text. There is deliberately
+no chip or button reaching it yet - see the Task 7 report for why (no way to verify new hit-test
+geometry against real panel pixels without flashing and looking, and the header has no free
+room without a fresh geometry pass this task did not do). `PSESSOPEN <n>` is the same shape one
+level up: the operator's own route into level 3, PROJOPEN's own reasoning.
+
+**VERIFIED ON THE GLASS 2026-09-21 (this entry replaces the "not verified" one that stood
+here - corrected in place rather than deleted, so the claim and its evidence stay together):**
+A dead session's transcript HAS now been read on the glass through this path. `PSESSOPEN 1` on
+the deckhand project opened "Board 2 sessions page scrolling" (`8d0fa885-bec`, ended) - 141/141
+entries in the EXISTING scrollback surface with markdown headings rendering (capture 10-35-53).
+`PSESSOPEN 2` then closed Ruling T2-A end to end: `d22c401b-4fd` ("Battery life improvement", no
+live record at all) fetched **523 of 573 entries, 25 chunks, 261,441 bytes, 7,677ms** - so
+`transcriptPathFor`'s project-directory fallback resolving a genuinely dead session is measured
+on real hardware, not inferred.
+
+**WHAT THAT SAME PATH ALSO SHIPPED, AND IT FROZE THE DEVICE.** Both openers set `histActive` as
+well as `scrollActive`, and `handleLine()`'s ~5s tick used to reach the READER's `histActive`
+arm FIRST; that arm re-resolves `detailIndex` from `detailId`, which is EMPTY for an id that is
+not in `sessions[]` - the entire point of `scrollOpenById()`. So it took the `-1` branch, painted
+the SESSIONS list over the open transcript, and called `exitReaderToList()`, which clears
+`histActive` and NOT `scrollActive`. After that the 5s tick returned at the `scrollActive` guard
+and the 1s tick is gated on `!scrollActive`: **the footer and every tab render stopped for ever,
+with 304KB of PSRAM still held**, while the device went on talking to the Mac - confirmed on
+hardware by two captures 45 seconds apart showing the identical footer clock (`04:24:39` /
+`0s ago`) while the host tick still reported `via=usb:Deckhand-C114,ble`. The fix is an ORDER:
+the scrollback's own arm runs BEFORE the `histActive` one, resolves a detail index only for the
+`openScrollback()` entry path, and leaves through `exitScrollback()` (which clears both flags and
+frees the store) rather than `exitReaderToList()`. `scrollback-check.mjs` binds the ORDER itself
+and fails by name if it reverses (`SB_FAULT=tick-order`).
+
+**NOT VERIFIED, STATED PLAINLY:**
+- **`exitScrollback()`'s PROJECTS-return arm (`projLevelPainted = -1;` forcing a repaint) has
+  not been watched repaint on real hardware** - only reasoned from `renderProjectsTab()`'s own
+  existing level-transition bust, which it deliberately reuses rather than duplicating.
+- **The SCROLLACK addressing for a broadcast-opened (PROJECTS) fetch is unresolved for a
+  genuine two-Mac pairing.** `scrollHostSlot` is set to 0 (no real slot) when `scrollOpenById()`
+  broadcasts; a single paired Mac is unaffected (there is nothing to misaddress to), but two
+  Macs paired at once could see a per-chunk ack's `to=` suffix name the wrong one. Out of scope
+  for this task; flagged rather than fixed.

@@ -76,6 +76,18 @@ if (SELFTEST) {
   if (fault === "seq-append")
     SKETCH = SKETCH.replace(/if \(seq != scrollNextSeq\) \{[\s\S]*?\n      \}/, "if (seq != scrollNextSeq) {\n      }");
   if (fault === "wide-marker") INO = INO.replace(/"\$"/, '"·"');
+  // THE UI FREEZE, REPRODUCED EXACTLY: the scrollback arm moved back BELOW the
+  // reader's histActive arm, which is the shipped order that froze the device.
+  // A swap, not a deletion - deleting the arm would fail several assertions for
+  // the wrong reason, and the defect was never a missing guard.
+  if (fault === "tick-order")
+    SKETCH = SKETCH.replace(
+      /(\n  if \(scrollActive\) \{[\s\S]*?\n  \}\n)([\s\S]{0,40}?)(  if \(histActive\) \{[\s\S]*?\n  \}\n)/,
+      "\n$2$3$1");
+  // The device stops signing the label, so a PROMPT signature would authenticate
+  // a headless turn. Swapped rather than deleted, host/voice-answer-check.mjs's
+  // own reasoning for the same fault on the host side.
+  if (fault === "resume-nolabel") INO = INO.replace(/":RESUME:"/, '":PROMPT:"');
   // TASK 5: proves the two-draw-paths equivalence assertion below actually
   // binds rather than passing vacuously. A plain, non-global replace hits
   // only the FIRST occurrence of the pattern in the whole (comment-stripped)
@@ -154,6 +166,16 @@ if (SELFTEST) {
   // the surviving copy. Also expected to trip the drawRegion equivalence check,
   // since the reverted path's text no longer matches its twin - the same
   // double coverage `headend-one-path` above produced.
+  // TASK 7 (sessions manager): proves scrollOpenById's id-source assertion
+  // actually binds rather than passing because sessions[detailIndex].id
+  // happens to appear nowhere in the file. Routes the fetch through
+  // detailIndex instead of the function's own id12 argument - exactly the
+  // defect that made a PROJECTS-opened, non-live session show whichever
+  // session SESSIONS' own detail card happened to be behind (or crash on
+  // detailIndex == -1). The string is unique in the comment-stripped file
+  // (scrollOpenById's own call), so a plain replace hits only it.
+  if (fault === "scrollopenbyid-detailindex")
+    INO = INO.replace("scrollFetch(id12, 0, true);", "scrollFetch(sessions[detailIndex].id, 0, true);");
   if (fault === "lang-one-path")
     INO = INO.replace(
       "const uint16_t fg = (lf & SCROLL_F_HEAD) ? COLOR_ACCENT\n" +
@@ -161,6 +183,34 @@ if (SELFTEST) {
       "                      : scrollTextColor(e.role);\n" +
       "    tft.setTextColor(fg, bg);",
       "tft.setTextColor((lf & SCROLL_F_HEAD) ? COLOR_ACCENT : scrollTextColor(e.role), bg);");
+  // THE SEQGAP FIX ITSELF (seqgap task): scrollReset() is defined BEFORE
+  // scrollFetch() in this file, so a plain, non-global replace of the first
+  // "scrollNextSeq = 0;" hits ONLY the line this task added inside
+  // scrollReset() - scrollFetch()'s own, pre-existing "scrollNextSeq = 0;"
+  // (further down the file) is untouched. Reproduces the exact bug: a fresh
+  // stream's chunk 0 is compared against whatever the PREVIOUS transcript's
+  // scrollNextSeq last reached, so a wholly successful fetch is declared a
+  // hole (`SCROLL seqgap got=0 want=25`) and reported as "could not reach
+  // the Mac".
+  if (fault === "reset-no-seq") INO = INO.replace("scrollNextSeq = 0;", "");
+  // scrollOpenById()'S STATE GUARD, DISABLED WITHOUT DELETING IT - fix round
+  // 2 of the seqgap task moved PSESSOPEN's dedupe from a time window (proven
+  // too short for a 7.5s fetch) to a STATE check inside scrollOpenById()
+  // itself. Same "if (false)" shape this file's own deadGuards() helper
+  // exists to catch (see the sendScrollback dead-code-guard assertion
+  // above, and PSESSOPEN's own former dedupe fault this replaced): the
+  // guard's text, its identity comparison and its "already open" message
+  // all stay in the sketch, so a textual "is this code present" check would
+  // pass vacuously. Only an assertion that the condition is actually LIVE -
+  // not a dead comparison sitting beside real code that still runs the
+  // reset-and-refetch below it - can fail this by name, proving a second
+  // open of an already-loaded session CAN wipe the store once this is the
+  // only thing wrong.
+  if (fault === "scrollopenbyid-not-guarded")
+    INO = INO.replace(
+      "if (scrollActive && scrollFromProjects && scrollCount > 0 &&\n" +
+      "      histChatOnly == scrollLoadedChat && strcmp(scrollLoadedId, id12) == 0) {",
+      "if (false) {");
 }
 
 // MIRRORS scrollListHang: the width of a list marker at the start of a source
@@ -748,10 +798,154 @@ present(parseArmBody, /seq != scrollNextSeq/,
   "structural: the discontinuity is tested on seq against the expected next, by operand");
 
 // The request picks its budget by TRANSPORT - BLE cannot have the whole thing.
-const reqBody = body(INO, "void requestScrollback(int idx)", "scrollback.ino");
+// Bound to scrollFetch(), NOT requestScrollback(): Task 7 pulled the busy
+// guard/cache-check/wire-line logic (this budget selection included) out of
+// requestScrollback() into a shared core both it and scrollOpenById() call,
+// so requestScrollback()'s own body is now four lines and this assertion
+// moved to where the logic actually lives - the identical maintenance
+// PROJSESS's own psessPending fix round required elsewhere on this branch.
+const reqBody = body(INO, "void scrollFetch(const char* id, uint8_t hostSlot, bool broadcast)", "scrollback.ino");
 present(reqBody, /usbLinkActive\(\)/, "structural: the fetch budget is chosen by transport, not fixed");
 present(reqBody, /SCROLL_TAIL_BYTES_USB/, "structural: the USB tail budget is a named constant");
 present(reqBody, /SCROLL_TAIL_BYTES_BLE/, "structural: the BLE tail budget is a named constant");
+
+// ---------------- STRUCTURAL: scrollReset() makes a fresh stream genuinely
+// fresh (the seqgap task) ----------------
+//
+// scrollReset() ran at the START of every chunked fetch (seq 0) but never
+// touched scrollNextSeq, which is otherwise assigned in exactly one place:
+// scrollFetch(), once, at the true start of a fetch. So a SECOND stream for
+// the SAME store (the seq==0 handler in deckhand_display.ino calling
+// scrollReset() again) cleared the arena while scrollNextSeq stayed at
+// whatever the FIRST stream's tail last reached - the first stream's own
+// chunk 0 is compared against 0 correctly (scrollFetch() just set it), but
+// nothing re-zeroes it for a stream that starts through scrollReset() alone.
+// Measured on hardware: a fully successful 504-entry fetch (`SCROLL done
+// entries=504 lines=10438`) followed by a second stream whose own chunk 0
+// was compared against the first stream's `scrollNextSeq` (25), declared a
+// hole (`SCROLL seqgap got=0 want=25`), and reported "could not reach the
+// Mac" over a transcript that had arrived in full.
+// Bound to scrollReset()'s OWN body, not to the file - the classic trap this
+// repo has paid for (pairWindowOpen's `return true` passing 70 neighbouring
+// assertions): scrollFetch()'s own "scrollNextSeq = 0" line must not satisfy
+// an assertion about a DIFFERENT function.
+const resetBody = body(INO, "void scrollReset()", "scrollback.ino");
+present(resetBody, /scrollNextSeq\s*=\s*0/,
+  "structural: scrollReset() zeroes scrollNextSeq itself, so a fresh stream's own chunk 0 is " +
+  "compared against 0 rather than a PREVIOUS stream's stale continuity counter");
+
+// ---------------- STRUCTURAL: scrollOpenById (Task 7) ----------------
+//
+// THE WHOLE POINT OF THIS ENTRY POINT: scrollLoadedId, the id the transcript
+// is fetched and later re-fetched/matched by, must come from scrollOpenById's
+// OWN id12 argument - NEVER from sessions[detailIndex].id. detailIndex names
+// whichever session SESSIONS' own detail card is behind, which has no
+// relationship to a PROJECTS-opened row (the two can disagree - a PROJECTS
+// open can happen with an unrelated, or no, detail card behind it), and
+// reading through it here would silently show the WRONG transcript. Bound to
+// scrollOpenById's OWN body, not to the file, per this task's own
+// instruction - a `sessions[detailIndex].id` sitting somewhere else in
+// scrollback.ino (requestScrollback's own, legitimate use of it) must not
+// satisfy an assertion about THIS function.
+const openBody = body(INO, "void scrollOpenById(const char* id12, const char* title)", "scrollback.ino");
+absent(openBody, /sessions\[/,
+  "structural: scrollOpenById never reads sessions[] for the id it loads - detailIndex has no meaning for a PROJECTS-opened id");
+absent(openBody, /detailIndex/, "structural: scrollOpenById never reads detailIndex");
+present(openBody, /scrollFetch\(id12,/,
+  "structural: scrollOpenById passes its OWN id12 argument to the fetch, not a derived one");
+
+// scrollFetch() IS THE ONE PLACE scrollLoadedId IS EVER WRITTEN (both
+// requestScrollback() and scrollOpenById() route through it) - bound here
+// too (reusing reqBody, scrollFetch's own body, parsed just above), so the
+// invariant holds even though the actual assignment is not textually inside
+// scrollOpenById's own body.
+present(reqBody, /strncpy\(scrollLoadedId, id,/,
+  "structural: scrollLoadedId is set from scrollFetch's own id argument");
+absent(reqBody, /sessions\[/, "structural: scrollFetch itself never reads sessions[] either - every caller resolves an id first");
+
+// ---------------- STRUCTURAL: the 5s tick's ORDER (the UI freeze) ----------
+//
+// CONFIRMED ON HARDWARE 2026-09-21, and invisible to every geometry assertion
+// and to a single screenshot: a PROJECTS-opened transcript froze the WHOLE UI
+// within ~5 seconds. Both openers set histActive as well as scrollActive
+// (openScrollback()'s own note on why every shared guard list names histActive),
+// and handleLine()'s tick used to reach the READER's histActive arm FIRST. That
+// arm re-resolves detailIndex from detailId - which is EMPTY for an id that is
+// not in sessions[], the entire point of scrollOpenById - so it took the -1
+// branch, painted the SESSIONS list over the open transcript and called
+// exitReaderToList(), which clears histActive and NOT scrollActive. From then on
+// the 5s tick returned at the scrollActive guard and the 1s tick was gated on
+// !scrollActive: the footer and every tab render stopped FOREVER, with 304KB of
+// PSRAM still held, while the device went on talking to the Mac. Two captures
+// 45 seconds apart showed the identical footer clock.
+//
+// The fix is an ORDER - the transcript's own arm first - so this is an assertion
+// about POSITION, which is not a thing any other assertion in this repo checks.
+// Bound to handleLine()'s own body so a `scrollActive` test somewhere else in
+// the file cannot satisfy it.
+const tickBody = body(SKETCH, "void handleLine(const String& line)", "deckhand_display.ino");
+{
+  const scrollAt = tickBody === null ? -1 : tickBody.indexOf("if (scrollActive) {");
+  const histAt   = tickBody === null ? -1 : tickBody.indexOf("if (histActive) {");
+  s(scrollAt >= 0 && histAt >= 0,
+    "structural: handleLine() has both the scrollback arm and the reader's histActive arm");
+  s(scrollAt >= 0 && histAt >= 0 && scrollAt < histAt,
+    "structural: the tick decides the SCROLLBACK before the reader's histActive arm - " +
+    "reversed, a PROJECTS-opened transcript is painted over by the SESSIONS list and the " +
+    "whole UI freezes (hardware-confirmed)");
+  // The arm's own body: the two entry paths, and what each is and is not
+  // subjected to. slice() to the first "\n  }" after the arm opens - the arm is
+  // small and closes at that indentation, the same "locate by structure, not by
+  // offset" discipline the baseline masker uses.
+  const armBody = scrollAt >= 0
+    ? tickBody.slice(scrollAt, tickBody.indexOf("\n  }", scrollAt) + 4) : "";
+  s(/if \(!scrollFromProjects\)/.test(armBody),
+    "structural: the scrollback arm resolves a detail index ONLY for the non-PROJECTS entry " +
+    "path - a scrollOpenById() transcript has no sessions[] row by construction, so " +
+    "resolveDetailIndex()'s -1 says nothing about whether the screen is still valid");
+  s(/detailIndex = resolveDetailIndex\(\);/.test(armBody),
+    "structural: the live entry path (openScrollback, from a detail card) still re-anchors " +
+    "detailIndex on every tick - it is what the header, the CHAT/ALL refetch and the live " +
+    "tail all read, and a reorder between ticks would otherwise leave it on another session");
+  s(/exitScrollback\(\);/.test(armBody) && !/exitReaderToList\(\)/.test(armBody),
+    "structural: the scrollback arm leaves through exitScrollback(), never exitReaderToList() - " +
+    "that one clears histActive and NOT scrollActive, which is the freeze by the other door");
+}
+
+// ---------------- STRUCTURAL: RESUME is SIGNED ----------------
+//
+// It shipped as `RESUME <id> <plaintext>`, run by the host with no HMAC and no
+// nonce, while the two OTHER ways of injecting text into a session (PROMPT and a
+// typed ANSWER) have been signed against a per-device secret since they existed.
+// host/voice-answer-check.mjs proves the CRYPTO and binds nothing about the
+// device; these bind the firmware's own half.
+const resumeBody = body(INO, "int sendResumeSigned(const char* id12, const char* text)", "scrollback.ino");
+present(resumeBody, /":RESUME:"/,
+  "structural: the device signs the RESUME LABEL - the one thing stopping a signature minted " +
+  "for a message to a READY session from starting a headless turn in a dead one");
+present(resumeBody, /authHmacFor\(slot,/,
+  "structural: the frame is signed with the PAIRING KEY of the link it is addressed to, not " +
+  "with activeHost's - \"whoever ticked most recently\" is wrong about half the time with two Macs");
+present(resumeBody, /hostLinks\[i\]\.resumeNonce/,
+  "structural: the nonce signed is the one THAT Mac published (per link), so a rotated or " +
+  "never-issued nonce is refused rather than replayed");
+present(resumeBody, /sendLineToHost\(line, i\)/,
+  "structural: each signed frame is ADDRESSED to the link whose key signed it - a broadcast " +
+  "would hand every other Mac a signature it cannot check");
+{
+  const at = SKETCH.indexOf('} else if (buf.startsWith("RESUME")) {');
+  const end = SKETCH.indexOf('} else if (buf.startsWith("READTEST"))', at);
+  const cmd = at >= 0 && end > at ? SKETCH.slice(at, end) : "";
+  s(cmd.length > 200, "structural: the RESUME command handler is findable in deckhand_display.ino");
+  s(/sendResumeSigned\(scrollLoadedId, arg\.c_str\(\)\)/.test(cmd),
+    "structural: the RESUME command sends through sendResumeSigned() - the signing path");
+  s(cmd.length > 200 && !/String\("RESUME "\)/.test(cmd),
+    "structural: the RESUME command never builds a plaintext `RESUME <id> <text>` line itself - " +
+    "the unsigned form is refused by the host, so sending it would be a silent no-op");
+  s(/RESUME_TEXT_MAX/.test(cmd),
+    "structural: the text cap is checked HERE, by name, against the same number the host " +
+    "verifies with - an over-cap prompt otherwise reads on the Mac as an authentication failure");
+}
 
 // ---------------- STRUCTURAL: touch (Task 5) ----------------
 
@@ -896,6 +1090,77 @@ s(/SCROLL_TAP_SLOP_PX/.test(dragBody || ""),
 s(/SCROLL_RAIL_TAP_X/.test(dragBody),
   "structural: the rail's tap zone is the named constant");
 
+// ---------------- STRUCTURAL: scrollOpenById() no-ops a second open of an
+// ALREADY-LOADED session (the seqgap task, fix round 2) ----------------
+//
+// Fix round 1 gave PSESSOPEN a TIME-windowed dedupe (2000ms, PROJOPEN's own
+// shape). Round 2 proved that insufficient on hardware: PSESSOPEN's own
+// fetch can run 7.5s for a 504-entry transcript, well past any fixed
+// window, and a duplicate landing after it still started a genuinely
+// second scrollFetch() - which host/index.mjs's own PER-LINK generation
+// counter (nextScrollGen()/link.scrollGen, host/index.mjs) can silently
+// SUPERSEDE the first, still-streaming fetch ("Scrollback: superseded at
+// chunk N - abandoning this fetch", no error reaching the device), and
+// whatever that abandoned stream had accumulated is thrown away the moment
+// the superseding stream's own seq=0 resets the store - the very mechanism
+// fix round 1 made safe for a LEGITIMATE fresh stream turns out to be just
+// as effective at silently absorbing an illegitimate second one.
+//
+// The fix moved from TIME to STATE, and to the ENTRY POINT BOTH its callers
+// share: scrollOpenById() (PSESSOPEN, deckhand_display.ino, AND a level-2
+// row TAP, projects.ino - point 4 of this round's own brief) now no-ops a
+// second open of the SAME (id, chat-filter) it already has loaded, checked
+// BEFORE it touches any of its own state. Bound to scrollOpenById()'s OWN
+// body (reusing openBody, parsed above for the id-source assertions), per
+// this file's own rule: a rule a neighbouring line can satisfy is not one.
+present(openBody, /scrollActive && scrollFromProjects && scrollCount > 0/,
+  "structural: scrollOpenById's no-op guard checks the SAME identity scrollFetch()'s own " +
+  "already-held branch uses (a non-empty store, the id, the chat filter) PLUS scrollActive " +
+  "itself - a transcript merely cached from an already-CLOSED session must not read as open");
+present(openBody, /histChatOnly == scrollLoadedChat/,
+  "structural: the guard's identity includes the chat/all FILTER, not just the id - a toggle " +
+  "must still genuinely re-fetch, scrollFetch()'s own identity check's own reasoning");
+present(openBody, /strcmp\(scrollLoadedId, id12\) == 0/,
+  "structural: the guard compares against its OWN id12 argument, not a derived id - " +
+  "scrollOpenById's own id-source rule (this file, above), applied to its new guard too");
+
+// THE ORDERING ITSELF: the guard's own comparison must appear BEFORE the
+// first state mutation (`scrollFromProjects = true;`), or "checked before
+// this function touches any state" is a comment nobody enforces. A second,
+// already-loaded open must never reach scrollY = 0, scrollActive's own
+// re-assignment, or a real scrollFetch() call - each of those is what lets
+// a superseding stream start in the first place, and a guard placed AFTER
+// them would have already done the damage by the time it ran.
+{
+  const guardAt = openBody ? openBody.indexOf("scrollCount > 0") : -1;
+  const mutateAt = openBody ? openBody.indexOf("scrollFromProjects = true;") : -1;
+  s(guardAt >= 0 && mutateAt > guardAt,
+    guardAt < 0
+      ? "structural: scrollOpenById's no-op guard is findable"
+      : "structural: the no-op guard is checked BEFORE scrollFromProjects is (re)assigned - a " +
+        "second open of an already-loaded session reaches no state mutation at all, let alone " +
+        "a second wire request");
+}
+
+// THE DEAD-GUARD CHECK ITSELF - this file's own precedent (sendScrollback's
+// ACK, and PSESSOPEN's own former time-windowed dedupe this replaced, both
+// above): a guard whose CONDITION is neutralised (a bare `if (false)`)
+// still shows every line above as text, so the three `present()`
+// assertions AND the ordering check would ALL still pass with the drop
+// entirely disabled - the exact "a rule a neighbouring line can satisfy"
+// trap. Only this closes it, and it is what the "scrollopenbyid-not-guarded"
+// fault exists to make fail BY NAME: a second open of an already-loaded
+// session CAN wipe the store once this specific assertion is the only one
+// wrong.
+{
+  const dg = deadGuards(openBody || "");
+  s(dg.length === 0,
+    dg.length
+      ? `structural: scrollOpenById's no-op guard carries a dead-code guard [${dg.join(", ")}] - ` +
+        "a second open of an already-loaded session can still wipe the store"
+      : "structural: scrollOpenById's no-op guard carries no dead-code guard, so it runs live");
+}
+
 // Closing must restore the surface underneath, and clear the PSRAM.
 const exitBody = fnBody(INO, "void exitScrollback()", "scrollback.ino");
 s(/scrollEnd\(\)/.test(exitBody),
@@ -963,6 +1228,11 @@ if (SELFTEST) {
     "lang-no-flag": /a language row has its own flag/,
     "lang-any-fence": /the language row is emitted on the OPENING fence only/,
     "lang-one-path": /BOTH draw paths draw a language row dim/,
+    "scrollopenbyid-detailindex": /scrollOpenById never reads sessions\[\] for the id it loads/,
+    "tick-order": /the tick decides the SCROLLBACK before the reader's histActive arm/,
+    "resume-nolabel": /the device signs the RESUME LABEL/,
+    "reset-no-seq": /scrollReset\(\) zeroes scrollNextSeq itself/,
+    "scrollopenbyid-not-guarded": /no-op guard carries a dead-code guard/,
   }[process.env.SB_FAULT || "wrap-cap"];
   const hit = FAILED.find(x => WANT.test(x));
   if (!hit) { console.log(`SELFTEST FAILED: fault ${process.env.SB_FAULT || "wrap-cap"} was not caught`); process.exit(1); }

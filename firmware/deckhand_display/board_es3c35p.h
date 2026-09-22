@@ -534,6 +534,18 @@ const int TAP_MIN = 46;   // 7.1mm, the same fingertip floor board 1 targets
 // underlines at TAB_BAR_H - 3, and drawFab() sits at recCY() = TAB_BAR_H / 2 -
 // every offset in the bar is already derived from this constant.
 const int TAB_BAR_H = 46;
+// The active tab's accent underline, drawTabBar()'s
+// `fillRect(i*tabW + TAB_UNDERLINE_INSET, TAB_BAR_H - 3, tabW - 2*TAB_UNDERLINE_INSET, 3)`.
+// An 8px inset (the value this replaced) was sized for a 3-tab, ~106px-wide slot; at 4
+// tabs (80px here) it made the underline (tabW - 16 = 64) exactly as wide as an
+// 8-character label like SESSIONS/PROJECTS/SETTINGS (64px, Spleen 8x16) - zero slack,
+// which the strict `<` in usage-geom-check.mjs's tab-bar assertion reads as a fail: an
+// underline the same width as the word it sits under is indistinguishable from one
+// narrower than it. 4 gives 80 - 8 = 72 > 64. Declared per board, even though today's
+// value matches board 1's: everything board-specific lives in the headers, and the two
+// boards' tab counts/widths/fonts can diverge from each other later even if they don't
+// today.
+const int TAB_UNDERLINE_INSET = 4;
 const int CONTENT_Y = TAB_BAR_H;
 // 20, up from 18, because T_BODY is now a 16px line and drawIfChanged clears
 // th + 2 = 18 rows - which fits an 18px band EXACTLY, with no room for the 1px
@@ -1344,6 +1356,253 @@ const int SESSION_SUB_LANE_W = SESSION_ROW_W - SESSION_NAME_DX - 12;
 // contentBottom() - SESSION_OVERFLOW_H + 4, board 1's own relationship, so both
 // boards keep the same 1-row overhang into the footer's padding and no more.
 const int SESSION_OVERFLOW_H = 19;
+
+// ---------- Projects tab: the project list (level 1) ----------
+// EVERY ROW IS THE SAME HEIGHT - unlike SESSIONS there is no ladder here, no
+// hero rung competing for a name band, no band card. A project row draws one
+// name and one line of metadata (a session count and a last-activity time)
+// and neither of those grows with how urgent the project is - there is no
+// such thing at this level. So the SCROLLING shape SESSIONS only reaches at
+// its seventh row is this level's ONLY shape, from its very first project.
+//
+// #define, NOT const int, for the reason BOARD_SESSIONS_SCROLL above is: `#if`
+// on a C++ const int is silently false with no -Wall warning, and that has
+// shipped twice already (panel_shim.cpp's BOARD_PANEL_INVERT, and
+// BOARD_USAGE_V2 mid-redesign). board_e32r28t.h states this flag as an
+// explicit 0 - PROJECTS is out of scope for board 1 by design
+// (docs/superpowers/specs/2026-09-20-sessions-manager-design.md, "Out of
+// scope: Board 1" - the tab arithmetic works there, the CONTENT does not),
+// and board 1's own header has no PROJ_* constants to guard with it, but
+// commands-check.mjs's guard evaluator THROWS on a flag neither header
+// #defines (its own rule: "a guard silently read as false makes any
+// negation claim over it meaningless"), so it needs a real value on both
+// boards to evaluate this file's #if BOARD_HAS_PROJECTS guards at all.
+#define BOARD_HAS_PROJECTS 1
+
+// >= the 16 measured on this Mac (docs/superpowers/specs/2026-09-20-sessions-
+// manager-design.md), with headroom. This is the DEVICE's own ceiling, not a
+// mirror of a host-side cap - host/project-replies.mjs's buildProjectsReply()
+// ships every project with at least one transcript, uncapped. A reply with
+// more than PROJ_SLOTS items is not silently lost: projects.ino's absorb loop
+// counts and logs whatever did not fit.
+#define PROJ_SLOTS 24
+
+// ---------- The project KEY buffer ----------
+// A project key is Claude Code's own directory name under ~/.claude/projects,
+// which is the project's ABSOLUTE PATH with every "/" (and "." ) turned into
+// "-". Its length is therefore the length of a real filesystem path, not of
+// anything the device or the host chose - nothing caps it, and it is NEVER
+// decoded or shortened, because a key must round-trip to that exact directory
+// or PROJSESS asks for a project that does not exist (host/project-replies.mjs's
+// own header on why even transliteration is refused here).
+//
+// MEASURED ON THIS MAC, 2026-09-21, over the same 16 projects PROJ_SLOTS was
+// sized against: the longest is 80 characters, and FOUR are 64 or longer -
+//   80  -Users-yujia-work-synthropic-agent-ui--claude-worktrees-drop-live-postgres-tests
+//   70  -Users-yujia-work-synthropic-agent-ui--claude-worktrees-v2-rule-deploy
+//   65  -Users-yujia-work-synthropic-agent-ui--claude-worktrees-core-2973
+//   64  -Users-yujia-projects-deckhand--claude-worktrees-session-ranking
+// - so the 64-byte buffer this shipped with truncated a QUARTER of the real
+// inventory at 63 characters. That failure was silent and looked like a
+// different bug entirely: level 1 listed the project correctly (the NAME comes
+// from the cwd inside a transcript, not from the key), the tap sent
+// `PROJSESS <truncated>`, the host's readdir threw, and the empty reply echoed
+// the TRUNCATED key - which matched projOpenKey, passed the staleness strcmp,
+// and painted "No sessions found" over a project whose own row had just said it
+// has N. Nothing named the cause at either end.
+//
+// 128, NOT 96. The worst case is not "80" but "80 plus whatever the next
+// worktree is called": every one of the four long keys above is an ordinary
+// path plus one `--claude-worktrees-<branch-name>` segment, and that segment
+// alone runs 19..45 characters here. 96 leaves 16 characters of margin, which
+// is less than ONE such segment - it would be a buffer sized to today's
+// measurement rather than to the thing that produces it. 128 leaves 47, i.e.
+// room for another full worktree segment on top of the longest path measured,
+// and it is the power of two that costs least to reason about.
+//
+// THE RAM: ProjInfo.key grows 64 -> 128, so projects[PROJ_SLOTS] costs
+// 64 * 24 = 1536 bytes more .bss, plus 64 for projOpenKey - about 1.6KB on a
+// board with ~64KB of static RAM in use and 8MB of PSRAM behind it. Paid in
+// .bss deliberately rather than moved to PSRAM: sessions[] went to PSRAM
+// because it is ~23.5KB, and 1.6KB does not buy the indirection.
+//
+// PROJ_KEY_MEASURED_MAX is a SEPARATE declaration on purpose - the checker
+// asserts PROJ_KEY_MAX >= PROJ_KEY_MEASURED_MAX + PROJ_KEY_HEADROOM against the
+// three as parsed, so shrinking the buffer back fails by name instead of
+// quietly agreeing with itself ("X >= Y where X is declared = Y always holds",
+// CLAUDE.md).
+#define PROJ_KEY_MEASURED_MAX 80
+#define PROJ_KEY_HEADROOM 45
+#define PROJ_KEY_MAX 128
+// T_BODY (16px, Spleen 8x16) + 2*15 padding = 46, and 46 is this board's own
+// TAP_MIN - not merely over it. A project row carries no title, no band, no
+// ask, so nothing about it needs more than one line of name and one of meta,
+// and the fingertip floor is exactly what that one line costs once padded.
+const int PROJ_ROW_H = 46;
+// Matches SESSION_ROW_GAP - one scrolling-list rhythm on this board, not a
+// second gap value to keep in step with it by hand.
+const int PROJ_ROW_GAP = 3;
+// One left edge on this board - see SESSION_ROW_X's own note on why 12 rather
+// than two different margins for the same physical bezel.
+const int PROJ_ROW_X = SESSION_ROW_X;   // 12
+const int PROJ_ROW_W = SESSION_ROW_W;   // 296
+const int PROJ_ROW_Y0 = CONTENT_Y + 4;  // 50, matches SESSION_ROW_Y0
+const int PROJ_STEP = PROJ_ROW_H + PROJ_ROW_GAP;               // 49
+// FROM THE PANEL, NEVER A LITERAL - BOARD_H - FOOTER_H is contentBottom()'s
+// own definition and PROJ_ROW_Y0 is where the first row starts. A literal
+// here would be a hardcoded panel dimension in everything but name, and three
+// separate bugs in this board's port were exactly that.
+const int PROJ_AVAIL = BOARD_H - FOOTER_H - PROJ_ROW_Y0;       // 410
+const int PROJ_ROWS = (PROJ_AVAIL + PROJ_ROW_GAP) / PROJ_STEP; // 8
+// THE VISIBLE WINDOW'S HEIGHT IN CONTENT COORDINATES - the same "not the full
+// avail" reasoning SESSION_SCROLL_VIEW_H documents, for the identical reason:
+// this board has no region clip (PanelShim::clipLogicalRect clips to the
+// SCREEN, not to a rect), so a scroll position that admitted a ninth row's
+// first few pixels would leave a hole nothing wipes. 8*49-3 = 389.
+const int PROJ_SCROLL_VIEW_H = PROJ_ROWS * PROJ_STEP - PROJ_ROW_GAP;
+// A DRAG THAT MOVED LESS THAN THIS IS A TAP, not a scroll - same threshold,
+// same reasoning, as SESSION_DRAG_TAP_PX just above, and reused rather than
+// re-judged: a project row is not a smaller target than a session row.
+const int PROJ_DRAG_TAP_PX = SESSION_DRAG_TAP_PX;
+// THE RAIL - ALIASED, not re-derived, PROJ_DRAG_TAP_PX's own precedent just
+// above. PROJ_ROW_X and PROJ_ROW_W literally alias SESSION_ROW_X/W (both
+// lists draw at the same x and width on this board), so the 10px gutter
+// SESSION_RAIL_X already sits in - between a row's right edge (12+296=308)
+// and the panel edge (320) - is the SAME gutter here, free: nothing about
+// either row's width has to move to fit it. One rail geometry for both
+// lists rather than a second one that could drift out of step with it.
+// PSESS_ROW_X/W alias PROJ_ROW_X/W in turn (see below), so level 2's own
+// rail reuses these same three constants rather than declaring its own.
+const int PROJ_RAIL_X = SESSION_RAIL_X;
+const int PROJ_RAIL_W = SESSION_RAIL_W;
+const int PROJ_RAIL_MIN_THUMB = SESSION_RAIL_MIN_THUMB;
+// The row's own left/right text inset, matched to the session row's visual
+// margin inside its rounded card - used by projects-geom-check.mjs to bound
+// the name lane against the meta lane and the row's own edges.
+const int PROJ_PAD = 12;
+// The longest project name this row promises to show WHOLE rather than
+// trimmed with "..." - the host caps `n` at 22
+// (host/project-replies.mjs's deviceText(label, 22)), so 22 is what this
+// board commits to, not a taste pick.
+const int PROJ_NAME_CHARS = 22;
+// THE META FIELD'S OWN WORST CASE, MEASURED rather than assumed - the same
+// rule SESSION_SUB_LANE_W is derived by. The device's own vocabulary for this
+// field is "<count>x <time>", and the widest real string it draws is
+// "999x 23:59" (a count clamped to three digits for display - see
+// projects.ino's drawProjectRow - plus a 24-hour HH:MM) at 10 characters,
+// TEXT_ADV(8)'s 80px. 88 leaves one character of margin over that, which the
+// "old" fallback (a project whose newest activity was not today) never needs.
+const int PROJ_META_W = 88;
+// Must fail if it does not hold - the name lane and the meta lane sharing the
+// row's own text width, less its left/right pad: 22*8 + 88 = 264 <=
+// 296 - 2*12 = 272, 8px of slack. projects-geom-check.mjs asserts this from
+// the parsed constants rather than trusting the arithmetic in this comment.
+
+// A STALLED FETCH MUST SAY SO rather than leaving "Loading projects..." on
+// the glass forever - SCROLL_FETCH_TIMEOUT_MS/_BLE_MS's own reasoning
+// (scrollback.ino's requestScrollback()/tickScrollFetch()). Read by
+// tickProjectsFetch() (projects.ino), called from loop() beside
+// tickScrollFetch(), under the identical `if (!pending) return;` guard so a
+// fetch that is not outstanding costs nothing per tick.
+//
+// THE NUMBERS THEMSELVES ARE NOT SCROLL_FETCH_TIMEOUT_MS/_BLE_MS, and a
+// first version of this that simply copied them (20000/40000) was wrong,
+// caught in review rather than by any checker here. Those two are tuned for
+// a MULTI-CHUNK transcript fetch that pays a ~130ms ACK round-trip PER
+// CHUNK - a 20-entry transcript can be eight or more chunks, and 20s/40s is
+// sized for that shape of request. This one is a single chunk: the design's
+// own projection is ~175ms for 16 projects
+// (docs/superpowers/specs/2026-09-20-sessions-manager-design.md), and even a
+// degraded 2.7 KB/s BLE link (scrollback.ino's own worst-case measurement,
+// before MTU negotiation) delivers the whole ~1.1KB reply in well under a
+// second. A cap sized for the WRONG shape of request undoes most of the
+// point of having one at all: this fix exists because a too-long wait is
+// exactly the experience it was written to abolish, and inheriting
+// SCROLL's numbers would have left up to 40 real seconds of "Loading
+// projects..." on a link that would in practice have answered in one.
+//
+// 8000/12000 - 45x and 68x the measured single-chunk fetch - so normal
+// variance (a busier Mac, a slightly slower poll) will not false-fail this,
+// while a genuinely wedged host is still reported in single-digit seconds
+// rather than tens of them. THE ASYMMETRY IS WHY THIS SIDE IS THE ONE TO
+// ERR ON: a cap that is too SHORT costs one extra tap on a state that is
+// already named and already recoverable (tap to retry); a cap that is too
+// LONG costs real, silent seconds of exactly the stuck-forever feeling this
+// whole mechanism exists to prevent. If a slow Mac is ever measured
+// false-failing this in practice, raise PROJ_FETCH_TIMEOUT_BLE_MS first (it
+// is the more exposed transport) with the measurement that justified it in
+// the same commit - do not restore SCROLL's numbers, which were never
+// measured against THIS request's shape in the first place.
+const int PROJ_FETCH_TIMEOUT_MS     = 8000;
+const int PROJ_FETCH_TIMEOUT_BLE_MS = 12000;
+
+// ---------- Projects tab: level 2, a project's sessions ----------
+// TWO-LINE ROWS, unlike level 1's one-liner. Level 1 has only a name and a
+// scalar pair to show side by side; level 2 promises a TITLE (which needs
+// real width to read as a title rather than a fragment), an age, a turn
+// count AND a live/ended tag, and no single T_BODY line fits all four
+// legibly. So the row is title-line-over-meta-line: T_BODY(16) title +
+// PSESS_LINE_GAP(10) + T_BODY(16) meta + 2x7 padding = 56 - the task
+// brief's own derivation, not a taste pick. projects.ino's drawPSessRow()
+// centres the pair vertically from PSESS_ROW_H and PSESS_LINE_GAP directly
+// (uiLineH(T_BODY), never a literal 16) so this stays correct if the body
+// face ever changes.
+const int PSESS_ROW_H = 56;
+const int PSESS_ROW_GAP = 3;              // matches PROJ_ROW_GAP - one list rhythm on this board
+const int PSESS_ROW_X = PROJ_ROW_X;       // 12, the one left margin this board uses
+const int PSESS_ROW_W = PROJ_ROW_W;       // 296
+// SAME LANE LEVEL 1 DRAWS IN, not a shifted-down "page top" the way
+// SETTINGS' PAGE_TOP makes room for its own back band. There is no back
+// band here - see the zero-slack note on PSESS_ROWS below for why, and
+// where the back affordance actually lives instead (deckhand_display.ino's
+// handleTouch(): tapping the PROJECTS tab a second time while a level-2
+// screen is up, the same "same tab is still back" idiom the SESSIONS
+// detail card already uses).
+const int PSESS_ROW_Y0 = PROJ_ROW_Y0;     // 50
+const int PSESS_STEP = PSESS_ROW_H + PSESS_ROW_GAP;              // 59
+const int PSESS_AVAIL = BOARD_H - FOOTER_H - PSESS_ROW_Y0;       // 410, same as PROJ_AVAIL (same Y0)
+const int PSESS_ROWS = (PSESS_AVAIL + PSESS_ROW_GAP) / PSESS_STEP; // 7
+// ZERO SLACK, ACCEPTED RATHER THAN OVERLOOKED. PSESS_ROW_Y0 + PSESS_ROWS *
+// PSESS_STEP - PSESS_ROW_GAP lands EXACTLY on contentBottom(): 50 + 7*59 - 3
+// = 460 = 480 - FOOTER_H(20). projects-geom-check.mjs asserts this with a
+// `<=`, so it passes - with nothing to spare. Do NOT shave PSESS_ROW_H to
+// buy margin: it is already exactly TAP_MIN(46) + 10, and this level draws
+// TWO lines of real information per row (a title, and a turn/age/live
+// line) where level 1 draws one - the fingertip floor is not the part of
+// this row that has slack to give. If a later change needs a header row
+// here (a project-name caption, a back band matching SETTINGS' own), drop
+// PSESS_ROWS to 6 instead - the row stays TAP_MIN-safe either way.
+const int PSESS_SCROLL_VIEW_H = PSESS_ROWS * PSESS_STEP - PSESS_ROW_GAP; // 410, equal to PSESS_AVAIL (zero slack, see above)
+const int PSESS_DRAG_TAP_PX = PROJ_DRAG_TAP_PX;
+const int PSESS_PAD = PROJ_PAD;           // 12
+// The gap between the title line and the meta line - the "10" in the
+// PSESS_ROW_H derivation above. A named constant rather than a literal
+// baked into drawPSessRow() so the 56 = 16+10+16+2*7 arithmetic in that
+// comment stays checkable rather than merely asserted.
+const int PSESS_LINE_GAP = 10;
+
+// The device's own ceiling on how many of one project's sessions it will
+// hold at once - NOT a mirror of the wire's own PROJSESS_CAP(60,
+// host/project-replies.mjs). The largest project measured on this Mac
+// carries 22 transcripts (docs/superpowers/specs/2026-09-20-sessions-
+// manager-design.md, "transcripts in this one project | 22", the same
+// measurement PROJ_SLOTS(24) was sized against for level 1's own project
+// count). 30 keeps that same "measured worst case plus real headroom, well
+// under the wire's own cap" shape PROJ_SLOTS uses (24 against a measured
+// 16) rather than simply matching PROJSESS_CAP, because matching it would
+// buy nothing today (no project anywhere near 30, let alone 60) and cost
+// more RAM for no observed benefit. A project with more sessions than this
+// (or than the host is willing to send) is not silently truncated: the
+// absorb loop in deckhand_display.ino's handleLine() counts what did not
+// fit, exactly as PROJ_SLOTS' own overflow counter does, and the level-2
+// screen shows an honest "N more, showing X of Y" using the wire's own
+// `total` field rather than the capped count it actually received. The RAM
+// arithmetic (PSessInfo's own measured size, its per-row signature cache,
+// and the before/after `arduino-cli` figures) is in the task-6 report
+// rather than transcribed here, for the same reason this file's own "size
+// today" table in CLAUDE.md is hand-maintained rather than baked into a
+// comment a later edit could silently leave stale.
+#define PSESS_SLOTS 30
 
 // ---------- §3 THE STATUS BAND ----------
 // The card head becomes a FILLED BAND in the status colour. Filled bands are new
