@@ -9100,13 +9100,29 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // sitting there for the next bytes to be appended to, refusing again
     // forever.
     //
-    // NO DUPLICATE GUARD, DELIBERATELY - DETAIL's own reasoning: the host
-    // delivers every trigger-file command over BOTH transports, so a
-    // cabled board runs this twice within milliseconds, and opening the
-    // SAME project twice is idempotent (projOpenLevel1() resets and
-    // re-requests; requestProjSessions()'s own busy guard turns the second
-    // of the two into a harmless logged no-op rather than a second wire
-    // request).
+    // DEDUPED - NOT "NO DUPLICATE GUARD, DELIBERATELY" AS THIS COMMENT USED TO
+    // CLAIM. That reasoning was measured wrong on hardware: projOpenLevel1() is
+    // NOT idempotent against its own double delivery, because
+    // requestProjSessions()'s busy guard only helps while the FIRST copy's
+    // fetch is still in flight. The observed sequence is worse - the first
+    // copy's PROJSESS fetch SUCCEEDS (232 bytes, list loaded and drawn) before
+    // the second copy is even processed, so psessPending is already false when
+    // it arrives. projOpenLevel1() then resets psessEverReceived/psessCount
+    // (wiping the list that was just drawn) and requestProjSessions() issues a
+    // FRESH "PROJSESS <key>" - which the host's own (device,verb,key) dedupe
+    // (1500ms) correctly drops as a duplicate, since it is byte-identical to
+    // the first copy's request. No reply ever comes for it, so the device
+    // times out 8002ms later over a list it had already loaded.
+    //
+    // COMPOSE chip/page's own precedent (this file, above): an INSERT is not
+    // idempotent, so a repeat within a window is dropped and NAMES ITS CAUSE
+    // rather than silently doing nothing. A re-open of the SAME project index
+    // is the identical shape - projOpenLevel1() resets state and re-fetches,
+    // which is exactly the non-idempotent action a genuine second tap must
+    // still be able to do LATER, just not within the double-delivery window.
+    // 2000ms, not 1500: comfortably longer than the host's own dedupe window,
+    // so this side never re-opens before the host's own copy has already been
+    // dropped.
     String arg = buf.length() > 8 ? buf.substring(8) : String("");
     arg.trim();
     if (currentTab != TAB_PROJECTS) {
@@ -9132,6 +9148,21 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
       buf = "";
       return;
     }
+    // THE DEDUPE ITSELF - see this arm's own header note above. A repeat of the
+    // SAME index within the window is a no-op that reports progress rather than
+    // a second open; a DIFFERENT index, or the same index again later, still
+    // opens for real.
+    static int lastProjOpenIdx = -1;
+    static unsigned long lastProjOpenMs = 0;
+    unsigned long nowProjOpenMs = millis();
+    if (pi == lastProjOpenIdx && nowProjOpenMs - lastProjOpenMs < 2000) {
+      Serial.printf("PROJOPEN: dropped a duplicate open of project %d - the host writes "
+                    "each command to every live transport and a re-open is not idempotent\n", pi);
+      buf = "";
+      return;
+    }
+    lastProjOpenIdx = pi;
+    lastProjOpenMs = nowProjOpenMs;
     projOpenLevel1(pi);
     Serial.printf("PROJOPEN: project %d (%s)\n", pi, projects[pi].name);
   } else if (buf.startsWith("PSESSOPEN")) {

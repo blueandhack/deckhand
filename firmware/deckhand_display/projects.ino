@@ -232,6 +232,20 @@ void requestProjects() {
 // this with nothing outstanding: tickScrollFetch()'s own guarantee, mirrored
 // rather than reinvented, extended to cover two independent callers instead
 // of one.
+//
+// `label` MUST NOT BE A STRING THE HOST DISPATCHES A REQUEST ON. Measured on
+// hardware: level 2 used to pass "PROJSESS" here, so a lost reply was reported
+// as "PROJSESS timeout ms=8002" - which IS host/index.mjs's own
+// `line.startsWith("PROJSESS ")` request dispatch. The host read a TIMEOUT
+// REPORT as a REQUEST for a project literally named "timeout ms=8002",
+// refused it BY NAME as an unknown key (the refusal working exactly as
+// designed, on a request that should never have existed), and the device
+// discarded that refusal as stale, because it never asked for that project.
+// tickProjectsFetch() below passes "PSESSFETCH" instead, precisely so this
+// can never prefix-match the wire verb "PROJSESS " - see requestProjSessions()
+// below, which renames its own busy report for the identical reason.
+// commands-check.mjs parses both this label and host/index.mjs's own dispatch
+// arms and fails BY NAME if either side drifts back into collision.
 bool checkFetchTimeout(bool& pending, unsigned long start, const char* label) {
   if (!pending) return false;
   const unsigned long cap = usbLinkActive() ? PROJ_FETCH_TIMEOUT_MS : PROJ_FETCH_TIMEOUT_BLE_MS;
@@ -266,7 +280,15 @@ void tickProjectsFetch() {
     projectsFetchFailed = true;
     if (currentTab == TAB_PROJECTS) renderProjectsTab();
   }
-  if (checkFetchTimeout(psessPending, psessFetchStart, "PROJSESS")) {
+  // "PSESSFETCH", NOT "PROJSESS" - checkFetchTimeout()'s own header note above:
+  // the wire REQUEST this level's fetch makes really is "PROJSESS <key>"
+  // (requestProjSessions() below), but the DIAGNOSTIC label passed here must not
+  // be that string, or a lost reply's own timeout report collides with the
+  // host's `line.startsWith("PROJSESS ")` request dispatch. "PROJECTS" above has
+  // no such hole only because the host's own PROJECTS check is `line ===`
+  // (exact), never `startsWith` - a fact this label leans on rather than states,
+  // which is why it is still worth reading the note on checkFetchTimeout().
+  if (checkFetchTimeout(psessPending, psessFetchStart, "PSESSFETCH")) {
     psessFetchFailed = true;
     if (currentTab == TAB_PROJECTS) renderProjectsTab();
   }
@@ -543,12 +565,21 @@ void requestProjSessions(const char* key) {
   // independent of level 1's projectsPending - see this file's header note
   // on why the two levels cannot share one fetch slot.
   if (psessPending) {
-    // SIZED FROM PROJ_KEY_MAX, never a literal: "PROJSESS " (9) + the key +
+    // "PSESSFETCH", NOT "PROJSESS" - checkFetchTimeout()'s own header note
+    // (above in this file). This line used to start "PROJSESS %s busy ms=...",
+    // and a real key STILL leaves it starting "PROJSESS " (the key follows the
+    // verb, it does not replace it) - so it collided with the host's own
+    // `line.startsWith("PROJSESS ")` request dispatch exactly the way the
+    // timeout report did, just with a plausible-looking key attached instead of
+    // "timeout ms=...": the host would have read a BUSY REPORT as a REQUEST for
+    // a project named "<real key> busy ms=1234" and refused it as unknown.
+    //
+    // SIZED FROM PROJ_KEY_MAX, never a literal: "PSESSFETCH " (11) + the key +
     // " busy ms=" (9) + a 10-digit millis + NUL. At `char m[96]` an 80-character
     // key silently lost its tail here, so the one line that reports a busy
     // fetch named a project that does not exist.
-    char m[PROJ_KEY_MAX + 32];
-    snprintf(m, sizeof(m), "PROJSESS %s busy ms=%lu", key, millis() - psessFetchStart);
+    char m[PROJ_KEY_MAX + 34];
+    snprintf(m, sizeof(m), "PSESSFETCH %s busy ms=%lu", key, millis() - psessFetchStart);
     sendLineToHost(m);
     return;
   }

@@ -708,6 +708,86 @@ function suite(ok, over = {}) {
   ok(`no guarded line is dead on BOTH boards - such an arm compiles to nothing everywhere ` +
      `and warns nowhere${deadArms.length ? ` [${deadArms.join(", ")}]` : ""}`,
      deadArms.length === 0);
+
+  // ---- (9) A DEVICE DIAGNOSTIC MUST NOT PREFIX-MATCH A REQUEST VERB THE HOST
+  // DISPATCHES ON. Measured on hardware: PROJSESS's own timeout report
+  // ("PROJSESS timeout ms=8002") IS host/index.mjs's own
+  // `line.startsWith("PROJSESS ")` request dispatch, so a REPORT that a fetch
+  // never got its reply was read by the host as a REQUEST for a project
+  // literally named "timeout ms=8002" and refused BY NAME - a refusal the
+  // device then discarded as stale, since it never asked for that project.
+  // requestProjSessions()'s own busy report had the identical hole even with a
+  // REAL key in it (the key follows the verb, it does not replace it, so the
+  // line still started "PROJSESS ").
+  //
+  // BOTH SIDES PARSED HERE, NEVER TRANSCRIBED: the host's own dispatch prefixes
+  // come straight out of its own `if (line.startsWith("X ")) / if (line === "X")`
+  // arms (the same ARM shape section (5b) above reads), and each diagnostic's
+  // wire text comes out of the PROJECTS feature's own snprintf/Serial.printf call
+  // sites - checkFetchTimeout()'s shared "%s timeout ms=%lu" template is resolved
+  // against the actual literal label(s) its own two PROJECTS-feature call sites in
+  // tickProjectsFetch() pass, not a copy of either constant.
+  {
+    const hostSrc2 = over.host != null ? over.host
+      : fs.readFileSync(`${DIR}/../../host/index.mjs`, "utf8").replace(/^[ \t]*\/\/.*$/gm, "");
+    const DISPATCH_ARM = /if \(line\.startsWith\("([^"]+)"\)\)|if \(line === "([^"]+)"\)/g;
+    const hostPrefixes = [...hostSrc2.matchAll(DISPATCH_ARM)].map((m) => m[1]).filter(Boolean);
+    ok("HOST: at least one prefix-dispatched request verb parsed out of host/index.mjs",
+       hostPrefixes.length > 0);
+
+    const projSrc2 = over["src:projects.ino"] != null ? over["src:projects.ino"] : stripComments("projects.ino");
+
+    // requestProjects()'s own busy report - level 1, "PROJECTS busy ms=...".
+    const reqProjFn = fnBody(projSrc2, "void requestProjects() {", "projects.ino");
+    const busyM = /snprintf\(m,\s*sizeof\(m\),\s*"([^"]+)"/.exec(reqProjFn);
+    ok("PROJECTS: requestProjects()'s busy report literal parses", !!busyM);
+
+    // requestProjSessions()'s own busy report - the FIRST snprintf in its body,
+    // inside the `if (psessPending)` guard, not the real request line further down.
+    const reqSessFn = fnBody(projSrc2, "void requestProjSessions(const char* key) {", "projects.ino");
+    const pendingBlock = /if\s*\(psessPending\)\s*\{([\s\S]*?)\n\s*\}/.exec(reqSessFn);
+    const sessBusyM = pendingBlock && /snprintf\([^,]+,\s*sizeof\([^)]+\),\s*"([^"]+)"/.exec(pendingBlock[1]);
+    ok("PROJECTS: requestProjSessions()'s busy report literal parses", !!sessBusyM);
+
+    // checkFetchTimeout()'s shared template, and the two labels tickProjectsFetch()
+    // passes it - one per level, checked independently rather than assumed equal.
+    const ctoFn = fnBody(projSrc2,
+      "bool checkFetchTimeout(bool& pending, unsigned long start, const char* label) {", "projects.ino");
+    const tmplM = /snprintf\(m,\s*sizeof\(m\),\s*"([^"]+)"/.exec(ctoFn);
+    ok("PROJECTS: checkFetchTimeout()'s own message template parses", !!tmplM);
+    const tickFn = fnBody(projSrc2, "void tickProjectsFetch() {", "projects.ino");
+    const labels = [...tickFn.matchAll(/checkFetchTimeout\([^,]+,[^,]+,\s*"([^"]+)"\)/g)].map((m) => m[1]);
+    ok(`PROJECTS: tickProjectsFetch() passes checkFetchTimeout() ${labels.length} label(s) [${labels.join(", ")}]`,
+       labels.length === 2);
+
+    const diagnostics = [];
+    if (busyM) diagnostics.push(["requestProjects() busy report", busyM[1]]);
+    if (sessBusyM) diagnostics.push(["requestProjSessions() busy report", sessBusyM[1]]);
+    if (tmplM) for (const label of labels)
+      diagnostics.push([`checkFetchTimeout("${label}") timeout report`, tmplM[1].replace(/^%s/, label)]);
+
+    // PROJOPEN/PSESSOPEN's own Serial.printf/println diagnostics, in
+    // deckhand_display.ino - a full C-string literal parse (escaped quotes
+    // included), not a naive scan to the next `"`, since "PROJOPEN refused:
+    // \"%s\" is not..." carries one.
+    const mainSrc2 = over.main != null ? over.main : stripComments("deckhand_display.ino");
+    for (const m of mainSrc2.matchAll(/Serial\.print(?:f|ln)\("((?:[^"\\]|\\.)*)"/g)) {
+      if (m[1].startsWith("PROJOPEN") || m[1].startsWith("PSESSOPEN"))
+        diagnostics.push([`deckhand_display.ino "${m[1].slice(0, 40)}"`, m[1]]);
+    }
+
+    ok(`PROJECTS: ${diagnostics.length} of this feature's own diagnostic lines collected`,
+       diagnostics.length >= 5);
+
+    const collisions = [];
+    for (const [name, text] of diagnostics)
+      for (const p of hostPrefixes)
+        if (text.startsWith(p)) collisions.push(`${name} <- host dispatches on "${p}"`);
+    ok(`no PROJECTS-feature diagnostic line can be misread as a request the host ` +
+       `dispatches on (the PROJSESS-timeout-as-a-request defect)` +
+       `${collisions.length ? " [" + collisions.join("; ") + "]" : ""}`,
+       collisions.length === 0);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -739,6 +819,7 @@ const realHost = fs.readFileSync(`${DIR}/../../host/index.mjs`, "utf8")
   .replace(/^[ \t]*\/\/.*$/gm, "");
 const realClaudeMd = fs.readFileSync(`${DIR}/../../CLAUDE.md`, "utf8");
 const realReader = stripComments("reader.ino");
+const realProjects = stripComments("projects.ino");
 // One arm of host/index.mjs's device-line handler, LOCATED by its own literal and
 // brace-matched, with the `[device/...]` log removed from it - i.e. the shape
 // 28795e3 fixed for BLEMTU, put back.
@@ -932,6 +1013,13 @@ const faults = [
     { "src:reader.ino": realReader.replace(
         "#endif  // BOARD_HISTORY_SCROLL",
         "#if !BOARD_USES_TFT_ESPI\n  tft.flush();\n#endif\n#endif  // BOARD_HISTORY_SCROLL") }],
+  // ---- (9)'s fault: PSESSFETCH goes back to being PROJSESS, so its own
+  // timeout/busy reports collide with the host's `line.startsWith("PROJSESS ")`
+  // request dispatch again - the exact hardware defect this section exists to
+  // catch (a lost reply's own report read back as a request for a project
+  // literally named "timeout ms=8002").
+  ["PSESSFETCH's diagnostic label reverts to PROJSESS, colliding with the host's own PROJSESS request dispatch",
+    { "src:projects.ino": realProjects.replace(/PSESSFETCH/g, "PROJSESS") }],
 ];
 
 let caught = 0;

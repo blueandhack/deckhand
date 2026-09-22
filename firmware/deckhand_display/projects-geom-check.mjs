@@ -589,7 +589,7 @@ function main() {
     // through the shared helper at all (as if it had grown its own separate,
     // un-timed-out fetch, or a duplicated tick nobody wired up correctly).
     ["projects.ino",
-      /\n  if \(checkFetchTimeout\(psessPending, psessFetchStart, "PROJSESS"\)\) \{\n    psessFetchFailed = true;\n    if \(currentTab == TAB_PROJECTS\) renderProjectsTab\(\);\n  \}\n/, "\n",
+      /\n  if \(checkFetchTimeout\(psessPending, psessFetchStart, "PSESSFETCH"\)\) \{\n    psessFetchFailed = true;\n    if \(currentTab == TAB_PROJECTS\) renderProjectsTab\(\);\n  \}\n/, "\n",
       "tickProjectsFetch() loses its level-2 (PROJSESS) arm entirely",
       "tickProjectsFetch() covers level 2's PROJSESS fetch too, not a separate duplicated tick"],
     // Task 6 FIX ROUND 1's own regression, reproduced exactly: the fix
