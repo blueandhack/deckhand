@@ -1551,6 +1551,14 @@ void requestProjects();
 // transcript, opened by tapping a row here) is a later task's interface,
 // the same boundary level 1 itself had for THIS level until now.
 extern int projLevel;
+// The level last actually PAINTED (never rendered = -1), read by
+// renderProjectsTab()'s own level-change cache bust (projects.ino) and
+// force-invalidated from here and from scrollback.ino's exitScrollback() -
+// both wholesale-clear-and-bust sites need to write it, not only read it,
+// so (like projLevel just above) it needs its own extern: projects.ino
+// defines it but is concatenated AFTER this file (CLAUDE.md: "a global
+// defined in a later file needs an extern in deckhand_display.ino").
+extern int projLevelPainted;
 // The key of the project level 1 is currently open on - OPAQUE, exactly
 // like ProjInfo.key: never decoded, only ever echoed back on the wire and
 // compared against an incoming `projsess` reply's own `k` to catch a stale
@@ -4352,6 +4360,18 @@ void switchTab(Tab newTab) {
     // WITHOUT this reset and WITHOUT a re-fetch.
 #if BOARD_HAS_PROJECTS
     projLevel = 0;
+    // projLevelPainted FORCED STALE: the fillRect above (this function's own,
+    // just above the if-ladder) just wiped the pixels renderProjectsTab()'s
+    // row-signature caches still believe are on the glass. projLevel is being
+    // set to 0 here, and if the tab being LEFT also ended at level 0 (the
+    // common case - SESSIONS <-> PROJECTS with no drill-in), projLevelPainted
+    // is ALREADY 0 from before this switch, so renderProjectsTab()'s own
+    // `projLevelPainted != projLevel` guard sees no change and busts NOTHING -
+    // onto a content area that was just cleared. Blank tab, no rows, no
+    // loading/failed/empty state, nothing (CLAUDE.md: "a field whose CHROME is
+    // repainted must have its cache reset or the value is left BLANK").
+    // exitScrollback()'s exact idiom, for the identical reason.
+    projLevelPainted = -1;
     requestProjects();
 #endif
     renderProjectsTab();

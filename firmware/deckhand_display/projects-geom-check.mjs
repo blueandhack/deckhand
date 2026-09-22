@@ -366,6 +366,54 @@ function checkAll(c, projSrc, mainSrc) {
           "request for this level refused as \"busy\" forever");
   }
 
+  // ---- tab-switch fix: PROJECTS must force its own cache-bust guard stale,
+  // not rely on a level change ----
+  //
+  // Bound to switchTab()'s OWN BODY in deckhand_display.ino (fnBody() THROWS
+  // if the signature moves, rather than silently reading the wrong text
+  // nearby) - never to the file at large, per "a rule a neighbouring line
+  // can satisfy is not a rule" (CLAUDE.md). switchTab()'s PROJECTS arm
+  // always resets `projLevel = 0;`, and renderProjectsTab()'s own repaint is
+  // gated on `projLevelPainted != projLevel` (projects.ino) - a guard fed
+  // by state THIS function also owns. Switching SESSIONS -> PROJECTS ->
+  // SESSIONS -> PROJECTS leaves both projLevel and projLevelPainted at 0
+  // across the second switch, so that guard sees no change and busts
+  // NOTHING onto a content area switchTab() just fillRect()'d blank - no
+  // rows, no loading/failed/empty state, nothing on the glass. The fix
+  // (exitScrollback()'s own idiom, projLevelPainted = -1, immediately after
+  // the fillRect that invalidates it) makes every tab-in touch to PROJECTS
+  // read as never-painted, exactly like the very first entry.
+  let switchTabBody = "";
+  try {
+    switchTabBody = fnBody(mainSrc, "void switchTab(Tab newTab) {", "deckhand_display.ino");
+  } catch (e) {
+    fails.push("switchTab()'s PROJECTS arm forces projLevelPainted stale");
+    console.log(`  FAIL  switchTab()'s PROJECTS arm forces projLevelPainted stale: ${e.message}`);
+  }
+  if (switchTabBody) {
+    // Locate the PROJECTS arm the same way the psessPending check locates
+    // ITS branch: by the line that opens it, not by searching the whole
+    // function - `projLevelPainted = -1;` written ANYWHERE else in
+    // switchTab() (e.g. left over in the USAGE or SESSIONS arm) must not
+    // satisfy this.
+    const armOpen = "} else if (currentTab == TAB_PROJECTS) {";
+    const armAt = switchTabBody.indexOf(armOpen);
+    // The arm ends at the next "} else {" (SETTINGS' own arm) - both are
+    // real, present lines in the function today.
+    const armEnd = armAt >= 0 ? switchTabBody.indexOf("} else {", armAt) : -1;
+    const armBody = armAt >= 0 && armEnd > armAt ? switchTabBody.slice(armAt, armEnd) : "";
+    assert(fails, "switchTab()'s PROJECTS arm forces projLevelPainted stale",
+      armAt >= 0 && armEnd > armAt && /projLevelPainted\s*=\s*-1;/.test(armBody),
+      armAt < 0 || armEnd <= armAt
+        ? "could not locate the PROJECTS arm inside switchTab()'s body at all"
+        : "no `projLevelPainted = -1;` inside switchTab()'s PROJECTS arm - renderProjectsTab()'s " +
+          "own repaint is gated on `projLevelPainted != projLevel`, and this arm always resets " +
+          "projLevel to 0, so a SECOND tab-in (SESSIONS -> PROJECTS -> SESSIONS -> PROJECTS) " +
+          "leaves both already at 0: the guard sees no change, busts no cache, and paints " +
+          "NOTHING onto the content area this same function just cleared - a blank PROJECTS " +
+          "tab with no rows, no loading/failed/empty state, and a live footer clock");
+  }
+
   return fails;
 }
 
@@ -522,6 +570,16 @@ function main() {
       '    psessPending = false;\n    if (strcmp(k, projOpenKey) == 0) {\n',
       "psessPending = false; moved back outside the key-matched branch (this round's own shipped bug)",
       "psessPending is cleared only inside the key-matched branch"],
+    // The tab-switch blank-PROJECTS bug, reproduced exactly: switchTab()'s
+    // PROJECTS arm loses the one line that forces renderProjectsTab()'s
+    // level-change guard stale. Without it the guard is fed only by
+    // projLevel (always reset to 0 by the very next line), so a second
+    // tab-in sees no change and busts nothing.
+    ["deckhand_display.ino",
+      "    projLevelPainted = -1;\n    requestProjects();",
+      "    requestProjects();",
+      "switchTab()'s PROJECTS arm loses `projLevelPainted = -1;`",
+      "switchTab()'s PROJECTS arm forces projLevelPainted stale"],
   ];
   for (const [file, pattern, replacement, label, want] of structuralFaults) {
     console.log(`selftest: ${label}`);
