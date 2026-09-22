@@ -53,7 +53,7 @@ panel, which reads as a layout bug rather than a build mistake.
 | mic / beeper | both fitted and working | both work, via the ES8311 |
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64 |
-| size today | flash 1425680, RAM 72100 | flash 1160720, RAM 65540 |
+| size today | flash 1425680, RAM 72100 | flash 1160880, RAM 65548 |
 
 **FOUR of the six numbers this file quotes about the binaries are BOUND and two are not.**
 `node firmware/board-baseline.mjs --doc-check` asserts the two **hashes** and the two **sizes**
@@ -120,7 +120,21 @@ longer) so a lost reply's own report can no longer be read back as a request - s
 own command table note on `PROJSESS`'s reply shape, and `commands-check.mjs`'s new assertion that
 a diagnostic's first token can never prefix-match a verb the host dispatches on. Board 1 took
 none of it - both fixes sit behind the same `#if BOARD_HAS_PROJECTS` boundary, and its own binary
-measured byte-identical across this change. `arduino-cli`'s
+measured byte-identical across this change. It then **rose 8 bytes on 2026-09-21** (fix round 2,
+the SAME bug one level up: `TAB 2`'s own double delivery ran `switchTab()`'s PROJECTS arm - and so
+`requestProjects()` - twice, the first copy's fetch succeeding and loading level 1's list before
+the second copy re-requested it, which the host's own dedupe dropped, timing out over data already
+on screen). `projectsLastLoadMs` (`unsigned long`) - set only where a `projs` reply succeeds,
+read only by `requestProjects()` to tell a genuine re-open from the double delivery's own echo -
+is the one new global; the fix lives inside `requestProjects()` itself (not any one caller) so
+all three callers (the `PROJFETCH` command, a real tab switch, and the dead-end retry tap) are
+covered at once. Flash rose 160 bytes in the same change (1,160,720 -> 1,160,880): the new
+window check's own code and messages, plus renaming level 1's own `PROJECTS busy`/`timeout`
+diagnostics to `PROJSFETCH` - fix round 1 had left them alone as "safe today" only because
+host/index.mjs's own `PROJECTS` check happens to be exact-match rather than `startsWith`, which
+`commands-check.mjs`'s section (9) now treats as no safer than a prefix match, on either side of
+the wire. Board 1 took none of it - the same `#if BOARD_HAS_PROJECTS` boundary, binary measured
+byte-identical. `arduino-cli`'s
 "Sketch uses N" is a
 slightly smaller number than the `.bin` - the same image without its trailing padding - so do
 not expect the compile summary to print these.
@@ -183,7 +197,7 @@ arduino-cli compile --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app" \
 node firmware/board-baseline.mjs /tmp/b1/deckhand_display.ino.bin --check 1
 ```
 
-Today: `326a36e3d8dd9189...`, size 1425680 (board 2: `26f424e6a2f6911d...`, size 1160720).
+Today: `326a36e3d8dd9189...`, size 1425680 (board 2: `a184cafaacad279c...`, size 1160880).
 
 It compares **BYTES, not sizes**, and that matters: a default argument on a shared function
 once changed board 1's codegen with **no size change whatsoever** - invisible to a size
@@ -330,7 +344,7 @@ one is neither handled nor refused.
 | `POWERPROBE <label>` | mV/h in the current state; **battery only**, refuses on USB with the cause |
 | `AUDIOPROBE` / `TONETEST [vol]` / `TONELADDER` | a ladder of claims: on the bus / configured and playing / find the audible floor |
 | `SCROLLFETCH` / `SCROLLOPEN` / `SCROLLTO [line]` / `SCROLLPERF [top\|code\|line]` / `SCROLLCLOSE` | board 2 transcript: fetch without drawing, open, park, measure, close |
-| `PROJFETCH` / `PROJOPEN <n>` / `PSESSOPEN <n>` | board 2 PROJECTS: fetch level 1 without a tap, open project `n`'s own sessions (level 2), open session `n`'s transcript (level 3, the EXISTING scrollback surface via `scrollOpenById()` - no new reader). Each refuses BY NAME on a non-numeric or out-of-range index, PROJECTS not being the live tab, `PSESSOPEN` additionally on level 2 not being open yet or another full-screen surface being up. `PROJOPEN <n>` also DEDUPES a repeat of the SAME `n` within 2000ms and says so BY NAME (`projOpenLevel1()` is not idempotent against its own double delivery: it resets `psessEverReceived`/`psessCount` and re-fetches, which the host's own request dedupe then drops, timing out over a list already loaded) - a later re-open of the same project still works. `PSESSOPEN` needs no such guard: its fetch (`scrollFetch()`, shared with SCROLLFETCH/SCROLLOPEN) already answers a repeat from what is already held in PSRAM rather than re-fetching it. Board 1 refuses all three from `UNAVAILABLE_COMMANDS[]` |
+| `PROJFETCH` / `PROJOPEN <n>` / `PSESSOPEN <n>` | board 2 PROJECTS: fetch level 1 without a tap, open project `n`'s own sessions (level 2), open session `n`'s transcript (level 3, the EXISTING scrollback surface via `scrollOpenById()` - no new reader). Each refuses BY NAME on a non-numeric or out-of-range index, PROJECTS not being the live tab, `PSESSOPEN` additionally on level 2 not being open yet or another full-screen surface being up. `PROJOPEN <n>` also DEDUPES a repeat of the SAME `n` within 2000ms and says so BY NAME (`projOpenLevel1()` is not idempotent against its own double delivery: it resets `psessEverReceived`/`psessCount` and re-fetches, which the host's own request dedupe then drops, timing out over a list already loaded) - a later re-open of the same project still works. `PSESSOPEN` needs no such guard: its fetch (`scrollFetch()`, shared with SCROLLFETCH/SCROLLOPEN) already answers a repeat from what is already held in PSRAM rather than re-fetching it. `PROJFETCH` - and `TAB 2`'s own background refresh, and the dead-end retry tap, since all three route through the SAME `requestProjects()` - carries the identical dedupe one level up: a request landing within 2000ms of the LAST successful `projs` reply (`projectsLastLoadMs`) is a no-op that reports "PROJSFETCH held N project(s)" rather than re-fetching, because level 1's own fetch has no per-request key the host could dedupe by identity the way `PSESSOPEN`'s does - only a time window tells a double-delivered echo from a genuine, later re-open (leaving PROJECTS and coming back a minute later still fetches for real). Board 1 refuses all three from `UNAVAILABLE_COMMANDS[]` |
 | `RESUME <text>` | a HEADLESS continuation (`claude -p --resume <id> <text>`) of whichever transcript is open, addressed to `scrollLoadedId`. **This does not open a session on the Mac** - one turn runs, replies, and exits; the session hook republishes the record afterwards, which is how it reappears in the live list. Refuses BY NAME on no transcript open, on a LIVE session (a headless turn would become a second, concurrent author of it - `scrollFromProjects`/`scrollProjLive` gate this), and on empty text. Board 1 refuses it from `UNAVAILABLE_COMMANDS[]`. Not yet reachable from a tap - see `docs/reference/scrollback.md` |
 | `BLEMTU` | board 2: the negotiated ATT MTU per link |
 | `SDPROBE` | board 2: mount the microSD over SDMMC, report, unmount. Tries 4-bit then 1-bit and REPORTS WHICH WIDTH WON - "4-bit failed, 1-bit worked" is a wiring story and "both failed" is a card-or-slot story. `CARD_NONE` after a successful mount is a THIRD outcome (the slot is empty), not a failure. Measured 2026-09-20: `ok width=4 type=SDHC size=14911MB`. Leaves GPIO 2..7 as it found them, which nothing else in this firmware touches. Board 1 refuses it from `UNAVAILABLE_COMMANDS[]` - and that refusal is NOT "board 1 has no slot", it has one, wired for SPI rather than SDMMC |

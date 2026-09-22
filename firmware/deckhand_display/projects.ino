@@ -32,6 +32,11 @@ bool projectsPending = false;
 // "No projects found" the very first time the tab opens.
 bool projectsEverReceived = false;
 unsigned long projectsFetchStart = 0;
+// millis() the last successful `projs` reply landed - set only in
+// deckhand_display.ino's own `projs` absorption, read only by requestProjects()
+// below. See that function's own header note on why level 1 needs a WINDOW
+// (fix round 2) rather than PSESSOPEN's indefinite "already held" cache.
+unsigned long projectsLastLoadMs = 0;
 // SET BY tickProjectsFetch() ON TIMEOUT, CLEARED BY requestProjects() ON A
 // FRESH SEND - scrollFetchFailed's own shape (scrollback.ino), for the
 // identical reason: a lost reply must become a NAMED failure the person can
@@ -193,8 +198,42 @@ void requestProjects() {
   // still be two replies landing back to back, each one wholesale-replacing
   // `projects[]` and repainting the tab, for no reason a person could see.
   if (projectsPending) {
+    // "PROJSFETCH", NOT "PROJECTS" - see checkFetchTimeout()'s own header note
+    // (below in this file) on why a diagnostic must not share a verb's own
+    // prefix even when today's host check happens to be exact-match rather
+    // than startsWith. PROJSFETCH/PSESSFETCH are this file's own matched pair:
+    // level 1's list fetch and level 2's session fetch, neither one a prefix
+    // of "PROJECTS" or "PROJSESS ", the two real wire request verbs.
     char m[64];
-    snprintf(m, sizeof(m), "PROJECTS busy ms=%lu", millis() - projectsFetchStart);
+    snprintf(m, sizeof(m), "PROJSFETCH busy ms=%lu", millis() - projectsFetchStart);
+    sendLineToHost(m);
+    return;
+  }
+  // ALREADY HELD, RECENTLY - the TAB 2 double-delivery's own no-op. TAB 2 is
+  // delivered over both transports exactly like every other trigger-file
+  // command, so switchTab()'s PROJECTS arm (deckhand_display.ino) calls this
+  // twice within milliseconds. Measured on hardware: the FIRST copy's PROJECTS
+  // fetch succeeds (1381 bytes, 16 projects, loaded and drawn) before the
+  // SECOND copy is even processed, so `projectsPending` is already false when
+  // it arrives - the identical shape PROJOPEN's own double delivery had (this
+  // file's header note on requestProjSessions(), and the PROJOPEN arm in
+  // deckhand_display.ino). Without this branch the second copy would re-fetch,
+  // the host's own dedupe (PROJECTS carries no key, so it dedupes on
+  // device+verb alone, 1500ms) would correctly drop the byte-identical repeat,
+  // and this device would time out 8000ms later over a list it already has.
+  //
+  // NOT PSESSOPEN's INDEFINITE "already held, answer from PSRAM" shape
+  // (scrollFetch(), scrollback.ino) - level 1's OWN design deliberately
+  // re-fetches on a genuine re-open (projBack()'s own header note: leaving
+  // PROJECTS and coming back is a different gesture with no staleness
+  // guarantee, unlike a transcript that cannot change under the device's
+  // feet). So this is a WINDOW, not a cache: 2000ms, PROJOPEN's own choice
+  // (deckhand_display.ino) and comfortably longer than the host's 1500ms -
+  // long enough to swallow the double-delivery's echo, short enough that
+  // leaving the tab and coming back a minute later still asks for real.
+  if (projectsEverReceived && millis() - projectsLastLoadMs < 2000) {
+    char m[64];
+    snprintf(m, sizeof(m), "PROJSFETCH held %d project(s)", projectCount);
     sendLineToHost(m);
     return;
   }
@@ -244,6 +283,17 @@ void requestProjects() {
 // tickProjectsFetch() below passes "PSESSFETCH" instead, precisely so this
 // can never prefix-match the wire verb "PROJSESS " - see requestProjSessions()
 // below, which renames its own busy report for the identical reason.
+//
+// LEVEL 1's OWN LABEL WAS "PROJECTS" UNTIL FIX ROUND 2, and was never actually
+// unsafe THERE - the host's own dispatch for that verb is `line === "PROJECTS"`
+// (exact match), and a timeout/busy report always carries a suffix, so it could
+// never equal the bare verb. But that safety was an ACCIDENT of how one host
+// branch happens to be written, not a property of the label itself - the exact
+// same accident is what let level 2's "PROJSESS" stand until it collided with a
+// `startsWith` check instead. tickProjectsFetch() below now passes "PROJSFETCH"
+// for level 1 too (requestProjects()'s own busy/held reports match it), so
+// neither level's diagnostics depend on which comparison the host happens to
+// use for that verb.
 // commands-check.mjs parses both this label and host/index.mjs's own dispatch
 // arms and fails BY NAME if either side drifts back into collision.
 bool checkFetchTimeout(bool& pending, unsigned long start, const char* label) {
@@ -276,7 +326,13 @@ bool checkFetchTimeout(bool& pending, unsigned long start, const char* label) {
 // design's own projection: ~175ms for 16 projects, ~200ms for one
 // project's 22 sessions).
 void tickProjectsFetch() {
-  if (checkFetchTimeout(projectsPending, projectsFetchStart, "PROJECTS")) {
+  // "PROJSFETCH", NOT "PROJECTS" - checkFetchTimeout()'s own header note above
+  // (fix round 2): the wire REQUEST level 1 makes really is "PROJECTS"
+  // (requestProjects() above), but the DIAGNOSTIC label must not be that
+  // string either, even though today's host check for it is exact-match
+  // rather than startsWith - the label should not depend on which comparison
+  // one host branch happens to use.
+  if (checkFetchTimeout(projectsPending, projectsFetchStart, "PROJSFETCH")) {
     projectsFetchFailed = true;
     if (currentTab == TAB_PROJECTS) renderProjectsTab();
   }
@@ -284,10 +340,7 @@ void tickProjectsFetch() {
   // the wire REQUEST this level's fetch makes really is "PROJSESS <key>"
   // (requestProjSessions() below), but the DIAGNOSTIC label passed here must not
   // be that string, or a lost reply's own timeout report collides with the
-  // host's `line.startsWith("PROJSESS ")` request dispatch. "PROJECTS" above has
-  // no such hole only because the host's own PROJECTS check is `line ===`
-  // (exact), never `startsWith` - a fact this label leans on rather than states,
-  // which is why it is still worth reading the note on checkFetchTimeout().
+  // host's `line.startsWith("PROJSESS ")` request dispatch.
   if (checkFetchTimeout(psessPending, psessFetchStart, "PSESSFETCH")) {
     psessFetchFailed = true;
     if (currentTab == TAB_PROJECTS) renderProjectsTab();

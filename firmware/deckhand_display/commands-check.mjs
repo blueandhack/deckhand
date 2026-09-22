@@ -731,16 +731,35 @@ function suite(ok, over = {}) {
     const hostSrc2 = over.host != null ? over.host
       : fs.readFileSync(`${DIR}/../../host/index.mjs`, "utf8").replace(/^[ \t]*\/\/.*$/gm, "");
     const DISPATCH_ARM = /if \(line\.startsWith\("([^"]+)"\)\)|if \(line === "([^"]+)"\)/g;
-    const hostPrefixes = [...hostSrc2.matchAll(DISPATCH_ARM)].map((m) => m[1]).filter(Boolean);
+    const dispatchMatches = [...hostSrc2.matchAll(DISPATCH_ARM)];
+    const hostPrefixes = dispatchMatches.map((m) => m[1]).filter(Boolean);
+    // EXACT-MATCH VERBS TREATED AS PREFIXES TOO (with a trailing space - every
+    // diagnostic in this file has a suffix that starts with one, e.g. " busy
+    // ms=", " timeout ms=", " held ..."). Fix round 1 leaned on "PROJECTS
+    // busy/timeout" being safe only because host/index.mjs's own PROJECTS
+    // check happens to be `line === "PROJECTS"` today, not `startsWith` - CLAUDE.md
+    // named that an accident, not a property of the label, and fix round 2 fixed
+    // it (both levels now use PROJSFETCH/PSESSFETCH, never a level's own request
+    // verb). This is what proves it: an exact-match verb is checked here exactly
+    // as strictly as a prefix-dispatched one, so a diagnostic cannot rely on
+    // today's choice of comparison to stay safe.
+    const hostExactsAsPrefixes = dispatchMatches.map((m) => m[2]).filter(Boolean).map((v) => `${v} `);
+    const hostAllVerbPrefixes = [...hostPrefixes, ...hostExactsAsPrefixes];
     ok("HOST: at least one prefix-dispatched request verb parsed out of host/index.mjs",
        hostPrefixes.length > 0);
+    ok("HOST: at least one exact-match request verb parsed out of host/index.mjs (PROJECTS)",
+       hostExactsAsPrefixes.length > 0);
 
     const projSrc2 = over["src:projects.ino"] != null ? over["src:projects.ino"] : stripComments("projects.ino");
 
-    // requestProjects()'s own busy report - level 1, "PROJECTS busy ms=...".
+    // requestProjects()'s own busy AND held reports - level 1's two early-return
+    // diagnostics (the busy guard, and fix round 2's "already held, recently"
+    // no-op for the TAB 2 double delivery), both ahead of the real fetch.
     const reqProjFn = fnBody(projSrc2, "void requestProjects() {", "projects.ino");
-    const busyM = /snprintf\(m,\s*sizeof\(m\),\s*"([^"]+)"/.exec(reqProjFn);
-    ok("PROJECTS: requestProjects()'s busy report literal parses", !!busyM);
+    const projDiagMs = [...reqProjFn.matchAll(/snprintf\(m,\s*sizeof\(m\),\s*"([^"]+)"/g)].map((m) => m[1]);
+    ok(`PROJECTS: requestProjects()'s own early-return diagnostics parse (${projDiagMs.length}) ` +
+       `[${projDiagMs.join(", ")}]`,
+       projDiagMs.length === 2);
 
     // requestProjSessions()'s own busy report - the FIRST snprintf in its body,
     // inside the `if (psessPending)` guard, not the real request line further down.
@@ -761,7 +780,7 @@ function suite(ok, over = {}) {
        labels.length === 2);
 
     const diagnostics = [];
-    if (busyM) diagnostics.push(["requestProjects() busy report", busyM[1]]);
+    projDiagMs.forEach((t, i) => diagnostics.push([`requestProjects() early-return report #${i + 1}`, t]));
     if (sessBusyM) diagnostics.push(["requestProjSessions() busy report", sessBusyM[1]]);
     if (tmplM) for (const label of labels)
       diagnostics.push([`checkFetchTimeout("${label}") timeout report`, tmplM[1].replace(/^%s/, label)]);
@@ -781,10 +800,12 @@ function suite(ok, over = {}) {
 
     const collisions = [];
     for (const [name, text] of diagnostics)
-      for (const p of hostPrefixes)
-        if (text.startsWith(p)) collisions.push(`${name} <- host dispatches on "${p}"`);
+      for (const p of hostAllVerbPrefixes)
+        if (text.startsWith(p)) collisions.push(`${name} <- host dispatches on "${p.trimEnd()}"`);
     ok(`no PROJECTS-feature diagnostic line can be misread as a request the host ` +
-       `dispatches on (the PROJSESS-timeout-as-a-request defect)` +
+       `dispatches on, whether that verb is matched by prefix or exactly ` +
+       `(the PROJSESS-timeout-as-a-request defect, and the PROJECTS-busy/timeout ` +
+       `fragility fix round 2 closed)` +
        `${collisions.length ? " [" + collisions.join("; ") + "]" : ""}`,
        collisions.length === 0);
   }
@@ -1020,6 +1041,15 @@ const faults = [
   // literally named "timeout ms=8002").
   ["PSESSFETCH's diagnostic label reverts to PROJSESS, colliding with the host's own PROJSESS request dispatch",
     { "src:projects.ino": realProjects.replace(/PSESSFETCH/g, "PROJSESS") }],
+  // ---- (9)'s fault, fix round 2: PROJSFETCH goes back to being PROJECTS -
+  // level 1's own pre-round-2 fragility, reproduced. Not caught by a literal
+  // collision against host's CURRENT code (its PROJECTS check is exact-match,
+  // so a suffixed report never equals the bare verb) - caught instead by the
+  // exact-match-treated-as-a-prefix half of section (9)'s own check, which is
+  // the whole point: this label must not depend on which comparison the host
+  // happens to use for that verb.
+  ["PROJSFETCH's diagnostic label reverts to PROJECTS, the fragility fix round 2 closed",
+    { "src:projects.ino": realProjects.replace(/PROJSFETCH/g, "PROJECTS") }],
 ];
 
 let caught = 0;

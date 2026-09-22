@@ -1542,6 +1542,15 @@ extern bool projectsEverReceived;
 // same breath), so the tab can show a NAMED failure instead of leaving
 // "Loading projects..." on the glass with nothing that ever changes it.
 extern bool projectsFetchFailed;
+// millis() OF THE LAST SUCCESSFUL `projs` REPLY - set only where projectsPending
+// is cleared on success (this file's own `projs` absorption below), read only by
+// requestProjects() (projects.ino) to tell a genuine re-open from the double
+// delivery's own echo of the SAME request. See requestProjects()'s own header
+// note for why this cannot be a plain "already held" cache the way PSESSOPEN's
+// scrollFetch() is: PROJECTS' own design deliberately re-fetches on a real
+// re-open (projBack()'s note: "the list could genuinely be stale by then"), so
+// this needs a WINDOW, not an indefinite hold.
+extern unsigned long projectsLastLoadMs;
 void requestProjects();
 
 // ---------- PROJECTS level 2: one project's sessions ----------
@@ -5146,6 +5155,7 @@ void handleLine(const String& line) {
   if (!projs.isNull()) {
     projectsPending = false;
     projectsEverReceived = true;
+    projectsLastLoadMs = millis();
     JsonArray items = projs["items"].as<JsonArray>();
     int n = 0, overflow = 0, toolong = 0;
     if (!items.isNull()) {
