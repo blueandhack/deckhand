@@ -193,16 +193,23 @@ if (SELFTEST) {
   // hole (`SCROLL seqgap got=0 want=25`) and reported as "could not reach
   // the Mac".
   if (fault === "reset-no-seq") INO = INO.replace("scrollNextSeq = 0;", "");
-  // PSESSOPEN'S DEDUPE, DISABLED WITHOUT DELETING IT - the same "if (false)"
-  // shape this file's own deadGuards() helper exists to catch (see the
-  // sendScrollback dead-code-guard assertion above): the guard's text, the
-  // static index/timestamp pair and the "dropped a duplicate" message all
-  // stay in the sketch, so a textual "is this code present" check would pass
-  // vacuously. Only an assertion that the condition is actually LIVE - not a
-  // dead comparison sitting beside real code - can fail this by name.
-  if (fault === "psessopen-no-dedupe")
-    SKETCH = SKETCH.replace(
-      "if (si == lastPSessOpenIdx && nowPSessOpenMs - lastPSessOpenMs < 2000) {",
+  // scrollOpenById()'S STATE GUARD, DISABLED WITHOUT DELETING IT - fix round
+  // 2 of the seqgap task moved PSESSOPEN's dedupe from a time window (proven
+  // too short for a 7.5s fetch) to a STATE check inside scrollOpenById()
+  // itself. Same "if (false)" shape this file's own deadGuards() helper
+  // exists to catch (see the sendScrollback dead-code-guard assertion
+  // above, and PSESSOPEN's own former dedupe fault this replaced): the
+  // guard's text, its identity comparison and its "already open" message
+  // all stay in the sketch, so a textual "is this code present" check would
+  // pass vacuously. Only an assertion that the condition is actually LIVE -
+  // not a dead comparison sitting beside real code that still runs the
+  // reset-and-refetch below it - can fail this by name, proving a second
+  // open of an already-loaded session CAN wipe the store once this is the
+  // only thing wrong.
+  if (fault === "scrollopenbyid-not-guarded")
+    INO = INO.replace(
+      "if (scrollActive && scrollFromProjects && scrollCount > 0 &&\n" +
+      "      histChatOnly == scrollLoadedChat && strcmp(scrollLoadedId, id12) == 0) {",
       "if (false) {");
 }
 
@@ -1083,47 +1090,75 @@ s(/SCROLL_TAP_SLOP_PX/.test(dragBody || ""),
 s(/SCROLL_RAIL_TAP_X/.test(dragBody),
   "structural: the rail's tap zone is the named constant");
 
-// ---------------- STRUCTURAL: PSESSOPEN dedupes its own double delivery
-// (the seqgap task, second defect) ----------------
+// ---------------- STRUCTURAL: scrollOpenById() no-ops a second open of an
+// ALREADY-LOADED session (the seqgap task, fix round 2) ----------------
 //
-// The host writes every trigger-file command to EVERY live transport, so
-// PSESSOPEN reaches processCompletedLine() twice per tap - PROJOPEN's own
-// dedupe note, applied one level deeper. scrollFetch()'s busy guard and
-// "already held" branch only cover the case where the second copy lands
-// WHILE the first fetch is still in flight; a 261KB/504-entry transcript
-// takes ~7.5s, ample time for the device to reach the second copy AFTER the
-// first has already completed - and then it starts a genuinely second
-// stream. Bound to the PSESSOPEN arm's OWN body (braceBlock over its own
-// `else if`), not to the file, for the identical reason the scrollReset()
-// assertion above is bound to scrollReset()'s own body: PROJOPEN's own
-// `lastProjOpenIdx`/`lastProjOpenMs` guard sits a few hundred lines away in
-// the same file and must not satisfy an assertion about a DIFFERENT verb's
-// arm.
-const psessOpenSrc = braceBlock(SKETCH, 'else if (buf.startsWith("PSESSOPEN"))');
-s(psessOpenSrc != null, "structural: the PSESSOPEN arm is findable");
-const psessOpenBody = psessOpenSrc;
-present(psessOpenBody, /static\s+int\s+lastPSessOpenIdx/,
-  "structural: PSESSOPEN keys its dedupe on a static per-verb index, PROJOPEN's own shape");
-present(psessOpenBody, /nowPSessOpenMs\s*-\s*lastPSessOpenMs\s*<\s*2000/,
-  "structural: PSESSOPEN drops a repeat of the SAME index within a 2000ms window - long enough " +
-  "to outlast the host's own (device,verb,key) dedupe, PROJOPEN's own margin");
-present(psessOpenBody, /dropped a duplicate open of session[\s\S]{0,250}?buf\s*=\s*"";\s*return;/,
-  "structural: a duplicate is dropped BY NAME (buf cleared, then return) rather than silently " +
-  "falling through into a second scrollOpenById()");
-// THE DEAD-GUARD CHECK ITSELF - this file's own precedent (sendScrollback's
-// ACK, above): a guard whose CONDITION is neutralised (`if (false && ...)` or
-// bare `if (false)`) still shows every line above as text, so the three
-// assertions just above would pass even with the drop entirely disabled.
-// Only this one closes that gap, and it is what the "psessopen-no-dedupe"
-// fault (a bare `if (false)` standing in for the real comparison) exists to
-// make fail BY NAME rather than by a coincidental textual mismatch.
+// Fix round 1 gave PSESSOPEN a TIME-windowed dedupe (2000ms, PROJOPEN's own
+// shape). Round 2 proved that insufficient on hardware: PSESSOPEN's own
+// fetch can run 7.5s for a 504-entry transcript, well past any fixed
+// window, and a duplicate landing after it still started a genuinely
+// second scrollFetch() - which host/index.mjs's own PER-LINK generation
+// counter (nextScrollGen()/link.scrollGen, host/index.mjs) can silently
+// SUPERSEDE the first, still-streaming fetch ("Scrollback: superseded at
+// chunk N - abandoning this fetch", no error reaching the device), and
+// whatever that abandoned stream had accumulated is thrown away the moment
+// the superseding stream's own seq=0 resets the store - the very mechanism
+// fix round 1 made safe for a LEGITIMATE fresh stream turns out to be just
+// as effective at silently absorbing an illegitimate second one.
+//
+// The fix moved from TIME to STATE, and to the ENTRY POINT BOTH its callers
+// share: scrollOpenById() (PSESSOPEN, deckhand_display.ino, AND a level-2
+// row TAP, projects.ino - point 4 of this round's own brief) now no-ops a
+// second open of the SAME (id, chat-filter) it already has loaded, checked
+// BEFORE it touches any of its own state. Bound to scrollOpenById()'s OWN
+// body (reusing openBody, parsed above for the id-source assertions), per
+// this file's own rule: a rule a neighbouring line can satisfy is not one.
+present(openBody, /scrollActive && scrollFromProjects && scrollCount > 0/,
+  "structural: scrollOpenById's no-op guard checks the SAME identity scrollFetch()'s own " +
+  "already-held branch uses (a non-empty store, the id, the chat filter) PLUS scrollActive " +
+  "itself - a transcript merely cached from an already-CLOSED session must not read as open");
+present(openBody, /histChatOnly == scrollLoadedChat/,
+  "structural: the guard's identity includes the chat/all FILTER, not just the id - a toggle " +
+  "must still genuinely re-fetch, scrollFetch()'s own identity check's own reasoning");
+present(openBody, /strcmp\(scrollLoadedId, id12\) == 0/,
+  "structural: the guard compares against its OWN id12 argument, not a derived id - " +
+  "scrollOpenById's own id-source rule (this file, above), applied to its new guard too");
+
+// THE ORDERING ITSELF: the guard's own comparison must appear BEFORE the
+// first state mutation (`scrollFromProjects = true;`), or "checked before
+// this function touches any state" is a comment nobody enforces. A second,
+// already-loaded open must never reach scrollY = 0, scrollActive's own
+// re-assignment, or a real scrollFetch() call - each of those is what lets
+// a superseding stream start in the first place, and a guard placed AFTER
+// them would have already done the damage by the time it ran.
 {
-  const dg = deadGuards(psessOpenBody || "");
+  const guardAt = openBody ? openBody.indexOf("scrollCount > 0") : -1;
+  const mutateAt = openBody ? openBody.indexOf("scrollFromProjects = true;") : -1;
+  s(guardAt >= 0 && mutateAt > guardAt,
+    guardAt < 0
+      ? "structural: scrollOpenById's no-op guard is findable"
+      : "structural: the no-op guard is checked BEFORE scrollFromProjects is (re)assigned - a " +
+        "second open of an already-loaded session reaches no state mutation at all, let alone " +
+        "a second wire request");
+}
+
+// THE DEAD-GUARD CHECK ITSELF - this file's own precedent (sendScrollback's
+// ACK, and PSESSOPEN's own former time-windowed dedupe this replaced, both
+// above): a guard whose CONDITION is neutralised (a bare `if (false)`)
+// still shows every line above as text, so the three `present()`
+// assertions AND the ordering check would ALL still pass with the drop
+// entirely disabled - the exact "a rule a neighbouring line can satisfy"
+// trap. Only this closes it, and it is what the "scrollopenbyid-not-guarded"
+// fault exists to make fail BY NAME: a second open of an already-loaded
+// session CAN wipe the store once this specific assertion is the only one
+// wrong.
+{
+  const dg = deadGuards(openBody || "");
   s(dg.length === 0,
     dg.length
-      ? `structural: PSESSOPEN's dedupe guard carries a dead-code guard [${dg.join(", ")}] - ` +
-        "it can never actually drop a duplicate"
-      : "structural: PSESSOPEN's dedupe guard carries no dead-code guard, so it runs live");
+      ? `structural: scrollOpenById's no-op guard carries a dead-code guard [${dg.join(", ")}] - ` +
+        "a second open of an already-loaded session can still wipe the store"
+      : "structural: scrollOpenById's no-op guard carries no dead-code guard, so it runs live");
 }
 
 // Closing must restore the surface underneath, and clear the PSRAM.
@@ -1197,7 +1232,7 @@ if (SELFTEST) {
     "tick-order": /the tick decides the SCROLLBACK before the reader's histActive arm/,
     "resume-nolabel": /the device signs the RESUME LABEL/,
     "reset-no-seq": /scrollReset\(\) zeroes scrollNextSeq itself/,
-    "psessopen-no-dedupe": /dedupe guard carries a dead-code guard/,
+    "scrollopenbyid-not-guarded": /no-op guard carries a dead-code guard/,
   }[process.env.SB_FAULT || "wrap-cap"];
   const hit = FAILED.find(x => WANT.test(x));
   if (!hit) { console.log(`SELFTEST FAILED: fault ${process.env.SB_FAULT || "wrap-cap"} was not caught`); process.exit(1); }

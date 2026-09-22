@@ -9238,34 +9238,29 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
       buf = "";
       return;
     }
-    // THE DEDUPE ITSELF - PROJOPEN's own guard above, verbatim shape: the host
-    // writes every trigger-file command to every live transport, so this
-    // handler is reached twice for one tap. scrollFetch()'s busy guard and
-    // "already held" branch only cover the case where the second copy lands
-    // WHILE the first fetch is still in flight - a 261KB, 504-entry transcript
-    // takes ~7.5s, ample time for the device to reach the second copy AFTER
-    // the first has already completed and cleared scrollPending. Without this,
-    // the second copy started a genuinely SECOND scrollFetch(), which
-    // scrollReset() (this file's own fix, above) would now absorb cleanly
-    // rather than seqgap - but two fetches for one tap is still a wasted
-    // 7.5s re-download, so it is dropped here the same way PROJOPEN drops its
-    // own duplicate. A re-open of the SAME session later must still work, so
-    // this is a time-windowed drop, not a permanent one - identical shape to
-    // PROJOPEN's `lastProjOpenIdx`/`lastProjOpenMs` pair, 2000ms for the same
-    // reason: comfortably longer than the host's own (device,verb,key) dedupe
-    // window, so this side never re-opens before the host's own copy has
-    // already been dropped.
-    static int lastPSessOpenIdx = -1;
-    static unsigned long lastPSessOpenMs = 0;
-    unsigned long nowPSessOpenMs = millis();
-    if (si == lastPSessOpenIdx && nowPSessOpenMs - lastPSessOpenMs < 2000) {
-      Serial.printf("PSESSOPEN: dropped a duplicate open of session %d - the host writes "
-                    "each command to every live transport and a re-open is not idempotent\n", si);
-      buf = "";
-      return;
-    }
-    lastPSessOpenIdx = si;
-    lastPSessOpenMs = nowPSessOpenMs;
+    // NO TIME-WINDOWED DEDUPE HERE ANY MORE - FIX ROUND 2 OF THE SEQGAP TASK
+    // REMOVED IT, AND DELIBERATELY. A 2000ms window (PROJOPEN's own shape,
+    // copied here in fix round 1) works for PROJOPEN because ITS fetch is
+    // ~200ms; PSESSOPEN's is a full transcript, measured at 7.5s for 504
+    // entries, and the host delivers every trigger-file command over BOTH
+    // transports with the SECOND copy sometimes reaching the device only
+    // AFTER the first fetch has fully completed - so a 2000ms window did not
+    // cover the case it existed for. Widening the window is not the fix: any
+    // FIXED duration is wrong for a fetch whose length depends on transcript
+    // size, and a duplicate that lands even one poll cycle late still runs a
+    // second, needless full re-download.
+    //
+    // THE GUARD NOW LIVES IN scrollOpenById() ITSELF (scrollback.ino), keyed
+    // on STATE rather than TIME: "is this exact session, with this exact
+    // filter, already the one open and loaded". That covers a double
+    // delivery arriving ANY number of seconds apart, AND the other caller of
+    // scrollOpenById() (a level-2 row TAP, projects.ino) that this file's
+    // own window never protected at all - a double-tap is a real human
+    // gesture, not a wire artifact, and needed the identical guard. A
+    // genuine re-open of the SAME session still works: closing it, or a
+    // different session/filter, both fail that state check and fall through
+    // to a real fetch there, same as this arm always intended.
+    //
     // scrollProjLive SET FIRST - scrollOpenById()'s own header note: its
     // two-argument signature has no room for the wire's `live` bit, so the
     // caller states it here, immediately before the call, the same

@@ -1313,6 +1313,48 @@ void openScrollback(int idx) {
 // body and fails BY NAME if a later edit routes the id through sessions[] or
 // detailIndex instead of its own id12 parameter.
 void scrollOpenById(const char* id12, const char* title) {
+  // ALREADY OPEN, RIGHT NOW - A GENUINE NO-OP, NAMING ITSELF, checked BEFORE
+  // this function touches ANY state (fix round 2 of the seqgap task).
+  //
+  // NOT "call scrollFetch() and trust ITS OWN already-held branch to save
+  // us" - that branch (scrollFetch()'s "SCROLL held" fast path, this file,
+  // above) is a correct, safe, READ-ONLY answer on its own and stays exactly
+  // as it was. But this function calling INTO it every time still means a
+  // second open re-touches scrollY (jumping the view back to the newest,
+  // discarding wherever the reader had scrolled to) and re-sends a
+  // "HISTORY ... tail:" wire line even when the cache hit means nothing NEEDS
+  // to go out. THAT line is the actual hazard fix round 1 undersized a time
+  // window for: host/index.mjs's sendScrollback() tracks a PER-LINK
+  // generation counter and lets a LATER "HISTORY ... tail:" request on the
+  // SAME link silently SUPERSEDE an earlier one still streaming - the older
+  // call notices at its next chunk and abandons ("Scrollback: superseded at
+  // chunk N - abandoning this fetch"), no error reaches the device, and
+  // whatever the abandoned stream had accumulated is thrown away the moment
+  // the superseding stream's own seq=0 arrives and resets the store (exactly
+  // the mechanism fix round 1 made SAFE for a legitimate fresh stream - it
+  // is just as effective at safely absorbing an ILLEGITIMATE one). The one
+  // wire line this function no longer sends for an already-open session is
+  // what removes the ABILITY for that supersede path to ever fire here at
+  // all, rather than trusting the host's own recovery from it every time.
+  //
+  // A GENUINE re-open must still work: closing (exitScrollback(), which
+  // clears scrollActive AND frees the store together) or opening a
+  // DIFFERENT session (a different id12, or a different histChatOnly filter)
+  // both fail this condition and fall through to the real open below -
+  // scrollFetch()'s own identity check (id + filter + a non-empty store) is
+  // reused VERBATIM here, so the two can never disagree about what "the
+  // same transcript" means. scrollActive is required IN ADDITION: without
+  // it, a transcript merely CACHED from a session that was already closed
+  // (scrollActive false, but scrollEnd() has NOT necessarily run - the store
+  // can still be held from the SESSIONS tab's own transcript) would wrongly
+  // read as "already open" and skip re-showing it.
+  if (scrollActive && scrollFromProjects && scrollCount > 0 &&
+      histChatOnly == scrollLoadedChat && strcmp(scrollLoadedId, id12) == 0) {
+    char m[64];
+    snprintf(m, sizeof(m), "SCROLL open: %s already open, %d entries - no-op", id12, scrollCount);
+    sendLineToHost(m);   // not Serial.printf alone - a BLE-only double-tap needs this too
+    return;
+  }
   scrollFromProjects = true;
   strncpy(scrollProjTitle, title, sizeof(scrollProjTitle) - 1);
   scrollProjTitle[sizeof(scrollProjTitle) - 1] = '\0';

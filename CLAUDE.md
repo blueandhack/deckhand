@@ -53,7 +53,7 @@ panel, which reads as a layout bug rather than a build mistake.
 | mic / beeper | both fitted and working | both work, via the ES8311 |
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64 |
-| size today | flash 1425680, RAM 72100 | flash 1160880, RAM 65548 |
+| size today | flash 1425680, RAM 72100 | flash 1161056, RAM 65548 |
 
 **FOUR of the six numbers this file quotes about the binaries are BOUND and two are not.**
 `node firmware/board-baseline.mjs --doc-check` asserts the two **hashes** and the two **sizes**
@@ -134,7 +134,34 @@ diagnostics to `PROJSFETCH` - fix round 1 had left them alone as "safe today" on
 host/index.mjs's own `PROJECTS` check happens to be exact-match rather than `startsWith`, which
 `commands-check.mjs`'s section (9) now treats as no safer than a prefix match, on either side of
 the wire. Board 1 took none of it - the same `#if BOARD_HAS_PROJECTS` boundary, binary measured
-byte-identical. `arduino-cli`'s
+byte-identical. It then **rose 176 bytes on 2026-09-21** (later the same day: the seqgap task,
+the NET of two fix rounds - fix round 1's own board-2 baseline was left deliberately
+un-updated pending review, so this entry is their combined effect against the last RECORDED
+checkpoint above, not two separate ones). The bug: `PSESSOPEN 1` fetched a 504-entry transcript
+COMPLETELY (`SCROLL done entries=504 lines=10438`) and the glass still read "could not reach the
+Mac" - `scrollReset()` cleared the store on every fresh stream (`seq==0`) but never
+`scrollNextSeq`, so a SECOND stream's own chunk 0 (the host's double-delivered `PSESSOPEN`) was
+compared against the FIRST stream's stale tail and declared a false hole. Fix round 1: zeroed
+`scrollNextSeq` inside `scrollReset()` itself, and gave `PSESSOPEN` a time-windowed dedupe
+(`lastPSessOpenIdx`/`lastPSessOpenMs`, PROJOPEN's own 2000ms shape). Fix round 2: the window was
+wrong for this path - PROJOPEN's own fetch is ~200ms, PSESSOPEN's is a full transcript, measured
+at 7.5s, and a duplicate landing after the window (which it reliably did) still started a
+genuinely second stream, which host/index.mjs's own per-link generation counter
+(`nextScrollGen`/`link.scrollGen`) can silently SUPERSEDE the first, still-streaming fetch -
+discarding whatever it had accumulated the moment the superseding stream's own `seq=0` reset the
+store (fix round 1's own mechanism, just as effective at absorbing an illegitimate second stream
+as a legitimate one). Round 2 replaced the time window with a STATE guard inside
+`scrollOpenById()` itself - the SAME identity `scrollFetch()`'s own "already held" branch checks
+(a non-empty store, the same id, the same chat filter) plus `scrollActive`, checked BEFORE the
+function touches any of its own state - which also closes the identical exposure for
+`scrollOpenById()`'s OTHER caller (a level-2 row TAP, `projects.ino`) that a `PSESSOPEN`-only
+time window never covered at all. RAM is back to exactly what it was before EITHER round
+(65,548): round 1's two statics are gone, and the round-2 guard adds no new persistent storage -
+it reuses existing globals. Flash is +176 net: round 1's own dedupe code and message minus round
+2's removal of it, plus round 2's own (smaller) guard condition, message and call site. Board 1
+took none of it - the same `#if BOARD_HISTORY_SCROLL`/`#if BOARD_HAS_PROJECTS` boundary,
+confirmed by a same-day rebuild of the untouched prior commit matching the recorded baseline
+exactly, byte for byte. `arduino-cli`'s
 "Sketch uses N" is a
 slightly smaller number than the `.bin` - the same image without its trailing padding - so do
 not expect the compile summary to print these.
@@ -197,7 +224,7 @@ arduino-cli compile --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app" \
 node firmware/board-baseline.mjs /tmp/b1/deckhand_display.ino.bin --check 1
 ```
 
-Today: `326a36e3d8dd9189...`, size 1425680 (board 2: `a184cafaacad279c...`, size 1160880).
+Today: `326a36e3d8dd9189...`, size 1425680 (board 2: `068525f73e4b63d0...`, size 1161056).
 
 It compares **BYTES, not sizes**, and that matters: a default argument on a shared function
 once changed board 1's codegen with **no size change whatsoever** - invisible to a size
