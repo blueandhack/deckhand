@@ -57,6 +57,20 @@ bool scrollProjLive = true;
 // own shape (host caps at 40, +NUL, +3 spare) - the same margin every other
 // fixed buffer here keeps past its measured worst case.
 char scrollProjTitle[48] = "";
+// SCROLL's OWN DIAGNOSTIC TAG for the NEXT outgoing HISTORY request - set by
+// the CALLER, IMMEDIATELY BEFORE requestScrollback()/scrollFetch()
+// (scrollProjLive's own precedent, right above: a fact only the caller knows,
+// stated ahead of the call rather than re-derived inside it). NOT a fourth
+// parameter on scrollFetch() itself: scrollback-check.mjs binds that
+// function's signature with an exact-text structural match
+// (`body(INO, "void scrollFetch(const char* id, uint8_t hostSlot, bool
+// broadcast)", ...)`), so widening it would break that assertion rather than
+// extend it. A global read at the one place a request actually goes out gets
+// the same "caller states it, callee reads it" shape without touching a
+// bound signature - this task's whole deliverable: one hardware run must be
+// able to match an unwanted "SCROLL recv" (deckhand_display.ino) to the
+// "SCROLL req why=..." that caused it, BY NAME.
+const char* scrollFetchWhy = "?";
 
 const char* scrollMark(uint8_t r) {
   // ASCII ONLY. Claude Code's own markers are U+23FA and U+257C, and Spleen
@@ -400,19 +414,25 @@ void scrollFetch(const char* id, uint8_t hostSlot, bool broadcast) {
   if (scrollPending) {
     // Via sendLineToHost, NOT Serial.printf: with the cable out Serial reaches
     // NOTHING, and a BLE-only session is exactly when a refusal needs to be
-    // visible. Same reason BATT goes through this helper.
-    char m[80];
-    snprintf(m, sizeof(m), "SCROLL busy chunks=%d/%d ms=%lu",
-             scrollChunksIn, scrollChunksOf, millis() - scrollFetchStart);
+    // visible. Same reason BATT goes through this helper. why= names the
+    // CALLER that hit this busy return - scrollFetchWhy, set immediately
+    // before this call (this file's globals, above).
+    char m[100];
+    snprintf(m, sizeof(m), "SCROLL busy why=%s chunks=%d/%d ms=%lu",
+             scrollFetchWhy, scrollChunksIn, scrollChunksOf, millis() - scrollFetchStart);
     sendLineToHost(m);
     return;
   }
   // Already held: answer from PSRAM. The filter is part of the identity because
   // CHAT and ALL are different entry sets, so a toggle must genuinely re-fetch.
+  // NO WIRE LINE GOES OUT ON THIS PATH - which is exactly why the absorption
+  // side (deckhand_display.ino) can treat "scrollPending false" as "nothing
+  // is legitimately outstanding" for a stray/duplicate reply that arrives
+  // after this cache hit.
   if (scrollCount > 0 && histChatOnly == scrollLoadedChat &&
       strcmp(scrollLoadedId, id) == 0) {
-    char m[64];
-    snprintf(m, sizeof(m), "SCROLL held entries=%d", scrollCount);
+    char m[80];
+    snprintf(m, sizeof(m), "SCROLL held why=%s entries=%d", scrollFetchWhy, scrollCount);
     sendLineToHost(m);
     scrollPending = false;
     scrollFetchFailed = false;
@@ -432,6 +452,15 @@ void scrollFetch(const char* id, uint8_t hostSlot, bool broadcast) {
   strncpy(scrollLoadedId, id, sizeof(scrollLoadedId) - 1);
   scrollLoadedId[sizeof(scrollLoadedId) - 1] = '\0';
   scrollLoadedChat = histChatOnly;
+  // WHO ASKED AND WHY, logged BEFORE the wire line itself so a hardware run
+  // can always match an incoming "SCROLL recv" (deckhand_display.ino) to the
+  // "SCROLL req" that caused it - this task's own deliverable.
+  {
+    char req[110];
+    snprintf(req, sizeof(req), "SCROLL req why=%s id=%s chat=%d broadcast=%d slot=%d budget=%ld",
+             scrollFetchWhy, id, histChatOnly ? 1 : 0, broadcast ? 1 : 0, (int) hostSlot, budget);
+    sendLineToHost(req);
+  }
   char line[72];
   snprintf(line, sizeof(line), "HISTORY %s %s tail:%ld", id,
            histChatOnly ? "chat" : "all", budget);
@@ -463,6 +492,7 @@ void requestScrollback(int idx) {
 // filter toggle passes what is loaded now, and there is exactly one statement
 // of "which id, addressed how".
 void scrollRefetch(const char* id) {
+  scrollFetchWhy = "refetch";      // the retry tap or the CHAT/ALL toggle
   if (scrollFromProjects) scrollFetch(id, 0, true);
   else requestScrollback(detailIndex);
 }
@@ -1283,6 +1313,7 @@ void openScrollback(int idx) {
   // sitting in the text.
   histActive = true;
   scrollY = 0;
+  scrollFetchWhy = "open";         // a SESSIONS row tap, or SCROLLPERF/SCROLLOPEN
   requestScrollback(idx);
   // LAND AT THE NEWEST EVEN WHEN THE FETCH DID NOT RUN. requestScrollback
   // answers locally when the transcript is already held in PSRAM, and that path
@@ -1361,6 +1392,7 @@ void scrollOpenById(const char* id12, const char* title) {
   scrollActive = true;
   histActive = true;             // openScrollback()'s own note on why this joins too
   scrollY = 0;
+  scrollFetchWhy = "projopen";   // a PROJECTS level-2 row tap, or PSESSOPEN
   scrollFetch(id12, 0, true);    // broadcast - see this function's own header note
   // LAND AT THE NEWEST EVEN WHEN THE FETCH DID NOT RUN - openScrollback()'s
   // own reasoning, verbatim: scrollFetch() answers locally when the

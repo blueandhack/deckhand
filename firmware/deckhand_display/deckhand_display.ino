@@ -1980,6 +1980,13 @@ extern int      scrollNewBelow;
 extern char scrollLoadedId[16];
 extern bool scrollFromProjects;
 extern bool scrollProjLive;
+// This task's own addition to the same forward-declared set, for the same
+// reason: the hist parser's chunk arm below reads scrollLoadedId (already
+// forward-declared above) and this file's SCROLLFETCH handler writes
+// scrollFetchWhy, the diagnostic tag scrollFetch() (scrollback.ino) logs
+// against its own outgoing request - both need it visible before that later
+// file's real definition.
+extern const char* scrollFetchWhy;
 // THE CAP IS THE HOST'S OWN. host/typed-answer.mjs's typedTextOk() rejects
 // anything over ANSWER_TEXT_MAX_BYTES (150) or outside printable ASCII, and
 // verifyResume() runs that same check - so a longer or non-ASCII prompt would
@@ -5354,6 +5361,61 @@ void handleLine(const String& line) {
     if (!hist["seq"].isNull()) {
       int seq = hist["seq"] | 0;
       int of  = hist["of"]  | 1;
+      // INSTRUMENT BEFORE ANYTHING BELOW MUTATES ANY SCROLL STATE - name every
+      // fact a person needs to tell "the next chunk of OUR OWN fetch" apart
+      // from "a stray or duplicated reply", so one hardware run can match this
+      // line to the "SCROLL req why=..." (scrollFetch(), scrollback.ino) that
+      // caused it. idMatches is read here, once, and used by both this log
+      // line and the refusal right below it.
+      const bool histIdMatchesLoaded = (strcmp(hid, scrollLoadedId) == 0);
+      {
+        char m[150];
+        snprintf(m, sizeof(m),
+                 "SCROLL recv seq=%d of=%d id=%s loaded=%s count=%d pend=%d active=%d fromproj=%d match=%d",
+                 seq, of, hid, scrollLoadedId, scrollCount, scrollPending ? 1 : 0,
+                 scrollActive ? 1 : 0, scrollFromProjects ? 1 : 0, histIdMatchesLoaded ? 1 : 0);
+        sendLineToHost(m);
+      }
+      // REFUSE A REPLY THIS DEVICE DID NOT ASK FOR, BY NAME, BEFORE TOUCHING
+      // ANY SCROLL STATE AT ALL - the actual fix, independent of ever finding
+      // this reply's cause. scrollPending is true ONLY inside the window
+      // scrollFetch() (scrollback.ino) opens immediately before its OWN
+      // "HISTORY ..." wire line goes out, and false again the moment that
+      // SAME fetch ends - done (below), timed out (tickScrollFetch()), holed
+      // (the seqgap handler right below this), OR because scrollFetch() found
+      // the answer already held in PSRAM and sent no wire line at all ("SCROLL
+      // held", scrollback.ino - no request means no reply is ever legitimately
+      // outstanding). histIdMatchesLoaded is true only when this reply names
+      // the session currently loaded or being loaded - scrollFetch() sets
+      // scrollLoadedId from its OWN id argument before it sends anything,
+      // never from a reply. So "scrollPending && idMatches" holds for every
+      // real chunk of a fetch this device itself began, and fails for exactly
+      // the two cases this task names as provably wrong: a reply for an id
+      // that is not what is loaded (match=0 above), and a reply arriving
+      // after this device's own fetch already ended, held or completed
+      // (match=1, pend=0). Measured on hardware as the destructive sequence
+      // this task exists for: "SCROLL done entries=504" (the real fetch
+      // finishes, scrollPending drops), "SCROLL open: ... already open -
+      // no-op" (scrollOpenById()'s own dedupe catches a SECOND open, sends no
+      // request), then a THIRD stream's own "SCROLL done entries=0" wiping the
+      // 504 that had just rendered - this refusal never lets that third
+      // stream's seq=0 chunk reach scrollReset() in the first place.
+      //
+      // A GENUINE re-fetch still gets through here: the retry tap, the
+      // CHAT/ALL filter toggle, and a fresh PROJECTS open (scrollRefetch()/
+      // scrollOpenById(), scrollback.ino) all route through scrollFetch(),
+      // which sets scrollPending true and scrollLoadedId to the id it is
+      // about to ask for BEFORE the wire line goes out - so their own first
+      // reply always arrives with both true, and every later chunk of that
+      // SAME fetch keeps scrollPending true until the fetch itself ends.
+      if (!scrollPending || !histIdMatchesLoaded) {
+        char m[110];
+        snprintf(m, sizeof(m),
+                 "SCROLL refused seq=%d id=%s loaded=%s pend=%d - not this device's own fetch",
+                 seq, hid, scrollLoadedId, scrollPending ? 1 : 0);
+        sendLineToHost(m);
+        return;
+      }
       // scrollReset() ALSO ZEROES scrollNextSeq (scrollback.ino) - a fresh
       // stream's own chunk 0 must be compared against 0, not against whatever
       // the PREVIOUS transcript's continuity counter last reached. Before that,
@@ -8036,6 +8098,7 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
       while (*arg == ' ') arg++;
       if (*arg) idx = constrain(atoi(arg), 0, sessionCount - 1);
       detailIndex = idx;              // requestScrollback addresses the session's Mac
+      scrollFetchWhy = "probe";       // the SCROLLFETCH diagnostic itself
       requestScrollback(idx);
       Serial.printf("SCROLLFETCH: asked for session %d (%s)\n", idx, sessions[idx].name);
     }
