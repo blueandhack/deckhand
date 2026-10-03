@@ -28,7 +28,7 @@
 // with sessions-geom-check.mjs (geom-common.mjs) - one copy of the measurement
 // rule, checked once against the device's own numbers.
 import { cacheSizes, consts, deadGuards, DIR, evalInt, faultChildEpilogue, fnBody,
-         lineH, makeBump, PANEL, preflight, readSource, setSourceFault, SOURCE_FAULT_INDEX,
+         lineH, makeBump, PANEL, preflight, preprocess, readSource, setSourceFault, SOURCE_FAULT_INDEX,
          splitArgs, stripComments, sweepSourceFaults, textWidth } from "./geom-common.mjs";
 import fs from "fs";
 import { spawnSync } from "child_process";
@@ -125,6 +125,22 @@ const SOURCE_FAULTS = [
   ["board 1's TAB_UNDERLINE_INSET widens until its accent underline goes narrower than the label above it",
     "board_e32r28t.h", (t) => bumpConstInt(t, "TAB_UNDERLINE_INSET", 6),
     'tab label "SESSIONS"'],
+  // The account indicator. The fit assertion only RUNS on a board whose flag is 1,
+  // and neither board's is today - so without these it would be an assertion
+  // nobody has ever seen fail.
+  ["board 2 turns the N/M account indicator on, where it overflows the card label",
+    "board_es3c35p.h", (t) => t.replace(/^#define BOARD_USAGE_ACCT_INDEX 0$/m, "#define BOARD_USAGE_ACCT_INDEX 1"),
+    "board 2: BOARD_USAGE_ACCT_INDEX 1 needs the N/M indicator to fit"],
+  ["board 1 turns the N/M account indicator on",
+    "board_e32r28t.h", (t) => t.replace(/^#define BOARD_USAGE_ACCT_INDEX 0$/m, "#define BOARD_USAGE_ACCT_INDEX 1"),
+    "board 1: BOARD_USAGE_ACCT_INDEX is 0"],
+  ["board 2's header quotes a stale overflow for its N/M flag",
+    "board_es3c35p.h", (t) => t.replace(/overflows by (\d+)px/, (_, n) => `overflows by ${Number(n) + 1}px`),
+    "board 2: BOARD_USAGE_ACCT_INDEX 0's header comment quotes the measured overflow"],
+  ["board 2's card labels shrink until the N/M indicator would fit (the flag must be re-decided)",
+    "usage.ino", (t) => t.replace('drawCardChrome(weekCardY(), "WEEK - 7 DAY, ALL MODELS"', 'drawCardChrome(weekCardY(), "WEEK"')
+                         .replace('drawCardChrome(CARD1_Y, "NOW - 5 HOUR WINDOW"', 'drawCardChrome(CARD1_Y, "NOW"'),
+    "board 2: BOARD_USAGE_ACCT_INDEX 0's header comment quotes the measured overflow"],
 ];
 if (SOURCE_FAULT_INDEX >= 0) {
   const f = SOURCE_FAULTS[SOURCE_FAULT_INDEX];
@@ -418,6 +434,102 @@ for (const [b, hdr] of [[1, "board_e32r28t.h"], [2, "board_es3c35p.h"]]) {
                  : `board ${b}: every BOARD_* capability flag is a #define`);
   chk(/^\s*#define\s+BOARD_USAGE_V2\s+[01]\s*$/m.test(raw),
       `board ${b}: BOARD_USAGE_V2 is #define'd`);
+  // readSource(), not `raw`: the account-indicator faults below edit THIS line, and
+  // only readSource() sees a source fault.
+  chk(/^\s*#define\s+BOARD_USAGE_ACCT_INDEX\s+[01]\s*$/m.test(readSource(hdr)),
+      `board ${b}: BOARD_USAGE_ACCT_INDEX is #define'd 0 or 1`);
+}
+
+// ---------------------------------------------------------------------------
+// THE ACCOUNT INDICATOR ("N/M" beside the card header's account label). Allowed
+// only on a board whose header sets BOARD_USAGE_ACCT_INDEX 1 - neither does, so
+// usage.ino carries no draw for it and #error's if the flag is ever flipped - and
+// that flag is only honest where the geometry PROVES it fits: the widest Claude-card label
+// (PARSED out of drawUsageStatic()'s own drawCardChrome() calls, per board - the
+// two boards' cards carry different labels behind #if BOARD_USAGE_V2), one
+// advance of air, and the widest indicator, all inside the card's padded lane.
+//
+// The widest indicator is the wider of the two right-hand forms the chrome draws:
+//   text  "N/M" + one advance + a tag of the DEVICE's longest - HostLink's own
+//         tag[]/acctTag[] buffers less the NUL (7), not the host's 6-char macTag()
+//         cap, for sessions-geom-check.mjs's reason: the device is what draws it,
+//         and its buffer is what any host's payload is truncated into;
+//   icon  "N/M" + one advance + MAC_EMOJI_SIZE (parsed from the board's own
+//         MacEmoji header).
+// "N/M" at its widest is MAX_LINKS/MAX_LINKS - one account per Mac at most.
+//
+// A board with the flag at 0 must say WHY in its header, as "overflows by Npx"
+// in the comment over the #define, and N is checked against this arithmetic -
+// so the number cannot go stale, and a layout change that makes it fit fails
+// here until somebody re-decides the flag rather than leaving it off by habit.
+// Board 1 is 0 regardless: its glass is the place a 1/2 was first measured to
+// collide (x=154 against a label ending x=170, the note that used to sit at the
+// tag draw in usage.ino), and the ruling for this task is that it never shows one.
+function acctIndicatorFit(b) {
+  const c = B[b];
+  const preDefs = { ...c };
+  const body = preprocess(fnBody(readSource("usage.ino"), "void drawUsageStatic() {", "usage.ino"),
+                          preDefs, { strictUnknown: true });
+  const labels = [...body.matchAll(/drawCardChrome\(\s*[^,]+,\s*"([^"]+)"/g)].map(m => m[1]);
+  const main = readSource("deckhand_display.ino");
+  const hl = /struct HostLink\s*\{([\s\S]*?)\n\};/.exec(main);
+  const buf = (name) => {
+    const m = hl && new RegExp(`\\bchar\\s+${name}\\[(\\d+)\\]`).exec(hl[1]);
+    return m ? Number(m[1]) - 1 : NaN;
+  };
+  const tagMax = Math.max(buf("tag"), buf("acctTag"));
+  const ml = /#define\s+MAX_LINKS\s+(\d+)/.exec(main);
+  const maxLinks = ml ? Number(ml[1]) : NaN;
+  const em = /#define\s+MAC_EMOJI_SIZE\s+(\d+)/.exec(readSource(b === 1 ? "MacEmoji.h" : "MacEmoji16.h"));
+  const emoji = em ? Number(em[1]) : NaN;
+  const adv = bodyAdvance(b);
+  const nm = `${maxLinks}/${maxLinks}`;
+  const nmW = bodyTextWidth(b, nm);
+  // The widest tag of tagMax characters, over every glyph the face carries -
+  // Spleen is uniform, Cozette's LAST character is charged its ink, not its advance.
+  let tagW = 0;
+  for (let ch = 0x20; ch <= 0x7e; ch++)
+    tagW = Math.max(tagW, bodyTextWidth(b, String.fromCharCode(ch).repeat(tagMax)));
+  const indW = nmW + adv + Math.max(tagW, emoji);
+  const labelX = c.CARD_X + c.PAD, right = c.CARD_X + c.CARD_W - c.PAD;
+  const widest = labels.reduce((w, L) => Math.max(w, bodyTextWidth(b, L)), 0);
+  const widestLabel = labels.find(L => bodyTextWidth(b, L) === widest);
+  const labelEnd = labelX + widest;
+  const indX = right - indW;
+  const overflow = labelEnd + adv - indX;   // > 0 = the indicator lands on the label
+  return { labels, widestLabel, labelEnd, indX, indW, nm, tagMax, tagW, emoji, adv, overflow,
+           flag: c.BOARD_USAGE_ACCT_INDEX, labelX, right,
+           ok: labels.length >= 2 && [tagMax, maxLinks, emoji, adv].every(Number.isFinite) };
+}
+function acctIndexComment(hdr) {
+  const lines = readSource(hdr).split("\n");
+  const at = lines.findIndex(l => /^\s*#define\s+BOARD_USAGE_ACCT_INDEX\b/.test(l));
+  if (at < 0) return "";
+  let i = at - 1;
+  while (i >= 0 && /^\s*\/\//.test(lines[i])) i--;
+  return lines.slice(i + 1, at).join("\n");
+}
+for (const [b, hdr] of [[1, "board_e32r28t.h"], [2, "board_es3c35p.h"]]) {
+  const f = acctIndicatorFit(b);
+  chk(f.ok, `board ${b}: the account-indicator fit parsed its inputs (${f.labels.length} card labels, `
+    + `tag ${f.tagMax} chars, MAC_EMOJI_SIZE ${f.emoji}, advance ${f.adv}px)`);
+  const arith = `"${f.widestLabel}" spans ${f.labelX}..${f.labelEnd}, + ${f.adv}px air; widest indicator `
+    + `"${f.nm}" + ${f.adv} + max(${f.tagMax}-char tag ${f.tagW}px, icon ${f.emoji}px) = ${f.indW}px, `
+    + `TR at ${f.right} -> starts x=${f.indX}`;
+  const fits = f.overflow <= 0;
+  console.log(`  account indicator, board ${b}: ${arith}: ${fits ? `fits, ${-f.overflow}px spare` : `overflows by ${f.overflow}px`}`);
+  if (f.flag === 1)
+    chk(fits, `board ${b}: BOARD_USAGE_ACCT_INDEX 1 needs the N/M indicator to fit beside the widest card label `
+      + `- ${arith}: ${fits ? "fits" : `OVERFLOWS by ${f.overflow}px`}`);
+  if (b === 1)
+    chk(f.flag === 0, `board 1: BOARD_USAGE_ACCT_INDEX is 0 (got ${f.flag}) - board 1 never draws the N/M indicator; `
+      + `the changing label is the only carrier there`);
+  if (f.flag === 0) {
+    const q = /overflows by (\d+)px/.exec(acctIndexComment(hdr));
+    chk(!fits && !!q && Number(q[1]) === f.overflow,
+        `board ${b}: BOARD_USAGE_ACCT_INDEX 0's header comment quotes the measured overflow `
+      + `(says ${q ? `${q[1]}px` : "nothing"}, measured ${fits ? `a FIT with ${-f.overflow}px spare - re-decide the flag` : `${f.overflow}px`})`);
+  }
 }
 
 for (const b of [1, 2]) {
@@ -480,7 +592,7 @@ for (const b of [1, 2]) {
   const heroGlyphH = b === 1 ? 13 * heroSize : HERO_H_NATIVE[2];
   const heroWidth = b === 1 ? textWidth("100%", 4, heroSize) : spleenHeroWidth("100%");
   const bands = [
-    ["pin bar", c.CARD_PIN_BAR_Y, c.CARD_PIN_BAR_Y + 2],
+    // (The pin bar, +3..+5 above the label, went with the pin on 2026-10-03.)
     ["label", c.CARD_LABEL_Y, c.CARD_LABEL_Y + bodyH - 1],
     ["hero box", c.CARD_HERO_Y, c.CARD_HERO_Y + c.CARD_HERO_H - 1],
     ["pace bar clear", c.CARD_BAR_Y - 4, c.CARD_BAR_Y + c.BAR_H + 3],
@@ -495,8 +607,7 @@ for (const b of [1, 2]) {
   // bar and the stats/foot rows in one assertion rather than one apiece.
   chk(last <= ceil, `nothing on the card ends past +${ceil} (2px border owns +${c.CARD_H - 2}..+${c.CARD_H - 1}); last band ends +${last}`);
   chk(c.CARD_LABEL_Y + bodyH - 1 < c.CARD_HERO_Y, `label row +${c.CARD_LABEL_Y}..+${c.CARD_LABEL_Y + bodyH - 1} clears the hero box starting +${c.CARD_HERO_Y}`);
-  chk(c.CARD_PIN_BAR_Y >= 2, `pin bar +${c.CARD_PIN_BAR_Y} is inside the interior (border owns +0..+1)`);
-  chk(c.CARD_PIN_BAR_Y + 2 < c.CARD_LABEL_Y, `pin bar clears the icon below it`);
+  chk(c.CARD_LABEL_Y >= 2, `label/icon row +${c.CARD_LABEL_Y} is inside the interior (border owns +0..+1)`);
   // hero glyph height, and its box against its two neighbours by name (the
   // band-overlap loop below also catches this generically, but the hero is
   // the one board-2 element whose size changed in this task, so it gets its
@@ -800,7 +911,6 @@ for (const b of [1, 2]) {
     // and HERO_H_NATIVE this checker already derives that way.
     const meta = META_H[b];
     const bands = [
-      ["pin",   c.CARD_PIN_BAR_Y, c.CARD_PIN_BAR_Y + 2],
       ["label", c.CARD_LABEL_Y,   c.CARD_LABEL_Y + meta - 1],
       ["hero",  c.NOW_HERO_Y,     c.NOW_HERO_Y + c.CARD_HERO_H - 1],
       ["bar",   c.NOW_BAR_Y - 4,  c.NOW_BAR_Y + c.BAR_H + 3],
@@ -864,10 +974,12 @@ for (const b of [1, 2]) {
     // card's spacing has to change it at EVERY boundary, or say here why one
     // boundary is different.
     const rhythm = (name, bandList, cardH, extra) => {
-      // From index 2: the pin bar sits DIRECTLY on the label row (gap 0) by
-      // design, so that boundary is not part of the rhythm.
+      // From index 1, the label: every boundary is part of the rhythm. (This
+      // started at 2 while a pin bar sat DIRECTLY on the label row, gap 0 by
+      // design, as band 0 - it went with the pin on 2026-10-03, and the gaps
+      // compared are exactly the ones compared before.)
       const gaps = [];
-      for (let i = 2; i < bandList.length; i++)
+      for (let i = 1; i < bandList.length; i++)
         gaps.push([`${bandList[i - 1][0]}->${bandList[i][0]}`,
                    bandList[i][1] - bandList[i - 1][2] - 1]);
       for (const g of extra || []) gaps.push(g);
@@ -996,7 +1108,6 @@ for (const b of [1, 2]) {
     // bar, sharing the 7-day window/tick with the percentage above it.
     const head = HEAD_H[b];        // parsed T_HEAD cellH: 18 on board 1, 24 on board 2
     const wb = [
-      ["pin",    c.CARD_PIN_BAR_Y, c.CARD_PIN_BAR_Y + 2],
       ["label",  c.CARD_LABEL_Y,   c.CARD_LABEL_Y + meta - 1],
       // the number and the burn line share one row: union of the two clear boxes
       ["numrow", Math.min(c.WEEK_NUM_Y - 1, c.WEEK_BURN_Y - 1),
@@ -1052,7 +1163,6 @@ for (const b of [1, 2]) {
     // SAME 4 rows with the SAME trailing 5, which is what makes its growth two
     // constants rather than five; WEEK's is re-pitched to 8.
     const soloNow = [
-      ["pin",   c.CARD_PIN_BAR_Y, c.CARD_PIN_BAR_Y + 2],
       ["label", c.CARD_LABEL_Y,   c.CARD_LABEL_Y + meta - 1],
       ["hero",  c.NOW_HERO_Y,     c.NOW_HERO_Y + c.CARD_HERO_H - 1],
       ["bar",   c.NOW_BAR_Y - 4,  c.NOW_BAR_Y + c.BAR_H + 3],
@@ -1073,7 +1183,6 @@ for (const b of [1, 2]) {
       + `whole share went into the spark band, so no gap moved`);
 
     const soloWeek = [
-      ["pin",    c.CARD_PIN_BAR_Y, c.CARD_PIN_BAR_Y + 2],
       ["label",  c.CARD_LABEL_Y,   c.CARD_LABEL_Y + meta - 1],
       ["numrow", Math.min(c.WEEK_NUM_Y_SOLO - 1, c.WEEK_BURN_Y_SOLO - 1),
                  Math.max(c.WEEK_NUM_Y_SOLO + head, c.WEEK_BURN_Y_SOLO + meta)],
@@ -1283,7 +1392,10 @@ for (const b of [1, 2]) {
         if (v2If && v1If) {
           const terms = (s) => new Set([...s.matchAll(/(\w+)\s*!=\s*\w+/g)].map((m) => m[1]));
           const v2Terms = terms(v2If[0]), v1Terms = terms(v1If[0]);
-          const SHARED = ["srcCache", "cxSrcCache", "pinCache", "linksCache", "emojiCache"];
+          // acctCache replaced BOTH pinCache and linksCache on 2026-10-03: the pin
+          // is gone, and the label is now gated on the ACCOUNT count, which
+          // acctCache carries (usage-account-check.mjs's (i) binds its value).
+          const SHARED = ["srcCache", "cxSrcCache", "acctCache", "emojiCache"];
           for (const t of SHARED) {
             chk(v1Terms.has(t), `v1 (board 1) arm's bust condition still carries ${t}`);
             chk(v2Terms.has(t), `v2 (board 2) arm's bust condition still carries ${t}`);

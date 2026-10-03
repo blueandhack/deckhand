@@ -53,7 +53,7 @@ panel, which reads as a layout bug rather than a build mistake.
 | mic / beeper | both fitted and working | both work, via the ES8311 |
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64 |
-| size today | flash 1425680, RAM 72100 | flash 1161440, RAM 65564 |
+| size today | flash 1428096, RAM 72284 | flash 1164656, RAM 66156 |
 
 **FOUR of the six numbers this file quotes about the binaries are BOUND and two are not.**
 `node firmware/board-baseline.mjs --doc-check` asserts the two **hashes** and the two **sizes**
@@ -161,7 +161,35 @@ it reuses existing globals. Flash is +176 net: round 1's own dedupe code and mes
 2's removal of it, plus round 2's own (smaller) guard condition, message and call site. Board 1
 took none of it - the same `#if BOARD_HISTORY_SCROLL`/`#if BOARD_HAS_PROJECTS` boundary,
 confirmed by a same-day rebuild of the untouched prior commit matching the recorded baseline
-exactly, byte for byte. `arduino-cli`'s
+exactly, byte for byte. It then **rose 592 bytes on 2026-10-03** (65,564 -> 66,156: USAGE per
+Claude ACCOUNT, measured at the end of the four-task branch, so this is the NET against the last
+recorded figure above and not four separate steps). Task 2's per-account `Usage` arrays
+(`usageAcct[MAX_LINKS]`, their first-link/source index arrays, `usageAcctSel[14]`) and the two new
+`HostLink` fields (`acct[12]`, `acctTag[8]`) x `MAX_LINKS` made up most of the +176 it measured;
+Task 3's `acctCache` replaced the pin/links caches rather than adding to them, but its header-label
+bust term added `labelCache` (+8 on BOTH boards: board 2 65,740 -> 65,748, board 1 72,276 ->
+72,284); Task 4's
+`UsageRing usageRings[MAX_LINKS]` (each ring carries an `owner[14]` key beside the old six
+fields) replaced one set of ring globals with two, +408 with its function-local empty ring
+(176 + 8 + 408 = 592).
+Everything account-shaped sits in code BOTH boards compile, except the ring, which is behind
+`BOARD_USAGE_V2` and so is board 2's alone. **Board 1 moved too, on purpose: flash 1,425,680 ->
+1,428,080 (+2,400), RAM 72,100 -> 72,284 (+184 = Task 2's 176 + Task 3's 8, `.bss`, none of it
+the ring).** The multi-Mac
+merge, the header chrome and the `USAGEACCT` verb are shared code, so the shift was expected and
+is measured here rather than found later - the rule is that a change to board 1 is measured and
+explained, never a surprise; `--update` re-baselined both boards for it. Board 2's flash went
+1,161,440 -> 1,164,640 (+3,200). Both compiles were sequential, `--check` reported `CHANGED` with
+the core stamp not pooled on both, and neither was flashed from this task: board 2 was flashed
+earlier on this branch for the on-glass run (`docs/reference/usage-tab.md`), board 1 was NOT
+cabled and has NOT been looked at on glass. **Then both boards moved again the same day, flash
++16 each and RAM unchanged (board 1 1,428,080 -> 1,428,096, RAM 72,284; board 2 1,164,640 ->
+1,164,656, RAM 66,156), for the final review's latch** - `mergeUsage()` now stores the displayed
+account's key when nothing is selected, so an untapped page no longer follows whichever Mac
+holds slot 0 when the two swap slots. Shared code, so board 1 moved again for the latch, on
+purpose; one `if` and a call, no new storage (`usageAcctSel` already existed). Sequential
+compiles, `--check` `CHANGED` (+16, core stamp not pooled) on both, `--update` on both, not
+flashed. `arduino-cli`'s
 "Sketch uses N" is a
 slightly smaller number than the `.bin` - the same image without its trailing padding - so do
 not expect the compile summary to print these.
@@ -224,7 +252,7 @@ arduino-cli compile --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app" \
 node firmware/board-baseline.mjs /tmp/b1/deckhand_display.ino.bin --check 1
 ```
 
-Today: `326a36e3d8dd9189...`, size 1425680 (board 2: `80b63d525fb38b02...`, size 1161440).
+Today: `17e1e6161a4df27e...`, size 1428096 (board 2: `7e410b1945a690e9...`, size 1164656).
 
 It compares **BYTES, not sizes**, and that matters: a default argument on a shared function
 once changed board 1's codegen with **no size change whatsoever** - invisible to a size
@@ -377,6 +405,7 @@ one is neither handled nor refused.
 | `SDPROBE` | board 2: mount the microSD over SDMMC, report, unmount. Tries 4-bit then 1-bit and REPORTS WHICH WIDTH WON - "4-bit failed, 1-bit worked" is a wiring story and "both failed" is a card-or-slot story. `CARD_NONE` after a successful mount is a THIRD outcome (the slot is empty), not a failure. Measured 2026-09-20: `ok width=4 type=SDHC size=14911MB`. Leaves GPIO 2..7 as it found them, which nothing else in this firmware touches. Board 1 refuses it from `UNAVAILABLE_COMMANDS[]` - and that refusal is NOT "board 1 has no slot", it has one, wired for SPI rather than SDMMC |
 | `SDPERF` | board 2: times SD writes, reads and an APPEND, from a PSRAM source buffer because that is where `scrollText` lives - a DRAM-sourced write measures a path the real code never takes. Measured 2026-09-20: write 2048/49152/262144 B in 9/23/66ms, read in 2/9/40ms, append 2048 to a 262144 B file in 9ms, open+close 5ms. **The append costing the same as a small write, not the same as the 66ms rewrite, is what the offline-sessions hybrid write policy stands on.** Board 1 refuses it from `UNAVAILABLE_COMMANDS[]` |
 | `SESSIONSCROLL <n>` | board 2: park the SCROLLING session list at step `n` so a capture can see a position other than the top. The unit is STEPS, not pixels - the offset is only ever a multiple of `SESSION_SCROLL_STEP` - and it reports the rows now on screen. Refuses BY NAME on a non-numeric or out-of-range argument (quoting the range), on SESSIONS not being the live tab, on a full-screen surface, and on a list of six or fewer that is not scrolling at all. Board 1 refuses it from `UNAVAILABLE_COMMANDS[]` |
+| `USAGEACCT <n>` | BOTH boards: show Claude ACCOUNT `n` (0-based, slot order - the order a tap on the cards pages through) on the USAGE tab, so a capture can see an account other than the first. **ABSOLUTE, never "next"**: the host's double delivery would make a relative step toggle there and back, and an absolute one is idempotent, so it is not deduped. Reports `USAGEACCT idx=<0-based> count=<n> key=<acct key> label=<header label> src=<link>`. Refuses BY NAME - naming WHICH one - on a surface over the cards (compose panel, full-text reader, history reader, icon grid, octopus, voice card, mic processing bar, transcript, pairing panel - wider than `TAB`'s set because it repaints the cards in place rather than through `switchTab()`), on USAGE not being the live tab, on no account having a reading yet, and on a non-numeric or out-of-range `n` (quoting `0..count-1`). Nothing on the glass says `N/M` on either board - `BOARD_USAGE_ACCT_INDEX` is `0` on both because the indicator does not fit beside the widest card label (`usage-geom-check.mjs` re-derives the overflow) - so the header's changing account label is the carrier. `MULTITEST` injects `"acct":"feedacct"`, so it always makes a second account |
 | `MSGPRI` / `MSGPRI now\|next\|later` | report or set how a message sent FROM this device lands in the Mac's session queue. NVS-backed, on the SETTINGS tab; the device announces it at boot and on `WHOAMI`, and the host asks for it when a HELLO names a link it has no priority for |
 | `WHOAMI` | re-emits the boot `HELLO <name> v2` line on demand, over USB. Both boards. The host sends it to an anonymous link before considering a reset - `HELLO` is a boot-only burst, so a host that attached to an already-running board otherwise had to REBOOT it to learn its name |
 | `MULTITEST <n>` / `PAIRVECTOR` | inject a synthetic second Mac; check the pairing crypto against RFC 7748 |
