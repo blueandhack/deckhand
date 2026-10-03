@@ -148,6 +148,16 @@ async function sendOverBle(text, gapMs = 0) { __bleWrites.push({ text, gapMs });
 // board left anonymous and a board never considered look identical from the Mac).
 // A module-level \`console\` shadows the global for the whole module, so the lines
 // are captured instead of drowning the checker's own output.
+// The BATT arm now records DURABLE last-contact for the power-off measurement, so
+// the harness presents that surface too. An in-memory stand-in rather than the real
+// path: a checker run must never write into the user's own ~/.claude state.
+const POWER_STATE = "<stub>";
+const POWER_STATE_MIN_WRITE_MS = 20000;
+let powerStateWroteAt = 0;
+let __powerState = {};
+function readJsonSync(f) { return f === POWER_STATE ? __powerState : null; }
+function writeFileSync(f, text) { if (f === POWER_STATE) __powerState = JSON.parse(text); }
+
 const __log = [];
 const console = {
   log: (...a) => __log.push(a.join(" ")),
@@ -1179,6 +1189,53 @@ async function main({ indexPath = INDEX } = {}) {
          "included - an unbounded one holds the guard for ever and wedges the host harder " +
          "than the churn it replaces",
         /withTimeout\(peripheral\.disconnectAsync\(\),\s*BLE_CONNECT_TIMEOUT_MS,\s*\n?\s*"BLE retry disconnect"\)/.test(disc));
+    }
+
+    // --- THE POWER-OFF RECEIPT IS FINISHED BY THE MAC, DURABLY ---
+    // The device brackets a power-off with two voltages and cannot know the
+    // elapsed time between them: RTC_DATA_ATTR survives deep sleep but board 2
+    // leaves power-off through a RESET, and hostNowSec() carries no date. Its
+    // own receipt says "Elapsed is the Mac's to supply". The Mac supplied it by
+    // hand three times and lost it three times - a /tmp wipe, a recreated
+    // host.log, and a week reconstructed from two log lines - so it is a file now.
+    {
+      const arm = (sig) => {
+        const at = src.indexOf(sig);
+        if (at < 0) return "";
+        const open = src.indexOf("{", at);
+        let d = 0;
+        for (let i = open; i < src.length; i++) {
+          if (src[i] === "{") d++;
+          else if (src[i] === "}" && --d === 0) return src.slice(open, i + 1);
+        }
+        return "";
+      };
+      const batt = arm('if (line.startsWith("BATT "))');
+      const pwr  = arm('if (line.startsWith("PWROFF record:"))');
+      ok("STRUCTURE: the BATT arm is found", batt.length > 200);
+      ok("STRUCTURE: the power-off receipt arm is found", pwr.length > 200);
+      ok("STRUCTURE: last contact is persisted to a FILE from the BATT arm - battByDevice " +
+         "is a Map that dies with the process AND is pruned when a link closes, which is " +
+         "exactly the moment a power-off begins",
+        /writeFileSync\(POWER_STATE/.test(batt));
+      ok("STRUCTURE: ...keyed by senderKey, the same key battByDevice uses, so a renumbered " +
+         "port does not orphan the record",
+        /st\[senderKey\(via\)\]/.test(batt));
+      ok("STRUCTURE: the receipt arm reads that DURABLE store, not the in-memory one - " +
+         "reading battByDevice here would find nothing, because the link closed when the " +
+         "device powered off",
+        /readJsonSync\(POWER_STATE\)/.test(pwr) && !/battByDevice/.test(pwr));
+      ok("STRUCTURE: it reports mV/h, so the line is a measurement rather than two voltages",
+        /mV\/h/.test(pwr));
+      ok("STRUCTURE: and NAMES the mode, or an A/B of power-off modes cannot attribute " +
+         "its own legs",
+        /mode=0x\(\[0-9A-Fa-f\]\+\)/.test(pwr) && /mode 0x/.test(pwr));
+      // EVERY REFUSAL NAMES ITS CAUSE. Without the else-arm a missing last-contact
+      // prints nothing at all, and silence is indistinguishable from "no power-off
+      // happened" - the exact confusion this instrument exists to end.
+      ok("STRUCTURE: a missing last-contact REFUSES BY NAME rather than printing nothing, " +
+         "since silence and 'there was no power-off' look identical from here",
+        /no durable last-contact/.test(pwr));
     }
 
     // --- THE BLE CHUNK SIZE IS NOT TUNED FROM SOMEONE ELSE'S LINK ---

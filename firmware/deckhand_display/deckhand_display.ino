@@ -796,6 +796,21 @@ uint32_t pwrOffMode = PWROFF_PANEL_SLEEP | PWROFF_IC_RESET | PWROFF_CODEC_DOWN
 // time. Retained rather than only printed, because a board that powered off on
 // battery has no listener at boot.
 char pwrOffReport[176] = {0};
+#if !BOARD_USES_TFT_ESPI
+// The record is BUILT at boot and SENT once a host can actually hear it, which
+// are not the same moment. sendLineToHost() fans out to Serial and to BLE, but
+// its BLE half is gated on bleConnected - and at boot no central has connected
+// yet, so a power-off that ended with the cable OUT emitted the receipt into
+// Serial and nothing was listening. MEASURED: a three-day power-off whose own
+// figures (off at 4158mV, awake at 3645mV, -513 mV) existed on the device the
+// whole time and had to be reconstructed from two collector log lines and a date
+// subtraction, because the boot emit had gone nowhere.
+//
+// Deferred rather than duplicated: emitting at boot AND again on connect would
+// send it twice over USB, and this repo has paid for double delivery enough
+// times to not introduce one for a receipt.
+bool pwrOffReportPending = false;
+#endif
 #endif
 
 // Automatic full deep-sleep (not just backlight-off) to protect the battery:
@@ -6734,10 +6749,10 @@ void setup() {
   loadCpuMode();
   loadFwCommit();
   loadPwrOffRecord();
-  // Best effort: on the common path a power-off ends by plugging USB in, so
-  // Serial is up here and the receipt lands in the host log by itself. It is
-  // retained either way - ask PWROFFMODE if this one went nowhere.
-  sendLineToHost(pwrOffReport);
+  // ARMED, not sent - see pwrOffReportPending. loop() emits it the moment a host
+  // is actually reachable, over whichever transport that turns out to be. It is
+  // retained in RAM either way, so PWROFFMODE still re-emits it on demand.
+  pwrOffReportPending = true;
 #endif
   loadMsgPriority();
   Serial.printf("BUILD %s\n", BUILD_STAMP); // confirms which binary is live
@@ -9787,6 +9802,17 @@ void loop() {
   }
 
 #if !BOARD_USES_TFT_ESPI
+  // THE POWER-OFF RECEIPT, the moment anything can hear it. Cleared on the one
+  // send, so a link that comes and goes cannot re-report a power-off as if it
+  // were a fresh one - the same once-only guarantee loadPwrOffRecord() gives by
+  // removing the NVS key, just moved to where delivery actually happens.
+  // usbLinkActive() is "the host spoke over USB within 10s" rather than "a cable
+  // is in", which is the honest test: a cable with nothing listening is exactly
+  // the case that lost the three-day record.
+  if (pwrOffReportPending && pwrOffReport[0] && (bleConnected || usbLinkActive())) {
+    pwrOffReportPending = false;
+    sendLineToHost(pwrOffReport);
+  }
   cpuTick();   // no-op at a fixed frequency, and never while blanked
 #endif
 

@@ -1093,6 +1093,39 @@ check("the awake arm carries the latency and the slow arm does not - asleep the 
       re.search(r"latency = slow \? 0 : BLE_AWAKE_LATENCY", _bsi) is not None
       and re.search(r"p\.latency = latency;", _bsi) is not None)
 
+# ---- THE POWER-OFF RECEIPT REACHES A HOST THAT IS NOT ON THE CABLE ---------
+# sendLineToHost() fans out to Serial AND BLE, but its BLE half is gated on
+# bleConnected - and at boot no central has connected yet. So the receipt for a
+# power-off that ended with the cable OUT went into Serial with nothing
+# listening. MEASURED: a three-day power-off whose own figures (off at 4158mV,
+# awake at 3645mV) sat on the device the whole time and had to be reconstructed
+# from two collector log lines and a date subtraction.
+_setup = _body(MAIN, "void setup()")
+_loop  = _body(MAIN, "void loop()")
+check("setup ARMS the power-off receipt rather than sending it into a transport "
+      "nothing is listening on yet",
+      "pwrOffReportPending = true;" in _setup)
+check("...and setup does NOT also send it - emitting at boot AND on connect would "
+      "deliver it twice over USB, which is the double delivery this repo keeps paying for",
+      "sendLineToHost(pwrOffReport)" not in _setup)
+check("loop() emits it once a host is REACHABLE, and the gate names BLE explicitly - "
+      "without that term a cable-out power-off still reports to nobody, which is the "
+      "entire defect",
+      re.search(r"if \(pwrOffReportPending && pwrOffReport\[0\] && "
+                r"\(bleConnected \|\| usbLinkActive\(\)\)\)", _loop) is not None)
+# ONCE-ONLY, and the order is what guarantees it: a link that comes and goes must
+# not re-report an old power-off as a fresh one.
+_iClear = _loop.find("pwrOffReportPending = false;")
+_iSend  = _loop.find("sendLineToHost(pwrOffReport)")
+check("...clearing the pending flag BEFORE the send, so a repeat cannot re-report "
+      "a power-off that already landed",
+      _iClear >= 0 and _iSend > _iClear)
+# Two emit sites exactly: loop()'s once-only receipt and PWROFFMODE's on-demand
+# re-emit. A third would be a second uninvited copy of the same line.
+check("the receipt has exactly two emit sites - loop()'s once-only one and "
+      "PWROFFMODE's on-demand re-emit - so no third can quietly duplicate it",
+      MAIN.count("sendLineToHost(pwrOffReport)") == 2)
+
 # ---- THE ADVERTISING RATE -------------------------------------------------
 ADV_FAST_MIN = board_const(B2H, "BLE_ADV_FAST_MIN", "board_es3c35p.h")
 ADV_FAST_MAX = board_const(B2H, "BLE_ADV_FAST_MAX", "board_es3c35p.h")

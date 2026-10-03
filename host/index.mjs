@@ -141,6 +141,19 @@ function rotateLogIfNeeded() {
 // missing heartbeat is the ordinary state after a reboot and means "unknown",
 // never "hung". run-ledger.mjs keeps the two apart and is the tested half.
 const RUN_STATE = path.join(os.homedir(), ".claude", "deckhand-run-state.json");
+// DURABLE LAST-CONTACT, PER DEVICE, and it exists because every power-off
+// measurement this project has attempted died on the same missing number. The
+// device CANNOT supply elapsed: RTC_DATA_ATTR survives a deep sleep but board 2
+// leaves power-off through a reset, which clears it, and hostNowSec() is
+// seconds-since-midnight with no date - so a multi-day off period is ambiguous
+// to the device by construction. Its own receipt says as much ("Elapsed is the
+// Mac's to supply"). The Mac then supplied it by hand three times and lost it
+// three times: a /tmp wipe took the collector, a recreated host.log took a day,
+// and a week-long run had to be reconstructed from two log lines and a date
+// subtraction. This file is the half the device cannot hold.
+const POWER_STATE = path.join(os.homedir(), ".claude", "deckhand-power-state.json");
+const POWER_STATE_MIN_WRITE_MS = 20000;   // BATT lands ~1/min per link, x2 transports
+let powerStateWroteAt = 0;
 const RESTART_LOG = path.join(os.homedir(), ".claude", "deckhand-restarts.log");
 let runStartedAt = Date.now();
 let watchdogFires = 0;
@@ -3706,6 +3719,46 @@ async function handleDeviceLine(line, via, pairGen = 0) {
         at: Date.now(),
       });
       boundBatteryStore(); // ports renumber; the prune on close cannot see a key it never names again
+      // ...and the same reading, DURABLY, keyed the same way. battByDevice is a
+      // Map that dies with the process and is pruned when a link closes - which
+      // is exactly the moment a power-off begins, so it is the one store that
+      // cannot answer "when did we last hear from it".
+      if (Date.now() - powerStateWroteAt >= POWER_STATE_MIN_WRITE_MS) {
+        powerStateWroteAt = Date.now();
+        const st = readJsonSync(POWER_STATE) || {};
+        st[senderKey(via)] = { device: deviceNameFor(via) || null, mv: f.mv, at: Date.now() };
+        try { writeFileSync(POWER_STATE, JSON.stringify(st)); } catch {}
+      }
+    }
+  }
+  // THE POWER-OFF RECEIPT, FINISHED. The device reports the two voltages it
+  // bracketed the power-off with; this supplies the elapsed time it cannot know
+  // and prints one line that is a measurement rather than two thirds of one.
+  //
+  // The elapsed figure is an UPPER bound: it runs from the last reading we heard,
+  // which may precede the actual power-off (the device could have been out of
+  // range first). A too-long elapsed makes the rate look BETTER, so this errs
+  // against the saving rather than for it - and the line says so by naming the
+  // window it used.
+  if (line.startsWith("PWROFF record:")) {
+    const off   = /off at (\d+)mV/.exec(line);
+    const awake = /awake at (-?\d+)mV/.exec(line);
+    const mode  = /mode=0x([0-9A-Fa-f]+)/.exec(line);
+    const seen  = (readJsonSync(POWER_STATE) || {})[senderKey(via)];
+    if (off && awake && seen && Number.isFinite(seen.at)) {
+      const h = (Date.now() - seen.at) / 3600000;
+      const dropMv = Number(off[1]) - Number(awake[1]);
+      if (h > 0.05) {
+        console.log(
+          `POWEROFF MEASURED: ${off[1]} -> ${awake[1]} mV, ${dropMv} mV over ` +
+          `${h.toFixed(2)} h = ${(dropMv / h).toFixed(2)} mV/h` +
+          (mode ? ` (mode 0x${mode[1].toUpperCase()})` : "") +
+          ` - elapsed from last contact, so it is an UPPER bound on the off time`);
+      }
+    } else if (off && awake) {
+      console.log(
+        "POWEROFF MEASURED: cannot - no durable last-contact for this device, so " +
+        "elapsed is unknown. The voltages above still stand.");
     }
   }
   // MSGPRI <now|next|later> - the device's own choice of how the messages IT sends
