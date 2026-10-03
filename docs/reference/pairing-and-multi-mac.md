@@ -135,7 +135,10 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
     12x26 → 10x18 → 6x13 ladder instead of being overlapped by it. It appears only when
     `usedLinkCount() > 1`: with one Mac the row reads plain `CLAUDE`, never a dangling `/`, because
     a label that disambiguates nothing is how you *stop* noticing the second Mac arriving.
-  - **USAGE takes the fresher reading PER SOURCE and names the Mac it came from.** Both Macs poll
+  - **[CORRECTED 2026-10-03: the premise below is WRONG for two different Claude accounts, and the
+    merge is now per ACCOUNT - see "USAGE groups links by Claude ACCOUNT" next. Kept as written
+    because it is still how two Macs on ONE account behave.]** **USAGE takes the fresher reading
+    PER SOURCE and names the Mac it came from.** Both Macs poll
     the same account, so the numbers agree and the only real difference between them is AGE
     (`mergeUsage()`: Claude by `quotaAgeSec`, Codex independently by `cxAgeSec`, which is already
     how the Codex row judges staleness). That also makes the two Macs each other's staleness
@@ -146,6 +149,58 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
     the cache itself** (`srcCache`/`cxSrcCache` → `drawUsageStatic()`) — the identical trap the
     stale-dim flip has. And `mergeUsage()` **re-runs after `pruneStaleLinks()`**, or a departed
     Mac's percentages stay on screen indefinitely with a tag naming a Mac that is gone.
+  - **USAGE groups links by Claude ACCOUNT, and freshest-wins applies only WITHIN one (2026-10-03).**
+    The bullet above assumed both Macs poll one account. They need not: the user's two Macs are on
+    two accounts, and the old merge took whichever reading was fresher and showed it as if it were
+    one account's. Now the host publishes `acct` (8 hex chars of sha256 of `oauthAccount.accountUuid`,
+    `host/account-id.mjs`) and `acctTag` beside `hostTag`; the device merges links with the same
+    `acct`, one `Usage` per account (`usageAcct[]`), and shows the SELECTED account whole
+    (`usage = m;`, never field by field). A tap on the cards pages through accounts; selection is
+    by KEY, not slot, so it survives slot recycling and a Mac swapping slots, and a departed
+    selection falls back to account 0 in the same merge. **An UNTAPPED page is held by key too
+    (final-review fix, 2026-10-03):** with no selection, `mergeUsage()` shows account 0 - the
+    lower SLOT - and the two real Macs were seen swapping slots twice on glass, which silently
+    turned the page into the other account's. So `mergeUsage()` now LATCHES the displayed
+    account's key into `usageAcctSel` whenever it is empty, including straight after a departed
+    selection is forgotten (it re-latches to the new account 0 in that same merge); a selected
+    account that is merely readingless for a tick still keeps its own key. Offline only:
+    `usage-account-check.mjs` mirror case "an UNSELECTED view survives a slot swap" and
+    structural (m), with selftest faults 39/39b/39c. **NOT verified on glass.** One honest gap:
+    a swap that passes through a merge in which the displayed account has NO linked Mac at all
+    (its slot recycled to the other Mac before it lands again) still forgets the key, by the
+    departed-selection rule, and re-latches to whoever is account 0 then. A link with NO `acct` (an old host) is its
+    own account, keyed `'@'`+`hostId`, and never merges with another acct-less link. The header
+    names the account with `acctTag` (else the Mac icon) once there are two or more accounts; the
+    Codex row follows its own account's source. `USAGEACCT <n>` (CLAUDE.md command table) drives
+    the selection from the Mac. **Both hosts must be updated (merge + restart) before `acct` is
+    published; until then every Mac is its own account, which is the correct result for two
+    different accounts anyway.**
+    - **Measured on glass (board 2 only, 2026-10-03, flashed from this worktree, live host = the
+      main checkout's OLD host so no `acct` anywhere):** a second real Mac over BLE gave two accounts
+      without `MULTITEST`: `USAGEACCT 0` -> `idx=0 count=2 key=@c5325381 label=pro src=0`, `1` ->
+      `idx=1 ... key=@880d62e5 label=mac src=1`. Account `pro` read 18% 5h / 21% 7d, matching
+      `host.log`'s `5h=18% 7d=21%` the same minute; account `mac` read 0% 5h ("burn -- / no data
+      yet") / 9% 7d / 2.92M tok with a DIFFERENT weekly reset (5d 12h vs 2d 19h). Refusals
+      (`"5"`/`"x"` not an account index (0..1), USAGE not the live tab) each printed identically
+      over both transports, and `USAGEACCT 1` twice stayed at idx=1 (absolute, so the double
+      delivery cannot toggle). Screenshots in `~/Deckhand-shots/` (2026-10-03T09-20-52 and
+      09-21-05).
+    - **NOT verified:** board 1 on glass (it was not cabled; compile + offline checkers only). The
+      planned freeze acceptance (`MULTITEST 2`, wait past 21s) could NOT run: with both slots held
+      by real Macs the synthetic link never took one (`USAGEACCT 2` refused, count stayed 2), though
+      the two real Macs swapped slots and the selected account (by key) stayed on screen correctly.
+      The `acct`-published path (a real host that sends `acct`) was never exercised on glass.
+    - **Known limits:** two OLD hosts on ONE account show as two accounts until updated.
+      **[CORRECTED 2026-10-03, final review: this sentence used to say a mixed legacy (no
+      `hostId`) host plus a readingless link is an edge `mergeUsage()` "leaves alone
+      (`usedLinkCount() == 0` returns before clearing)". It does not: with one `hostId` link
+      present `usedLinkCount()` is 1, so the early return never fires.]** A legacy (no `hostId`)
+      host's payload writes `usage` directly, and while any `hostId`'d link is present every
+      `mergeUsage()` OVERWRITES it with the linked account's reading - the no-reading sentinels
+      ("--") when that link has none - so the legacy host's own numbers never stay on screen.
+      Unlikely (a pre-`hostId` host beside a current one), unfixed. The `N/M` account indicator fits on NEITHER
+      board, so `BOARD_USAGE_ACCT_INDEX` is 0 and the changing header label is the only cue
+      (board 2 overflows by 28px, board 1 by 29px; `usage-geom-check.mjs` re-derives both).
   - **The Mac's short tag is derived ON THE MAC** (`macTag()` in `host/host-tag.mjs`, published as
     `hostTag`, overridable with `DECKHAND_MAC_TAG`) and **capped at 6 characters there**, not
     trimmed on arrival, because it is drawn into a lane the device measures. Two asymmetries are
@@ -371,7 +426,7 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
     nowhere, while its comments described a wiring that did not exist. Declared-but-unwired state
     whose comments claim it works is a defect class this repo has already paid for, so it is
     deleted rather than left for the next reader to trust.
-  - **OPEN BUG, in already-merged multi-host code and NOT introduced by the icons.** After a
+  - **[DIAGNOSED 2026-10-03, see the end of this entry.] OPEN BUG, in already-merged multi-host code and NOT introduced by the icons.** After a
     synthetic `MULTITEST` link drops (`LINK_STALE_MS`, 21s), the **two Claude usage cards freeze on
     a wrong reading** — observed 0% "starts on use" and 4% / 31.93M tok — while the **Codex row
     recovers correctly** with the real Mac's icon and its genuine value. `host.log` confirms the
@@ -383,7 +438,24 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
     Repro: `MULTITEST 2`, wait past 21s for the synthetic link to age out, `SCREENSHOT` the USAGE
     tab, compare against the host log's own `5h=`/`7d=`/`codex=` fields for the same minute. Unfixed and
     undiagnosed: it predates this branch and deserves its own systematic pass rather than a
-    side-quest.
+    side-quest. **[Superseded by the next paragraph.]**
+    **DIAGNOSIS AND FIX (USAGE-per-account branch, 2026-10-03).** Two causes. (1) A LATENT defect,
+    real but not the recorded one: `mergeUsage()` overwrote `usage` only when it found a source, so
+    when the first merge of a tick copied in a link that `pruneStaleLinks()` then dropped and the
+    post-prune merge found no Claude source, the departed link's numbers stayed on screen (mirrored
+    offline, scenario "survivor sends no Claude reading"). **Wording correction: under the OLD code
+    this "no source" state lasted ONE tick, not indefinitely** - the next payload's own parse
+    overwrote it - so it cannot explain a freeze reproduced across reboots. Fixed: `mergeUsage()`
+    now copies the selected account whole from a default-initialised `Usage`, so a leaving source
+    CLEARS its figures. (2) The recorded 0% / 4% / 31.93M tok is a second REAL Mac on another,
+    lightly-used Claude account that freshest-wins chose for the Claude cards (the synthetic link,
+    `quotaAgeSec` 1, had masked it until it aged out). It was inferred offline (the August
+    `host.log` had rotated away) and is now MEASURED: the second Mac reported 0% 5h / 9% 7d / 2.92M
+    tok while this Mac read 18% / 21% (glass, 2026-10-03, board 2). No freeze: that was never a
+    stuck reading, it was a different account's. Links on different accounts no longer merge. The
+    planned `MULTITEST 2` acceptance of fix (1) could NOT be run on glass (no free slot, see
+    above) and is covered by `usage-account-check.mjs`'s "THE FREEZE" mirror case and its
+    structural (d)/(d1) assertions only.
   - **The host drops a device line addressed to another Mac BEFORE logging it.**
     `BLECharacteristic::notify()` iterates `getPeerDevices()` and sends per peer with **zero
     references to the server's `m_connId`** — verified in the installed library source; there is no

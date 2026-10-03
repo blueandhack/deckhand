@@ -123,6 +123,18 @@
 // ring (~165 bytes of DRAM against board 1's ~26KB of free heap, which the audio
 // path already competes for) and a 64px native hero this board does not have.
 #define BOARD_USAGE_V2 0
+// The USAGE card header's "N/M" account indicator (which of the Claude accounts
+// this page is). NEVER on this board, and the arithmetic is why: the widest card
+// label, "WEEK - 7 DAY, ALL MODELS", spans x=26..170 in Cozette's 6px advance,
+// and "2/2" + a space + a 7-char tag (HostLink's tag[8]/acctTag[8] less the NUL)
+// right-aligned at x=214 starts at x=147 - so with one advance of air the
+// indicator overflows by 29px onto the label. (The note that used to sit at the
+// tag draw in usage.ino measured the same collision against the host's 6-char
+// cap: a "1/2" beside a 6-char tag starts at x=154 and collides at 170.) The
+// account label itself changes on every switch, and that is this board's only
+// carrier. usage-geom-check.mjs re-derives the overflow and fails if the number
+// quoted here goes stale. A #define, never a const int - see BOARD_USAGE_V2.
+#define BOARD_USAGE_ACCT_INDEX 0
 // Deep sleep can be ended by TOUCHING THE GLASS on this board, which is a
 // capability and not a preference: ext0/ext1 wake only from an RTC GPIO, and
 // this panel's PENIRQ happens to be on one (IO36). See BOARD_SLEEP_WAKE_GPIO
@@ -340,7 +352,8 @@ const int PAD = 14, BAR_H = 10, RADIUS = R_MD;
 // +58..+75, so they overlap by 3 rows and a changing token count shaves the
 // bottom of the pace tick until the bar next repaints. Board 2's derivation
 // leaves every band disjoint.
-const int CARD_PIN_BAR_Y = 3;    // pin bar, +3..+5, above the icon
+// (+3..+5 held the pin bar, CARD_PIN_BAR_Y, until the pin was replaced by
+// per-account pages on 2026-10-03 - those rows are blank now.)
 const int CARD_LABEL_Y   = 6;    // label / Mac icon row, +6..+18
 const int CARD_HERO_Y    = 20;   // hero box +20..+59
 const int CARD_HERO_H    = 40;   // for a 39px glyph, 1px of slack

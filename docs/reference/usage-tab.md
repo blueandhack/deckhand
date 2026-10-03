@@ -64,11 +64,42 @@ sampler rather than of the account. At the poll cadence the same 31 slots span *
   anywhere in its own body, and `usageRingSpanMin()` must return 0 below two samples. Widest output
   is still `"no history"` (10 chars) — `padLeftTo(buf, sizeof(buf), 10)` into `resetAt1Cache[14]`
   needed no change, verified by the existing parsed-cache-width assertion rather than assumed.
-- **`USAGE_RING_DROP_PCT` (3) is DERIVED, not picked.** A large fall means the window turned over
+- **[CORRECTED 2026-10-03: the ring is now PER ACCOUNT - see the next bullet. What follows is still true
+  within one account, and its "two Macs differ only in AGE" premise is true only for two Macs on ONE
+  account.]** **`USAGE_RING_DROP_PCT` (3) is DERIVED, not picked.** A large fall means the window turned over
   and a slope across that discontinuity is meaningless — but `mergeUsage()` can swap the source
   Mac at any tick, and the two Macs' readings differ only in AGE, bounded by one poll interval, in
   which the shortest window this ring serves moves `100 * 5 / 300` = **1.67 points**. So a 1- or
   2-point fall is explicable by a source switch and must NOT clear 2.5 hours of history; 3 is not.
+- **THE RING IS PER ACCOUNT (2026-10-03, board 2).** The single set of `usageRing*` globals is now
+  `UsageRing usageRings[MAX_LINKS]` (`owner[14]` key, `pct[]`, `at[]`, `count`, `head`, `last`,
+  `wasStale`). `usageRingsSampleAll()` runs on the 1s tick and samples EVERY account's own
+  `usageAcct[a]` into the ring found by its account key (`usageRingFor`), selected or not, so an
+  account you are not looking at keeps filling. A ring is reclaimed only when free or its owner is
+  no longer a live account, and a reclaimed ring is always reset. The slope, span, hash and
+  sparkline all read `usageRingSelected()` (an empty ring when nothing is selected), so one
+  account's history can never be drawn as another's or feed its burn estimate; a switch bumps the
+  chrome bust, which resets `spark1Cache`. Offline-measured (`usage-trend-check.py`, 117
+  assertions, mirror 12a-12f proves alternating selection leaves each ring's slope and contents
+  untouched, structural 9a-9l bind the real bodies, 14 mutations each failed by name).
+  **Measured on glass, board 2, 2026-10-03, 11 minutes after the flash, two real Macs on two
+  accounts:** `mac` (0% / 9%) drew its OWN flat-at-zero sparkline and `pro` (19% / 21%, matching
+  `host.log`'s `5h=19% 7d=21%` the same minute) drew its OWN line at ~18-19%, both captioned
+  `LAST 10M`; no 0% sample appeared in `pro`'s series and no 18-19% sample in `mac`'s, which the
+  old single ring would have interleaved (shots 2026-10-03T09-33-38 and 09-33-46). The slot order
+  had swapped between captures and the selection followed the KEY, as designed. **NOT measured:**
+  a full 150-minute ring, the `USAGE_RING_DROP_PCT` clear across an account switch on glass, and
+  board 1, which has no ring (`BOARD_USAGE_V2` is 0) and has not been looked at on glass at all.
+  **Known limit - one-time, harmless, NOT migrated:** updating a Mac's host changes that Mac's
+  account key from `'@'`+`hostId` (an old host sends no `acct`) to its `acct` hash. To board 2
+  that is a new account, so its ring starts empty once (~10 minutes of "no history" while two
+  samples accrue; the old key's ring is reclaimed when no live Mac maps to it) and a selection
+  held on the old key falls back to account 0 once (then latches the new key). No migration
+  exists because the device cannot know that `'@'`+`hostId` and the new hash are one account.
+  A second, related limit: the host's independent `OAUTH_POLL_INTERVAL_MS` account-key refresh
+  keeps running through an OAuth back-off, so a `/login` to a different account during a
+  back-off publishes the OLD account's cached quota under the NEW key until the next real poll.
+  `pollOauthUsage()` itself re-reads the key only beside a real fetch, so it adds no relabel.
 - **A staleness EDGE clears the ring, never the level.** The clock keeps running while the number
   does not, so samples either side of the gap are not one series — but testing the LEVEL would
   clear the ring on every one of the 5s ticks it spends stale, which is the ring it is trying to

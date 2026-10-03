@@ -857,6 +857,18 @@ struct Usage {
   long cxWindowMin = -1;
   long cxAgeSec = -1;
 } usage;
+// Declared here rather than left to Arduino's generated prototypes, which land
+// above this struct - a signature naming Usage will not compile there (the same
+// reason sessionSortsBefore() is forward-declared). Defined in usage.ino.
+static bool usageHasClaude(const Usage& u);
+// The USAGE tab's account selection, DEFINED in usage.ino - which the concatenated
+// build places after this file, so the USAGEACCT handler in processCompletedLine()
+// needs them declared here (functions get Arduino's generated prototypes; globals
+// do not).
+extern int  usageAcctCount;
+extern int  usageAcctSelIdx;
+extern char usageAcctSel[];
+extern int  usageSourceLink;
 
 // ---------- Per-Mac link state ----------
 // One device serves two Macs at once, and almost everything a payload carries
@@ -873,6 +885,12 @@ struct HostLink {
   char  hostId[12] = "";
   char  tag[8] = "";
   char  emoji[12] = "";  // icon name from "hostEmoji", e.g. "rocket"; "" = none
+  // Which Claude account this Mac's quota belongs to: the host's 8-hex hash of its
+  // accountUuid ("acct"), "" from a host too old to send one. Two links are ONE
+  // account only when both are non-empty and equal - see linksShareAccount().
+  char  acct[12] = "";
+  // The person's own name for that account (DECKHAND_ACCOUNT_TAG), "" = unnamed.
+  char  acctTag[8] = "";
   unsigned long lastPayloadMillis = 0;
   bool  remoteAnswer = true;
   int   sessionsTotal = 0;
@@ -4705,18 +4723,18 @@ void handleTouch() {
     return;
   }
 
-  // USAGE: a tap on the cards pages between the Macs' OWN readings, because the
-  // tab otherwise shows only whichever reading is freshest and gives you no way
-  // to ask what the other Mac thinks. Inert below two live links
-  // (usageCyclePin() returns false), so this adds nothing to the ordinary
-  // single-Mac tab. It sits after the footer branch, so the five-tap easter egg
-  // keeps its door. Repainting goes through renderUsageTab()'s own
-  // source/pin cache bust rather than a direct drawUsageStatic() here - calling
-  // both would repaint the chrome twice, which is the double-draw this file's
-  // redraw discipline exists to prevent.
+  // USAGE: a tap on the cards pages between ACCOUNTS - each Claude account's own
+  // figures, merged freshest-wins only among the Macs signed into it (see
+  // mergeUsage()). Inert below two accounts (usageCycleAccount() returns false),
+  // so two Macs on ONE account stay one page, and the ordinary single-Mac tab
+  // gains nothing. It sits after the footer branch, so the five-tap easter egg
+  // keeps its door. Repainting goes through renderUsageTab()'s own source cache
+  // bust rather than a direct drawUsageStatic() here - calling both would repaint
+  // the chrome twice, which is the double-draw this file's redraw discipline
+  // exists to prevent.
   if (currentTab == TAB_USAGE && sy >= CONTENT_Y && everReceived) {
-    if (usageCyclePin()) {
-      mergeUsage();       // move the newly selected Mac's figures into `usage`
+    if (usageCycleAccount()) {
+      mergeUsage();       // move the newly selected account's figures into `usage`
       renderUsageTab();
     }
     return;
@@ -5084,6 +5102,8 @@ void handleLine(const String& line) {
     hostLinks[curLink].lastPayloadMillis = millis();
     copyField(hostLinks[curLink].tag, sizeof(hostLinks[curLink].tag), doc["hostTag"] | "");
     copyField(hostLinks[curLink].emoji, sizeof(hostLinks[curLink].emoji), doc["hostEmoji"] | "");
+    copyField(hostLinks[curLink].acct, sizeof(hostLinks[curLink].acct), doc["acct"] | "");
+    copyField(hostLinks[curLink].acctTag, sizeof(hostLinks[curLink].acctTag), doc["acctTag"] | "");
 #if BOARD_HISTORY_SCROLL
     // The credential a RESUME is signed against, published by THIS Mac in
     // THIS tick - see HostLink::resumeNonce. Stored per link because each Mac
@@ -5556,23 +5576,29 @@ void handleLine(const String& line) {
     return;
   }
 
-  usage.fiveHourPct = doc["fiveHourPct"].isNull() ? -1 : (int) round((double) doc["fiveHourPct"]);
-  usage.fiveHourResetInMin = doc["fiveHourResetInMin"].isNull() ? -1 : (long) doc["fiveHourResetInMin"];
-  usage.sessionTokens = doc["sessionTokens"] | 0UL;
-  usage.sevenDayPct = doc["sevenDayPct"].isNull() ? -1 : (int) round((double) doc["sevenDayPct"]);
-  usage.sevenDayResetInMin = doc["sevenDayResetInMin"].isNull() ? -1 : (long) doc["sevenDayResetInMin"];
-  usage.weekAllTokens = doc["weekAllTokens"] | 0UL;
-  usage.weekFableTokens = doc["weekFableTokens"] | 0UL;
-  usage.weekFablePct = doc["weekFablePct"].isNull() ? -1 : (int) round((double) doc["weekFablePct"]);
-  usage.quotaAgeSec = doc["quotaAgeSec"].isNull() ? -1 : (long) doc["quotaAgeSec"];
-  usage.cxPct = doc["cxPct"].isNull() ? -1 : (int) round((double) doc["cxPct"]);
-  usage.cxResetInMin = doc["cxResetMin"].isNull() ? -1 : (long) doc["cxResetMin"];
-  usage.cxWindowMin = doc["cxWin"].isNull() ? -1 : (long) doc["cxWin"];
-  usage.cxAgeSec = doc["cxAgeSec"].isNull() ? -1 : (long) doc["cxAgeSec"];
-  // Park this Mac's own reading in its link, then derive the global "usage"
-  // (and the Codex row) from whichever link's reading is freshest - see
-  // mergeUsage() in usage.ino.
-  if (curLink >= 0) hostLinks[curLink].usage = usage;
+  Usage u;
+  u.fiveHourPct = doc["fiveHourPct"].isNull() ? -1 : (int) round((double) doc["fiveHourPct"]);
+  u.fiveHourResetInMin = doc["fiveHourResetInMin"].isNull() ? -1 : (long) doc["fiveHourResetInMin"];
+  u.sessionTokens = doc["sessionTokens"] | 0UL;
+  u.sevenDayPct = doc["sevenDayPct"].isNull() ? -1 : (int) round((double) doc["sevenDayPct"]);
+  u.sevenDayResetInMin = doc["sevenDayResetInMin"].isNull() ? -1 : (long) doc["sevenDayResetInMin"];
+  u.weekAllTokens = doc["weekAllTokens"] | 0UL;
+  u.weekFableTokens = doc["weekFableTokens"] | 0UL;
+  u.weekFablePct = doc["weekFablePct"].isNull() ? -1 : (int) round((double) doc["weekFablePct"]);
+  u.quotaAgeSec = doc["quotaAgeSec"].isNull() ? -1 : (long) doc["quotaAgeSec"];
+  u.cxPct = doc["cxPct"].isNull() ? -1 : (int) round((double) doc["cxPct"]);
+  u.cxResetInMin = doc["cxResetMin"].isNull() ? -1 : (long) doc["cxResetMin"];
+  u.cxWindowMin = doc["cxWin"].isNull() ? -1 : (long) doc["cxWin"];
+  u.cxAgeSec = doc["cxAgeSec"].isNull() ? -1 : (long) doc["cxAgeSec"];
+  // Park this Mac's own reading in its link and derive the global `usage` from the
+  // SELECTED account only - see mergeUsage(), which now REPLACES `usage` whole. The
+  // old order (write the global here, then let mergeUsage() overwrite it only when it
+  // found a source) is how a tick with no Claude source left stale numbers on screen:
+  // the post-prune re-merge kept whatever the pre-prune merge had copied in from the
+  // link that just left. A host with no hostId (curLink < 0) predates multi-Mac and
+  // has no link to park in, so it still drives the global directly.
+  if (curLink >= 0) hostLinks[curLink].usage = u;
+  else usage = u;
   mergeUsage();
 
   if (!doc["hostSecondsSinceMidnight"].isNull()) {
@@ -7468,6 +7494,75 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     int t = buf.substring(4).toInt();
     if (t >= 0 && t < TAB_COUNT) switchTab((Tab) t);
     else Serial.printf("TAB refused: %d is out of range (0..%d)\n", t, TAB_COUNT - 1);
+  } else if (buf.startsWith("USAGEACCT")) {
+    // SELECTS WHICH CLAUDE ACCOUNT THE USAGE TAB SHOWS, so a capture can see an
+    // account other than the first - nothing on the Mac can tap the card. An
+    // ABSOLUTE index (0-based, slot order - the order a tap pages through), never
+    // "next": the host delivers every command over both transports, and a relative
+    // step would toggle there and back on a cabled board. Idempotent, so it is not
+    // deduped - the second copy re-selects the same key and the bust finds nothing
+    // changed. No earlier verb in this chain is a prefix of it (USAGE is not one).
+    //
+    // THE SURFACE SET IS WIDER THAN TAB's, DELIBERATELY. TAB refuses only under the
+    // three surfaces with their own teardown, because switchTab() itself takes the
+    // icon grid and the pairing panel down - so TAB is an escape from those. This
+    // verb calls no switchTab(): it repaints the USAGE cards IN PLACE, so over the
+    // icon grid, the pairing panel, the octopus or the voice card it would paint the
+    // tab into a screen whose flag still absorbs every tick - PAGE's freeze, one verb
+    // along. So it refuses under every surface handleLine() itself declines to
+    // render the tab under. The refusal NAMES the surface - "a surface is up" with
+    // seven candidates, two of them (the mic bar, the voice card) not full-screen at
+    // all, is a refusal that does not say its cause. ONE `if`, with only the
+    // board-specific TERMS behind their guards - never a duplicated statement per
+    // arm (CLAUDE.md).
+    String arg = buf.length() > 9 ? buf.substring(9) : String("");
+    arg.trim();
+    const char* surface = composeActive   ? "compose panel"
+                        : readerActive    ? "full-text reader (READTEST off)"
+                        : histActive      ? "history reader"
+                        : emojiTestActive ? "icon grid (EMOJITEST off)"
+                        : octoActive      ? "octopus"
+                        : voiceCardActive ? "voice card"
+                        : micProcessing   ? "mic processing bar"
+                        : nullptr;
+#if BOARD_HISTORY_SCROLL
+    if (!surface && scrollActive) surface = "transcript (SCROLLCLOSE)";
+#endif
+#if BOARD_HAS_WIRELESS_PAIR
+    if (!surface && pairPanelActive) surface = "pairing panel";
+#endif
+    if (surface) {
+      Serial.printf("USAGEACCT refused: the %s is up over the USAGE cards (repainting them "
+                    "would paint into it)\n", surface);
+      buf = "";
+      return;
+    }
+    if (currentTab != TAB_USAGE) {
+      Serial.println("USAGEACCT refused: USAGE is not the live tab (send TAB 0 first)");
+      buf = "";
+      return;
+    }
+    // Digits only, and non-empty: toInt() reads "x" and "" as 0, which would select
+    // the first account and report success for a request that named nothing.
+    bool numeric = arg.length() > 0;
+    for (unsigned int i = 0; i < arg.length(); i++)
+      if (arg[i] < '0' || arg[i] > '9') numeric = false;
+    if (!numeric || !usageSelectAccount(arg.toInt())) {
+      if (usageAcctCount == 0)
+        Serial.printf("USAGEACCT refused: \"%s\" - there are no accounts with a reading yet\n",
+                      arg.c_str());
+      else
+        Serial.printf("USAGEACCT refused: \"%s\" is not an account index (0..%d)\n",
+                      arg.c_str(), usageAcctCount - 1);
+      buf = "";
+      return;
+    }
+    mergeUsage();
+    renderUsageTab();
+    // idx= and count=, never "%d/%d": a 0-based index over a count reads as a
+    // 1-based "1 of 2" for what is the SECOND of two.
+    Serial.printf("USAGEACCT idx=%d count=%d key=%s label=%s src=%d\n", usageAcctSelIdx,
+                  usageAcctCount, usageAcctSel, usageAcctLabel(), usageSourceLink);
   } else if (buf.startsWith("DETAIL")) {
     // THE SESSION DETAIL CARD, PUT ON THE GLASS FROM THE MAC - and until this
     // existed there was NO WAY to do that. TAB switches tabs, PAGE is SETTINGS
@@ -9091,9 +9186,16 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // can never pick this synthetic link (mergeUsage only picks a source
     // that reports cxPct >= 0), so the Codex row's OWN tag lane - a
     // different draw call from the Claude cards' - would never actually get
-    // exercised by this harness even though the Claude cards were. cxAgeSec
-    // of 1 wins the freshness race against whatever the real Mac's Codex
-    // poll last reported (usually minutes to hours old).
+    // exercised by this harness even though the Claude cards were.
+    // And it names its own ACCOUNT, "acct":"feedacct" - invalid hex ON PURPOSE:
+    // a real host's acct is an 8-hex hash, so this one can never equal it, and the
+    // synthetic Mac is ALWAYS a second account (two pages on the USAGE tab, the
+    // header label shown, USAGEACCT 1 selecting it) - even against a NEW host whose
+    // real acct is present. Without it, an acct-less link is still its own account
+    // (keyed "@feedfeed"), but saying so in the payload is what exercises the real
+    // acct path rather than the old-host fallback. Being its own account is also
+    // why its cxAgeSec of 1 no longer races the real Mac's Codex reading: each
+    // account's Codex is merged only among its own Macs.
     int n = buf.substring(9).toInt();
     if (n < 0) n = 0;
     // sessionSlotCount, not MAX_SESSIONS: this harness is the ONLY way to put a
@@ -9102,7 +9204,8 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // untestable from the Mac - and a capture is the only instrument that can see
     // whether the rows landed where the arithmetic says they did.
     if (n > sessionSlotCount) n = sessionSlotCount;
-    String line = "{\"hostId\":\"feedfeed\",\"hostTag\":\"studio\",\"remoteAnswer\":true,"
+    String line = "{\"hostId\":\"feedfeed\",\"hostTag\":\"studio\",\"acct\":\"feedacct\","
+                  "\"remoteAnswer\":true,"
                   "\"fiveHourPct\":11,\"sevenDayPct\":22,\"quotaAgeSec\":1,"
                   "\"cxPct\":33,\"cxResetMin\":120,\"cxWin\":10080,\"cxAgeSec\":1,"
                   "\"sessionsTotal\":" + String(n) + ",\"sessions\":[";
@@ -9536,8 +9639,8 @@ void loop() {
     sampleBattery();
     battTrendSample();
 #if BOARD_USAGE_V2
-    usageRingSample();   // self-rate-limits to USAGE_RING_STEP_MS; the 1s outer
-                         // tick just gives it a chance to look
+    usageRingsSampleAll();   // EVERY account's own ring, each self-rate-limited to
+                             // USAGE_RING_STEP_MS by its own r.last; 1s is a chance to look
 #endif
 #if !BOARD_USES_TFT_ESPI
     // The charging counterpart, BOARD 2 ONLY. Each returns immediately unless the

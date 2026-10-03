@@ -48,32 +48,75 @@ void resetUsageCaches() {
   fableBarCache = -2;
 #endif
 }
-// Which link (Mac) supplied the figures currently on screen - see mergeUsage().
-// -1 means no link has a usable reading yet.
+// Which link (Mac) supplied the SELECTED account's figures - see mergeUsage().
+// -1 means that account has no usable reading for that source.
 int usageSourceLink = -1;
 int cxSourceLink = -1;
-// Which Mac the tab is PINNED to, by hostId rather than slot index - a slot is
-// reused when a link drops and reconnects, and pinning "slot 0" would then
-// silently follow whoever landed there. Empty = AUTO, meaning freshest-wins,
-// which is the resting state and what a reboot lands on: a page choice is not
-// worth an NVS write, and AUTO is the right default anyway.
-char usagePinHostId[12] = "";
-// Both Macs poll the same account, so the quota is the same number twice - the
-// useful difference between them is AGE. Take the fresher reading per source
-// (Claude by quotaAgeSec, Codex independently by cxAgeSec, which is already how
-// the Codex row's staleness is judged), and remember which Mac it came from so
-// the card can say. Two pollers therefore back each other up: a Mac in a long
-// OAuth back-off is simply out-aged by the other.
-//
-// A negative age means "never measured", which must never win against a real
-// reading - and must not read as fresher than one, which is what a plain
-// comparison on -1 would do.
-void mergeUsage() {
-  int best = -1, bestCx = -1;
+
+// ---------- Accounts ----------
+// The two Macs this device serves may be signed into DIFFERENT Claude accounts, and
+// then their quotas are two numbers, not one number measured twice. The host names
+// the account (`acct`, an opaque hash); two links are one account only when BOTH name
+// one and the names agree. A link with no `acct` is its own account: merging two Macs
+// on a guess would show one account's quota under the other's name, which is the
+// defect this exists to remove. Two OLD hosts on one account therefore show as two
+// accounts until updated - visible and harmless, unlike a silent mix.
+bool linksShareAccount(int a, int b) {
+  if (a == b) return true;
+  const char* x = hostLinks[a].acct;
+  const char* y = hostLinks[b].acct;
+  return x[0] && y[0] && strcmp(x, y) == 0;
+}
+// The account's identity as one string. '@' + hostId for an acct-less link: '@' is
+// not a hex digit, so it can never equal a real acct (MULTITEST's hostId "feedfeed"
+// is valid hex and would otherwise collide with an acct of the same spelling).
+void accountKeyFor(int link, char* out, size_t n) {
+  if (hostLinks[link].acct[0]) strlcpy(out, hostLinks[link].acct, n);
+  else snprintf(out, n, "@%s", hostLinks[link].hostId);
+}
+
+int   usageAcctCount = 0;
+int   usageAcctFirstLink[MAX_LINKS];   // lowest-slot link of each account, slot order
+Usage usageAcct[MAX_LINKS];            // each account's own merged reading
+int   usageAcctSrc[MAX_LINKS];         // ...and the links that supplied it
+int   usageAcctCxSrc[MAX_LINKS];
+int   usageAcctSelIdx = -1;            // index into the above; -1 = no account
+// The selected account BY IDENTITY, not by index: a slot is reused when a link drops
+// and another Mac connects, and an index would silently follow whoever landed there.
+// "" = no account yet (or the selected one's Macs all stopped talking): mergeUsage()
+// shows account 0 and LATCHES its key here in the same call. A reboot lands on "".
+char  usageAcctSel[14] = "";           // '@' + an 11-char hostId + NUL fits in 13
+
+// ANY Claude reading - a percentage OR a token count. A Mac whose OAuth poll has never
+// succeeded (or is in a 429 back-off) still sends its locally counted tokens with null
+// percentages, and the cards then show "--" beside real token totals. Counting only the
+// percentages here would drop that Mac from the account list and blank its tokens too.
+// A token-only reading carries quotaAgeSec -1, so it can never out-age a real one.
+static bool usageHasClaude(const Usage& u) {
+  return u.fiveHourPct >= 0 || u.sevenDayPct >= 0 ||
+         u.sessionTokens > 0 || u.weekAllTokens > 0 || u.weekFableTokens > 0;
+}
+// Is any Mac still TALKING TO US on account `key`, reading or not? What keeps a
+// selection alive through a tick with no reading - see mergeUsage().
+static bool usageAccountKeyLive(const char* key) {
+  char k[14];
   for (int i = 0; i < MAX_LINKS; i++) {
     if (!hostLinks[i].used) continue;
+    accountKeyFor(i, k, sizeof(k));
+    if (strcmp(k, key) == 0) return true;
+  }
+  return false;
+}
+
+// Freshest reading per source WITHIN account a. Claude by quotaAgeSec, Codex
+// independently by cxAgeSec. A negative age means "never measured" and must never win
+// against a real reading, which a plain comparison on -1 would let it do.
+static void mergeAccount(int a) {
+  int rep = usageAcctFirstLink[a], best = -1, bestCx = -1;
+  for (int i = 0; i < MAX_LINKS; i++) {
+    if (!hostLinks[i].used || !linksShareAccount(rep, i)) continue;
     const Usage& u = hostLinks[i].usage;
-    if (u.fiveHourPct >= 0 || u.sevenDayPct >= 0) {
+    if (usageHasClaude(u)) {
       if (best < 0 || (u.quotaAgeSec >= 0 &&
           (hostLinks[best].usage.quotaAgeSec < 0 ||
            u.quotaAgeSec < hostLinks[best].usage.quotaAgeSec))) best = i;
@@ -84,71 +127,120 @@ void mergeUsage() {
            u.cxAgeSec < hostLinks[bestCx].usage.cxAgeSec))) bestCx = i;
     }
   }
-  // A pin overrides freshest-wins, PER SOURCE and with a fallback: pinning a
-  // Mac that has no Codex reading must not blank the Codex row, so each source
-  // keeps the freshest it found when the pinned Mac has nothing for it. The pin
-  // is DROPPED the moment its Mac stops talking to us, for the same reason a
-  // quiet link's session rows are dropped rather than dimmed - otherwise the
-  // tab sits on a departed Mac's frozen numbers and looks live.
-  if (usagePinHostId[0]) {
-    int pin = linkForHost(usagePinHostId, false);
-    if (pin < 0) {
-      usagePinHostId[0] = '\0';
-    } else {
-      const Usage& p = hostLinks[pin].usage;
-      if (p.fiveHourPct >= 0 || p.sevenDayPct >= 0) best = pin;
-      if (p.cxPct >= 0) bestCx = pin;
-    }
-  }
-  usageSourceLink = best;
-  cxSourceLink = bestCx;
+  Usage m;   // defaults are the "no reading" sentinels
   if (best >= 0) {
     const Usage& u = hostLinks[best].usage;
-    usage.fiveHourPct = u.fiveHourPct;      usage.fiveHourResetInMin = u.fiveHourResetInMin;
-    usage.sevenDayPct = u.sevenDayPct;      usage.sevenDayResetInMin = u.sevenDayResetInMin;
-    usage.sessionTokens = u.sessionTokens;  usage.weekAllTokens = u.weekAllTokens;
-    usage.weekFableTokens = u.weekFableTokens; usage.weekFablePct = u.weekFablePct;
-    usage.quotaAgeSec = u.quotaAgeSec;
+    m.fiveHourPct = u.fiveHourPct;      m.fiveHourResetInMin = u.fiveHourResetInMin;
+    m.sevenDayPct = u.sevenDayPct;      m.sevenDayResetInMin = u.sevenDayResetInMin;
+    m.sessionTokens = u.sessionTokens;  m.weekAllTokens = u.weekAllTokens;
+    m.weekFableTokens = u.weekFableTokens; m.weekFablePct = u.weekFablePct;
+    m.quotaAgeSec = u.quotaAgeSec;
   }
+  // NO CROSS-ACCOUNT FALLBACK for Codex. The old pin borrowed another Mac's Codex
+  // reading when the pinned Mac had none; with two accounts that puts one person's
+  // Codex under the other account's header. An account with no Codex hides the row.
   if (bestCx >= 0) {
     const Usage& u = hostLinks[bestCx].usage;
-    usage.cxPct = u.cxPct;  usage.cxResetInMin = u.cxResetInMin;
-    usage.cxWindowMin = u.cxWindowMin;  usage.cxAgeSec = u.cxAgeSec;
+    m.cxPct = u.cxPct;  m.cxResetInMin = u.cxResetInMin;
+    m.cxWindowMin = u.cxWindowMin;  m.cxAgeSec = u.cxAgeSec;
   }
+  usageAcct[a] = m;
+  usageAcctSrc[a] = best;
+  usageAcctCxSrc[a] = bestCx;
 }
-// Tap the content area to read the OTHER Mac's own figures. Returns true only
-// when the page actually moved, so the caller repaints nothing otherwise.
-// Cycles in slot order over links that have SOME reading, wrapping, and does
-// nothing at all with fewer than two - so on an ordinary single-Mac setup a tap
-// on this tab stays as inert as it was before this existed.
-bool usageCyclePin() {
-  int live[MAX_LINKS], n = 0;
+
+void mergeUsage() {
+  // Distinct accounts, in slot order, among links with ANY reading - a Mac that has
+  // measured nothing yet would only add an empty page to the tap cycle.
+  usageAcctCount = 0;
   for (int i = 0; i < MAX_LINKS; i++) {
     if (!hostLinks[i].used) continue;
     const Usage& u = hostLinks[i].usage;
-    if (u.fiveHourPct >= 0 || u.sevenDayPct >= 0 || u.cxPct >= 0) live[n++] = i;
+    if (!usageHasClaude(u) && u.cxPct < 0) continue;
+    bool seen = false;
+    for (int a = 0; a < usageAcctCount; a++)
+      if (linksShareAccount(usageAcctFirstLink[a], i)) { seen = true; break; }
+    if (!seen) usageAcctFirstLink[usageAcctCount++] = i;
   }
-  if (n < 2) return false;
-  // N+1 states, not N: each live link, then AUTO (freshest-wins), then round
-  // again. The auto step is not a nicety - without it every tap set a pin and
-  // NOTHING ever cleared one except the pinned Mac disappearing, so after a
-  // single tap you were stuck pinned forever and the indicator was permanently
-  // lit. An indicator that can never turn off distinguishes nothing.
-  //
-  // AUTO is represented as index n (one past the last link), so the whole cycle
-  // is one modular step and there is no special case to forget.
-  int cur = n; // no pin = AUTO = the last slot in the cycle
-  if (usagePinHostId[0]) {
-    int pinned = linkForHost(usagePinHostId, false);
-    for (int i = 0; i < n; i++) if (live[i] == pinned) { cur = i; break; }
+  for (int a = 0; a < usageAcctCount; a++) mergeAccount(a);
+
+  // The selection, by key. A selected account that is not in the list DISPLAYS the
+  // first in the SAME call - holding it would keep a departed Mac's frozen numbers on
+  // screen. But the KEY is forgotten only when no Mac on that account is talking to us
+  // any more (the old pin's rule: cleared when its Mac stops talking). One tick with
+  // no reading - the first tick after a host restart - must not snap the page back to
+  // account 0 for good; the account reappears selected when its reading returns.
+  int sel = usageAcctCount > 0 ? 0 : -1;
+  if (usageAcctSel[0]) {
+    int found = -1;
+    char k[14];
+    for (int a = 0; a < usageAcctCount; a++) {
+      accountKeyFor(usageAcctFirstLink[a], k, sizeof(k));
+      if (strcmp(k, usageAcctSel) == 0) { found = a; break; }
+    }
+    if (found >= 0) sel = found;
+    else if (!usageAccountKeyLive(usageAcctSel)) usageAcctSel[0] = '\0';
   }
-  int next = (cur + 1) % (n + 1);
-  if (next == n) {
-    usagePinHostId[0] = '\0'; // back to freshest-wins
-  } else {
-    strlcpy(usagePinHostId, hostLinks[live[next]].hostId, sizeof(usagePinHostId));
-  }
+  // THE LATCH. With no key (nobody has tapped, or the key was just forgotten above)
+  // the page shows account 0 - whichever Mac holds the lower SLOT. Slots are not
+  // identities: the two Macs swap them (seen twice on glass, 2026-10-03), and an
+  // unlatched page then silently became the OTHER account's - the original defect,
+  // only slower. So the account on screen becomes the selection, by key, the moment
+  // it is shown; from then on the ordinary by-key rules above hold it.
+  if (!usageAcctSel[0] && sel >= 0)
+    accountKeyFor(usageAcctFirstLink[sel], usageAcctSel, sizeof(usageAcctSel));
+  usageAcctSelIdx = sel;
+
+  // No Mac at all: leave `usage` alone. A host with no hostId drives it directly
+  // (see the parse), and the no-host screen owns this state. THIS GUARD MUST STAY
+  // usedLinkCount(), NOT usageAcctCount or sel: Macs still talking with no reading
+  // between them is NOT "no Mac" - the parse no longer writes the global for a link,
+  // so returning here then would leave a departed account's numbers up for good.
+  if (usedLinkCount() == 0) { usageSourceLink = cxSourceLink = -1; return; }
+  Usage none;
+  const Usage& m = sel >= 0 ? usageAcct[sel] : none;
+  usageSourceLink = sel >= 0 ? usageAcctSrc[sel] : -1;
+  cxSourceLink    = sel >= 0 ? usageAcctCxSrc[sel] : -1;
+  // Whole-struct copy, so a source that vanished CLEARS its figures rather than
+  // leaving the last-parsed payload's numbers on screen.
+  usage = m;
+}
+
+// Tap the content area to show the NEXT account's own figures. Returns true only
+// when the page actually moved, so the caller repaints nothing otherwise. Inert below
+// two accounts - two Macs on one account are one page, as they should be.
+bool usageCycleAccount() {
+  if (usageAcctCount < 2) return false;
+  return usageSelectAccount((usageAcctSelIdx + 1) % usageAcctCount);
+}
+// Select account idx by key. Idempotent, so USAGEACCT's double delivery is harmless.
+// Returns false only for an out-of-range idx.
+bool usageSelectAccount(int idx) {
+  if (idx < 0 || idx >= usageAcctCount) return false;
+  accountKeyFor(usageAcctFirstLink[idx], usageAcctSel, sizeof(usageAcctSel));
   return true;
+}
+// The link whose name the card header shows for the SELECTED account: the Claude
+// source, or - when the account has only a Codex reading, so usageSourceLink is -1 -
+// its first link, so the header still says whose page this is. -1 = no account.
+static int usageAcctLabelLink() {
+  return usageSourceLink >= 0 ? usageSourceLink
+       : (usageAcctSelIdx >= 0 ? usageAcctFirstLink[usageAcctSelIdx] : -1);
+}
+// The SELECTED account's name: the person's own DECKHAND_ACCOUNT_TAG when its Mac
+// published one, else the source Mac's tag - with one Mac per account (today's
+// MAX_LINKS) the Mac IS the account, so its tag already says which one. ASCII by
+// construction: both pass through the host's macTag(), which transliterates.
+const char* usageAcctLabel() {
+  int src = usageAcctLabelLink();
+  if (src < 0) return "";
+  return hostLinks[src].acctTag[0] ? hostLinks[src].acctTag : linkTag(src);
+}
+// Did the person NAME the selected account? A name beats the Mac's icon in the card
+// header, because the name is what tells two accounts apart and an icon names a Mac.
+bool usageAcctNamed() {
+  int src = usageAcctLabelLink();
+  return src >= 0 && hostLinks[src].acctTag[0];
 }
 // THE SIGNATURE ITSELF IS #if'd, NOT DEFAULTED - and that is deliberate,
 // proven by injection. A 4th `h` argument defaulting to CARD_H moved board
@@ -170,64 +262,65 @@ void drawCardChrome(int y0, const char* label, const char* tag) {
   tft.setTextColor(COLOR_LABEL, COLOR_CARD);
   tft.setTextDatum(TL_DATUM);
   tft.drawString(label, CARD_X + PAD, y0 + CARD_LABEL_Y);  // usage cards have their own inset
-  // Which Mac's reading this is. Only drawn with two Macs actually TALKING TO
-  // US right now: with one Mac it is noise, and a label that appears and
-  // disappears is how you notice the second Mac arriving. Gated on used
-  // hostLinks[] entries, not transport count - USB and BLE are routinely the
-  // SAME Mac (the ordinary state of this device is one Mac reachable both
-  // ways at once: via=usb,ble to one Mac), so bleLinkCount() +
-  // (usbLinkActive()?1:0) would read 2 with nothing to disambiguate. Right-
-  // aligned in the SAME row as the label, because every other row on this
+  // WHICH ACCOUNT this page is. Only drawn with more than one Claude ACCOUNT
+  // present (usageAcctCount, see mergeUsage()) - not with more than one Mac: two
+  // Macs signed into ONE account are one page, and naming a Mac there tells the
+  // reader nothing they can act on. With one account it is noise, and a label
+  // that appears and disappears is how you notice the second account arriving.
+  // usageAcctCount already counts accounts among USED hostLinks[] entries, never
+  // transports - USB and BLE are routinely the SAME Mac (via=usb,ble to one Mac).
+  // Right-aligned in the SAME row as the label, because every other row on this
   // card is spoken for (the foot row's clear box already had to move off the
   // border, and nothing on a card may end past CARD_H - 3 - each board's
   // header states where every band's clear box lands).
+  //
+  // A NAMED account (the person's DECKHAND_ACCOUNT_TAG) shows its NAME even when
+  // the Mac has an icon: the person named the account, and the name is what tells
+  // two accounts apart, where an icon names a computer. Unnamed, the label is the
+  // source Mac's tag (usageAcctLabel()), and an icon still wins over it as before.
   const int tagRight = CARD_X + CARD_W - PAD;
-  int cardEmoji = emojiIdForLink(usageSourceLink);
-  if (cardEmoji >= 0) {
-    // Icon shown whenever one is SET, unlike the text tag below: the tag is
-    // hidden with one Mac because a redundant 6-character word is noise, but
-    // an icon is personalisation rather than disambiguation - the user asked
-    // to tag THEIR computer, and it should show regardless of link count.
-    // Same convention the session rows already use.
+  // The icon reads the SAME link the label does (usageAcctLabelLink()): with an
+  // account whose only reading is Codex, usageSourceLink is -1 while the label
+  // falls back to the account's first link, and the two must not disagree.
+  int cardEmoji = emojiIdForLink(usageAcctLabelLink());
+  bool named = usageAcctCount > 1 && usageAcctNamed();
+  bool showIcon = cardEmoji >= 0 && !named;
+  bool showText = tag && *tag && usageAcctCount > 1;
+  if (showIcon) {
+    // Icon shown whenever one is SET (and the account was not named), unlike the
+    // text tag below: the tag is hidden with one account because a redundant
+    // 6-character word is noise, but an icon is personalisation rather than
+    // disambiguation - the user asked to tag THEIR computer, and it should show
+    // regardless of account count. Same convention the session rows already use.
     drawEmoji(cardEmoji, tagRight - MAC_EMOJI_SIZE, y0 + CARD_LABEL_Y, COLOR_CARD);
-    // Pinned-vs-auto, previously carried by the tag's colour, which a colour
-    // sprite cannot carry. A bar, not an underline: it sits ABOVE the glyph,
-    // inside the interior (the 2px border owns y0..y0+1, the label row starts
-    // at y0+CARD_LABEL_Y) - below the icon lands inside the hero number's own
-    // clear box. THE TIGHTEST SITE FOR THE ICON, on both boards: it spans
-    // CARD_LABEL_Y .. CARD_LABEL_Y + MAC_EMOJI_SIZE - 1, i.e. +6..+18 against
-    // board 1's hero at +20 (CARD_HERO_Y, 1 row clear) and +6..+21 against
-    // board 2's LIVE hero at +26 (NOW_HERO_Y, not the dead v1 CARD_HERO_Y -
-    // 4 rows clear). The bar is MAC_EMOJI_SIZE wide so it tracks the glyph
-    // it marks.
-    //
-    // COLOR_LABEL, not COLOR_ACCENT, and that was a real complaint rather than
-    // taste: in accent this read as a red-orange stripe over the icon and the
-    // first question it drew from a user was "why is there a red underline?" -
-    // an indicator whose meaning has to be asked about has already failed.
-    // COLOR_LABEL is a palette token, so applyTheme() follows the theme for
-    // free, AND it is the exact colour of the label text in this same row, so
-    // the mark reads as chrome rather than an alarm. PRESENCE is the carrier -
-    // which only carries information because the tap cycle can return to auto
-    // (see usageCyclePin); a bar that can never turn off signals nothing.
-    if (usagePinHostId[0]) {
-      tft.fillRect(tagRight - MAC_EMOJI_SIZE, y0 + CARD_PIN_BAR_Y, MAC_EMOJI_SIZE, 3, COLOR_LABEL);
-    }
-  } else if (tag && *tag && usedLinkCount() > 1) {
-    // Accent = PINNED, grey = AUTO (freshest wins), the same convention the
-    // settings controls use: accented once off the default. It is carried by
-    // COLOUR because there is no width to carry it in text - every other row on
-    // this card spans the full interior (hero, pace bar and stats all take
-    // CARD_W - 2*PAD), and against a 144px label ("WEEK - 7 DAY, ALL MODELS")
-    // a "1/2" beside a 6-char tag would start at x=154 and collide at 170.
-    // Colour is not the only carrier: the tag TEXT changes on every tap, which
-    // is what actually tells you the page moved.
-    tft.setTextColor(usagePinHostId[0] ? COLOR_ACCENT : COLOR_LABEL, COLOR_CARD);
+    // THE TIGHTEST SITE FOR THE ICON, on both boards: it spans CARD_LABEL_Y ..
+    // CARD_LABEL_Y + MAC_EMOJI_SIZE - 1, i.e. +6..+18 against board 1's hero at +20
+    // (CARD_HERO_Y, 1 row clear) and +6..+21 against board 2's LIVE hero at +26
+    // (NOW_HERO_Y, 4 rows clear). The pin bar that used to sit above it went with the
+    // pin: the tap now pages ACCOUNTS (usageCycleAccount()), and which account is
+    // shown is the card header's job, not a mark's.
+  } else if (showText) {
+    // Grey, always: the accent used to mean PINNED, and there is no pin any more -
+    // the tap pages accounts. The label TEXT changes when the page moves to another
+    // account, which is what tells you the page moved.
+    tft.setTextColor(COLOR_LABEL, COLOR_CARD);
     tft.setTextDatum(TR_DATUM);
     tft.drawString(tag, tagRight, y0 + CARD_LABEL_Y);
     tft.setTextDatum(TL_DATUM);
     tft.setTextColor(COLOR_LABEL, COLOR_CARD);
   }
+  // NO "N/M" INDICATOR, on either board, and no draw code for one. It would sit
+  // immediately left of the label or icon, and it fits on neither board beside the
+  // widest card label (BOARD_USAGE_ACCT_INDEX 0 in both headers, each quoting its
+  // overflow, re-derived by usage-geom-check.mjs from the parsed labels, HostLink's
+  // tag buffers and the face). So the changing label above is the only carrier.
+  // The draw is deliberately NOT written behind the flag: an arm no board compiles
+  // is code nothing has ever built (commands-check.mjs's section (8) rejects one),
+  // and a flag flipped to 1 over it would also need it to be right. Flipping the
+  // flag therefore stops the build here instead of silently drawing nothing.
+#if BOARD_USAGE_ACCT_INDEX
+#error "BOARD_USAGE_ACCT_INDEX 1: write the N/M draw in drawCardChrome() first - none exists, because no board fitted it"
+#endif
 }
 void drawFooterChrome() {
   tft.drawFastHLine(0, contentBottom(), tft.width(), COLOR_LABEL);
@@ -388,49 +481,127 @@ bool usageCodexShown() {
 // serves both the sparkline and the burn rate, which is what makes it worth its
 // DRAM - and it samples the 5-hour percentage only, because the week's burn uses
 // no history at all (see usageBurnMinutes).
-uint8_t       usageRingPct[USAGE_RING_SLOTS];
-unsigned long usageRingAt[USAGE_RING_SLOTS];
-int           usageRingCount = 0;
-int           usageRingHead  = 0;
-unsigned long usageRingLast  = 0;
-bool          usageRingWasStale = false;
+//
+// ONE RING PER ACCOUNT. A ring holds one quota's history; with two accounts on two
+// Macs a single ring interleaved two series, and USAGE_RING_DROP_PCT - derived for
+// two readings of ONE quota differing only in age - then either cleared it on every
+// swap or read the swing as a burst. Owned by account key; see usageRingFor().
+struct UsageRing {
+  char          owner[14] = "";   // an account key, accountKeyFor()'s 14 bytes
+  uint8_t       pct[USAGE_RING_SLOTS];
+  unsigned long at[USAGE_RING_SLOTS];
+  int           count = 0;
+  int           head  = 0;
+  unsigned long last  = 0;
+  bool          wasStale = false;
+};
+UsageRing usageRings[MAX_LINKS];
 
-void usageRingReset() {
-  usageRingCount = 0;
-  usageRingHead  = 0;
-  usageRingLast  = 0;
+// Declared here rather than left to Arduino's generated prototypes, which land
+// above the sketch's first function - long before this struct - so a signature
+// naming UsageRing would not compile there (the same reason usageHasClaude() and
+// sessionSortsBefore() are forward-declared). A declaration that exists is what
+// stops the generator emitting its own.
+void usageRingReset(UsageRing& r);
+UsageRing* usageRingFor(const char* key);
+const UsageRing& usageRingSelected();
+void usageRingSample(UsageRing& r, const Usage& u);
+
+void usageRingReset(UsageRing& r) { r.count = 0; r.head = 0; r.last = 0; }
+
+// The ring owned by `key`; else a FREE ring; else one whose owner no Mac is talking
+// to us on any more. TWO PASSES, free first, and the second asks
+// usageAccountKeyLive() - "is any linked Mac on that account" - NOT "is it among
+// usageAcctCount's accounts with a reading this tick". A linked Mac with no reading
+// (the first tick after a host restart, a 429 back-off) is still that account, the
+// selection deliberately stays on it (see mergeUsage()), and taking its ring would
+// wipe the history it returns to - while a free ring sat unused further along.
+// A reused ring is ALWAYS reset: another account's history is not this one's.
+// nullptr is unreachable: MAX_LINKS links carry at most MAX_LINKS live keys and
+// `key` is one of them, so at most MAX_LINKS - 1 rings belong to OTHER live keys.
+UsageRing* usageRingFor(const char* key) {
+  for (int i = 0; i < MAX_LINKS; i++)
+    if (strcmp(usageRings[i].owner, key) == 0) return &usageRings[i];
+  int pick = -1;
+  for (int i = 0; i < MAX_LINKS && pick < 0; i++)
+    if (!usageRings[i].owner[0]) pick = i;
+  for (int i = 0; i < MAX_LINKS && pick < 0; i++)
+    if (!usageAccountKeyLive(usageRings[i].owner)) pick = i;
+  if (pick < 0) return nullptr;
+  strlcpy(usageRings[pick].owner, key, sizeof(usageRings[pick].owner));
+  usageRingReset(usageRings[pick]);
+  usageRings[pick].wasStale = false;
+  return &usageRings[pick];
 }
 
-void usageRingSample() {
-  bool stale = usage.quotaAgeSec > QUOTA_STALE_SEC;
+// The SELECTED account's ring - what every reader below draws or fits. Looked up by
+// key, never claimed: only the sampler claims rings, so a reader can never hand an
+// account a ring (or reset one) as a side effect of drawing it.
+const UsageRing& usageRingSelected() {
+  static UsageRing empty;   // count 0: every reader already refuses below two samples
+  if (usageAcctSelIdx < 0) return empty;
+  char k[14];
+  accountKeyFor(usageAcctFirstLink[usageAcctSelIdx], k, sizeof(k));
+  for (int i = 0; i < MAX_LINKS; i++)
+    if (strcmp(usageRings[i].owner, k) == 0) return usageRings[i];
+  return empty;
+}
+
+void usageRingSample(UsageRing& r, const Usage& u) {
+  bool stale = u.quotaAgeSec > QUOTA_STALE_SEC;
   // A staleness EDGE clears, never the level. The clock keeps running while the
   // number does not, so samples either side of the gap are not one series - but
   // testing the level would clear the ring on every one of the 5s ticks it spends
   // stale, which is the ring it is trying to fill.
-  if (stale != usageRingWasStale) {
-    usageRingWasStale = stale;
-    if (stale) usageRingReset();
+  if (stale != r.wasStale) {
+    r.wasStale = stale;
+    if (stale) usageRingReset(r);
   }
-  if (stale || usage.fiveHourPct < 0) return;
+  if (stale || u.fiveHourPct < 0) return;
 
+  // The rate limit is PER RING, through r.last: each account's ring takes one
+  // sample per USAGE_RING_STEP_MS on its own clock.
   unsigned long now = millis();
-  if (usageRingLast != 0 && now - usageRingLast < USAGE_RING_STEP_MS) return;
+  if (r.last != 0 && now - r.last < USAGE_RING_STEP_MS) return;
 
-  // A DROP means the window turned over. Note this deliberately does NOT reset on
-  // a mergeUsage source-Mac switch: both Macs poll the same account, so their
-  // readings are the same measurement at different ages, and clearing 2.5 hours
-  // of history because a link aged out would throw away good data. The threshold
-  // is what separates the two - see USAGE_RING_DROP_PCT's derivation.
-  if (usageRingCount > 0) {
-    int prev = (int) usageRingPct[(usageRingHead + USAGE_RING_SLOTS - 1) % USAGE_RING_SLOTS];
-    if (usage.fiveHourPct <= prev - USAGE_RING_DROP_PCT) usageRingReset();
+  // A GAP clears, for the staleness edge's own reason: samples either side of it
+  // are not one series. An account is sampled only while it has a reading, so a
+  // Mac asleep overnight freezes its ring - not stale (its link was pruned, so no
+  // edge), and back in a NEW 5-hour window that may sit only a few points higher
+  // (2% last night, 5% this morning), which the drop test below cannot see. Without
+  // this the fit spans two windows and the caption claims "LAST 10.2H". The bound
+  // is USAGE_RING_GAP_SEC (= QUOTA_STALE_SEC, three ring steps) - see its header
+  // comment for why a normal step can never trip it.
+  if (r.count > 0 && now - r.last > (unsigned long) USAGE_RING_GAP_SEC * 1000UL) usageRingReset(r);
+
+  // A DROP means the window turned over. Within ONE account this deliberately does
+  // NOT reset when mergeAccount() switches source Mac: two Macs on one account poll
+  // the same quota, so their readings are the same measurement at different ages,
+  // and clearing 2.5 hours of history because a link aged out would throw away good
+  // data. The threshold is what separates the two - see USAGE_RING_DROP_PCT's
+  // derivation. DIFFERENT accounts never share a ring (usageRingsSampleAll() feeds
+  // each its own usageAcct[a]), so a cross-account swing never reaches this test.
+  if (r.count > 0) {
+    int prev = (int) r.pct[(r.head + USAGE_RING_SLOTS - 1) % USAGE_RING_SLOTS];
+    if (u.fiveHourPct <= prev - USAGE_RING_DROP_PCT) usageRingReset(r);
   }
 
-  usageRingLast = now;
-  usageRingPct[usageRingHead] = (uint8_t) usage.fiveHourPct;
-  usageRingAt[usageRingHead]  = now;
-  usageRingHead = (usageRingHead + 1) % USAGE_RING_SLOTS;
-  if (usageRingCount < USAGE_RING_SLOTS) usageRingCount++;
+  r.last = now;
+  r.pct[r.head] = (uint8_t) u.fiveHourPct;
+  r.at[r.head]  = now;
+  r.head = (r.head + 1) % USAGE_RING_SLOTS;
+  if (r.count < USAGE_RING_SLOTS) r.count++;
+}
+
+// Every account, every call - not just the one on screen - so switching shows real
+// history at once instead of an empty ring that takes 10 minutes to say anything.
+void usageRingsSampleAll() {
+  for (int a = 0; a < usageAcctCount; a++) {
+    char k[14];
+    accountKeyFor(usageAcctFirstLink[a], k, sizeof(k));
+    UsageRing* r = usageRingFor(k);
+    if (r) usageRingSample(*r, usageAcct[a]);
+  }
 }
 
 // Least squares over the whole ring, never endpoint-to-endpoint - the same reason
@@ -438,25 +609,26 @@ void usageRingSample() {
 // trend, and two endpoints give it full weight. x comes from the stored
 // timestamps rather than the slot index, because a missed poll leaves a real gap.
 bool usageRingSlope(float* slopeOut, int* riseOut, long* spanMinOut) {
-  if (usageRingCount < 2) return false;
-  int oldest = (usageRingHead + USAGE_RING_SLOTS - usageRingCount) % USAGE_RING_SLOTS;
-  int newest = (usageRingHead + USAGE_RING_SLOTS - 1) % USAGE_RING_SLOTS;
+  const UsageRing& r = usageRingSelected();
+  if (r.count < 2) return false;
+  int oldest = (r.head + USAGE_RING_SLOTS - r.count) % USAGE_RING_SLOTS;
+  int newest = (r.head + USAGE_RING_SLOTS - 1) % USAGE_RING_SLOTS;
   double sx = 0, sy = 0, sxx = 0, sxy = 0;
-  for (int i = 0; i < usageRingCount; i++) {
+  for (int i = 0; i < r.count; i++) {
     int idx = (oldest + i) % USAGE_RING_SLOTS;
     // Cast THEN divide, as battPctPerHourX10 does. Dividing in the unsigned-long
     // domain first truncates every x to a whole minute before the regression sees
     // it - self-consistent, but it quietly throws away precision the fit is there
     // to use, and a mirror written against it would enshrine the truncation.
-    double x = ((double) (usageRingAt[idx] - usageRingAt[oldest])) / 60000.0;
-    double y = (double) usageRingPct[idx];
+    double x = ((double) (r.at[idx] - r.at[oldest])) / 60000.0;
+    double y = (double) r.pct[idx];
     sx += x; sy += y; sxx += x * x; sxy += x * y;
   }
-  double den = (double) usageRingCount * sxx - sx * sx;
+  double den = (double) r.count * sxx - sx * sx;
   if (den == 0) return false;
-  *slopeOut   = (float) (((double) usageRingCount * sxy - sx * sy) / den);
-  *riseOut    = (int) usageRingPct[newest] - (int) usageRingPct[oldest];
-  *spanMinOut = (long) ((usageRingAt[newest] - usageRingAt[oldest]) / 60000UL);
+  *slopeOut   = (float) (((double) r.count * sxy - sx * sy) / den);
+  *riseOut    = (int) r.pct[newest] - (int) r.pct[oldest];
+  *spanMinOut = (long) ((r.at[newest] - r.at[oldest]) / 60000UL);
   return true;
 }
 
@@ -471,10 +643,11 @@ bool usageRingSlope(float* slopeOut, int* riseOut, long* spanMinOut) {
 // return - the caption needs a number even while the burn estimator is still
 // refusing one.
 int usageRingSpanMin() {
-  if (usageRingCount < 2) return 0;
-  int oldest = (usageRingHead + USAGE_RING_SLOTS - usageRingCount) % USAGE_RING_SLOTS;
-  int newest = (usageRingHead + USAGE_RING_SLOTS - 1) % USAGE_RING_SLOTS;
-  return (int) ((usageRingAt[newest] - usageRingAt[oldest]) / 60000UL);
+  const UsageRing& r = usageRingSelected();
+  if (r.count < 2) return 0;
+  int oldest = (r.head + USAGE_RING_SLOTS - r.count) % USAGE_RING_SLOTS;
+  int newest = (r.head + USAGE_RING_SLOTS - 1) % USAGE_RING_SLOTS;
+  return (int) ((r.at[newest] - r.at[oldest]) / 60000UL);
 }
 
 // The sparkline's caption, DERIVED from the span the ring actually holds rather
@@ -500,12 +673,19 @@ void usageSpanCaption(char* out, size_t n, int spanMin) {
 // missed repaint needs a collision with that single value - 2^-32 per event, not
 // a birthday problem. Same hash and same argument buildDetailSignature already
 // uses for optDescs.
+//
+// Over the SELECTED account's ring, so switching to an account whose ring holds
+// different samples changes the hash on its own. A switch between two rings with
+// IDENTICAL contents leaves it equal - and needs nothing, because the pixels would
+// be identical too; the switch also repaints the chrome regardless (renderUsageTab's
+// acctNow bust -> drawUsageStatic() -> resetUsageCaches() zeroes spark1Cache).
 uint32_t usageRingHash() {
+  const UsageRing& r = usageRingSelected();
   uint32_t h = 2166136261UL;
-  h = (h ^ (uint32_t) usageRingCount) * 16777619UL;
-  for (int i = 0; i < usageRingCount; i++) {
-    int idx = (usageRingHead + USAGE_RING_SLOTS - usageRingCount + i) % USAGE_RING_SLOTS;
-    h = (h ^ usageRingPct[idx]) * 16777619UL;
+  h = (h ^ (uint32_t) r.count) * 16777619UL;
+  for (int i = 0; i < r.count; i++) {
+    int idx = (r.head + USAGE_RING_SLOTS - r.count + i) % USAGE_RING_SLOTS;
+    h = (h ^ r.pct[idx]) * 16777619UL;
   }
   return h;
 }
@@ -517,7 +697,7 @@ uint32_t usageRingHash() {
 // "the ring is still filling and WILL speak" and "the trend is too flat or
 // negative to ever state" read as the same "burn --" on the glass, and a user
 // cannot tell "wait" from "nothing to say" without a distinct code. It fires
-// only from the ring path (usageRingCount < 2, or a real but too-short span) -
+// only from the ring path (the selected ring's count < 2, or a real but too-short span) -
 // the average path's refusals are unchanged, because BURN_MIN_ELAPSED is a
 // data-validity floor, not a "still filling" state.
 const long BURN_NOT_YET   = -1;   // may never resolve - flat or falling trend
@@ -626,14 +806,15 @@ void drawUsageSpark(uint32_t* cache, int x, int y, int w, int h, uint16_t fg, ui
   *cache = sig;
   tft.fillRect(x - 1, y - 1, w + 2, h + 2, bg);
   tft.drawFastHLine(x, y + h - 1, w, COLOR_LABEL);
-  if (usageRingCount < 2) return;     // baseline only; the caption says "no history"
+  const UsageRing& r = usageRingSelected();   // the SELECTED account's history
+  if (r.count < 2) return;            // baseline only; the caption says "no history"
   int cw = w / USAGE_RING_SLOTS;
-  int oldest = (usageRingHead + USAGE_RING_SLOTS - usageRingCount) % USAGE_RING_SLOTS;
+  int oldest = (r.head + USAGE_RING_SLOTS - r.count) % USAGE_RING_SLOTS;
   int prevCy = -1;
-  for (int i = 0; i < usageRingCount; i++) {
-    int v  = (int) usageRingPct[(oldest + i) % USAGE_RING_SLOTS];
+  for (int i = 0; i < r.count; i++) {
+    int v  = (int) r.pct[(oldest + i) % USAGE_RING_SLOTS];
     int cy = y + h - 3 - ((h - 5) * v) / 100;
-    bool last = (i == usageRingCount - 1);
+    bool last = (i == r.count - 1);
     if (prevCy >= 0 && prevCy != cy) {
       int a0 = prevCy < cy ? prevCy : cy;
       int a1 = prevCy < cy ? cy : prevCy;
@@ -1074,18 +1255,37 @@ void renderUsageTab() {
   }
   // A source change moves no percentage, so nothing else would repaint - the
   // same trap the stale-dim flip above has, where the digits stay identical.
-  // The PIN state belongs in this bust too: pinning the Mac that freshest-wins
-  // had already chosen moves no source and no digit, but it does flip the tag
-  // from grey to accent, and nothing else would repaint it.
-  // The LINK COUNT belongs here too, and its absence was a real bug: the tag is
-  // drawn only when usedLinkCount() > 1, but the tag lives on the card CHROME,
-  // which repaints on a source or pin change and nothing else. So a second Mac
-  // arriving after the chrome was last painted left both Claude cards untagged
-  // while the Codex row (a different draw call, rendered per tick) showed its
-  // tag - observed exactly that way on hardware, with two real Macs connected.
+  //
+  // THE ACCOUNT belongs in this bust too (acctNow = usageAcctSelIdx * 8 +
+  // usageAcctCount). An account switch can change values without changing the
+  // text any cache compares against, and the header's account label lives on
+  // the card CHROME, which repaints through this bust and nothing else. The
+  // selection moving and an account arriving or leaving each change that one
+  // int - and the COUNT is what gates the label (usageAcctCount > 1), so a
+  // second account arriving after the chrome was last painted would otherwise
+  // leave both Claude cards unlabelled. That exact shape was a real bug once
+  // with the old Mac-count gate: a second Mac arrived, the Codex row (a
+  // different draw call, rendered per tick) showed its tag and both Claude
+  // cards did not - observed on hardware, with two real Macs connected. The
+  // packing is collision-free because a count never exceeds MAX_LINKS (2) < 8,
+  // and usage-account-check.mjs asserts that from the parsed MAX_LINKS. It
+  // replaces both the old PIN term (no pin any more) and the old usedLinkCount()
+  // term (nothing on this chrome reads the Mac count now - the count it is
+  // gated on is inside acctNow).
+  //
+  // THE LABEL ITSELF, and whether it is a NAME, belong here as well (labelNow =
+  // '1'/'0' for usageAcctNamed() + usageAcctLabel()). acctTag and tag are
+  // overwritten by every payload, and a host restarted with a new or cleared
+  // DECKHAND_ACCOUNT_TAG (or a renamed Mac) that is back inside LINK_STALE_MS keeps
+  // its slot - so the source, the account term and the icon id are all unchanged,
+  // and without this the header kept the old name, or kept the ICON where the new
+  // name now replaces it, until some unrelated repaint. Ordinary on board 2, whose
+  // native USB CDC does not reset when the host restarts. A STRING cache, not a
+  // hash: exact, and sized from HostLink's own tag buffer so it can never be the
+  // cache-shorter-than-its-string trap (the static_assert holds acctTag to it).
   // The Claude cards' icon id joins the bust too: an icon change (set,
   // cleared, or the source Mac swapping to one with a different icon) moves
-  // no percentage, no source link and no link count, so nothing else here
+  // no percentage, no source link and no account term, so nothing else here
   // would repaint it - and the label's own drawIfChanged clears only its own
   // text box, never the icon beside it. Watch this on the second Mac's link
   // ageing out: without it, a stale icon would sit there after the tag has
@@ -1098,15 +1298,19 @@ void renderUsageTab() {
   // without a bust term, and carrying one here would only cost an avoidable
   // full-chrome repaint on every icon-only change in a file whose whole
   // discipline is flicker avoidance.
+  static_assert(sizeof(HostLink::acctTag) <= sizeof(HostLink::tag),
+                "labelCache is sized from HostLink::tag; acctTag must fit it too");
 #if BOARD_USAGE_V2
-  static int srcCache = -2, cxSrcCache = -2, pinCache = -1, linksCache = -1,
+  static int srcCache = -2, cxSrcCache = -2, acctCache = -1,
              emojiCache = -3, codexShownCache = -1;
-  int pinNow = usagePinHostId[0] ? 1 : 0;
-  int linksNow = usedLinkCount();
-  int emojiNow = emojiIdForLink(usageSourceLink);
+  static char labelCache[1 + sizeof(HostLink::tag)] = "";
+  int acctNow = usageAcctSelIdx * 8 + usageAcctCount;
+  char labelNow[sizeof(labelCache)];
+  snprintf(labelNow, sizeof(labelNow), "%c%s", usageAcctNamed() ? '1' : '0', usageAcctLabel());
+  int emojiNow = emojiIdForLink(usageAcctLabelLink());
   int codexShownNow = usageCodexShown() ? 1 : 0;
   if (srcCache != usageSourceLink || cxSrcCache != cxSourceLink ||
-      pinCache != pinNow || linksCache != linksNow ||
+      acctCache != acctNow || strcmp(labelCache, labelNow) != 0 ||
       emojiCache != emojiNow || codexShownCache != codexShownNow) {
     // THE LAYOUT MOVES THE CARD BORDERS, so this is the one bust term that
     // needs more than a chrome repaint. Without the clear, NOW growing past
@@ -1119,8 +1323,8 @@ void renderUsageTab() {
     // drawUsageStatic() fresh for the new layout - and this bust then fires
     // on its own stale codexShownCache and clears/paints the identical
     // column a second time. Invisible today, because switchTab's own clear
-    // already ran first, but it is exactly the double-draw the pin-tap
-    // handler at deckhand_display.ino:3607 explicitly refuses to create by
+    // already ran first, but it is exactly the double-draw the USAGE tap
+    // handler in deckhand_display.ino explicitly refuses to create by
     // routing through this bust rather than calling drawUsageStatic()
     // directly. Worth fixing alongside that handler if this bust is ever
     // reworked, not on its own.
@@ -1128,26 +1332,28 @@ void renderUsageTab() {
       tft.fillRect(0, CONTENT_Y, tft.width(), contentBottom() - CONTENT_Y, COLOR_BG);
     srcCache = usageSourceLink;
     cxSrcCache = cxSourceLink;
-    pinCache = pinNow;
-    linksCache = linksNow;
+    acctCache = acctNow;
+    strlcpy(labelCache, labelNow, sizeof(labelCache));
     emojiCache = emojiNow;
     codexShownCache = codexShownNow;
     drawUsageStatic();   // repaints chrome; resetUsageCaches() runs inside it
   }
 #else
-  static int srcCache = -2, cxSrcCache = -2, pinCache = -1, linksCache = -1,
+  static int srcCache = -2, cxSrcCache = -2, acctCache = -1,
              emojiCache = -3, codexShownCache = -1;
-  int pinNow = usagePinHostId[0] ? 1 : 0;
-  int linksNow = usedLinkCount();
-  int emojiNow = emojiIdForLink(usageSourceLink);
+  static char labelCache[1 + sizeof(HostLink::tag)] = "";
+  int acctNow = usageAcctSelIdx * 8 + usageAcctCount;
+  char labelNow[sizeof(labelCache)];
+  snprintf(labelNow, sizeof(labelNow), "%c%s", usageAcctNamed() ? '1' : '0', usageAcctLabel());
+  int emojiNow = emojiIdForLink(usageAcctLabelLink());
   int codexShownNow = usageCodexShown() ? 1 : 0;
   if (srcCache != usageSourceLink || cxSrcCache != cxSourceLink ||
-      pinCache != pinNow || linksCache != linksNow ||
+      acctCache != acctNow || strcmp(labelCache, labelNow) != 0 ||
       emojiCache != emojiNow) {
     srcCache = usageSourceLink;
     cxSrcCache = cxSourceLink;
-    pinCache = pinNow;
-    linksCache = linksNow;
+    acctCache = acctNow;
+    strlcpy(labelCache, labelNow, sizeof(labelCache));
     emojiCache = emojiNow;
     drawUsageStatic();   // repaints chrome; resetUsageCaches() runs inside it
   }
@@ -1211,18 +1417,18 @@ void drawUsageStatic() {
   // here, once, so no call site can forget it.
   resetUsageCaches();
   // Both Claude cards (5h and 7d) are merged from the SAME link in
-  // mergeUsage(), so they always carry the same source tag.
+  // mergeUsage(), so they always carry the same account label.
 #if BOARD_USAGE_V2
   // v2 labels and heights, matched to renderNowCard/renderWeekCard's own
   // NOW_CARD_H/WEEK_CARD_H - the same heights CARD1_Y/CARD2_Y/CODEX_Y in the
   // board header now derive from. "NOW", not "SESSION", because this card is
   // the one that stops you working - the semantic hierarchy this redesign is
   // for (docs/design/usage-redesign/usage.js's selected layout B).
-  drawCardChrome(CARD1_Y, "NOW - 5 HOUR WINDOW", linkTag(usageSourceLink), nowCardH());
-  drawCardChrome(weekCardY(), "WEEK - 7 DAY, ALL MODELS", linkTag(usageSourceLink), weekCardH());
+  drawCardChrome(CARD1_Y, "NOW - 5 HOUR WINDOW", usageAcctLabel(), nowCardH());
+  drawCardChrome(weekCardY(), "WEEK - 7 DAY, ALL MODELS", usageAcctLabel(), weekCardH());
 #else
-  drawCardChrome(CARD1_Y, "SESSION - 5 HOUR WINDOW", linkTag(usageSourceLink));
-  drawCardChrome(CARD2_Y, "WEEK - 7 DAY, ALL MODELS", linkTag(usageSourceLink));
+  drawCardChrome(CARD1_Y, "SESSION - 5 HOUR WINDOW", usageAcctLabel());
+  drawCardChrome(CARD2_Y, "WEEK - 7 DAY, ALL MODELS", usageAcctLabel());
 #endif
   // ONE gated call, with only the Y behind the guard - board 2's row moves with the
   // layout, board 1's is fixed at CODEX_Y. Board 1 used to paint this card

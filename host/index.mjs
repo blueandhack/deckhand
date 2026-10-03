@@ -31,6 +31,7 @@ import { makeProjectReplies, countUserTurns } from "./project-replies.mjs";
 import { postToSessionInbox } from "./session-inbox.mjs";
 import { verifyPrompt, verifyTypedAnswer, verifyResume } from "./typed-answer.mjs";
 import { macTag } from "./host-tag.mjs";
+import { accountKey } from "./account-id.mjs";
 import { toAscii, deviceText } from "./to-ascii.mjs";
 import { askChips } from "./ask-chips.mjs";
 import { fitPayload } from "./wire-fit.mjs";
@@ -549,6 +550,22 @@ let hostId = "";                 // this Mac, e.g. "9f3c1a20"
 let hostLabel = os.hostname().replace(/\.local$/, "");
 // Short display form for the device's session rows. DECKHAND_MAC_TAG overrides it.
 let hostTag = macTag(hostLabel, process.env.DECKHAND_MAC_TAG || "");
+// Which Claude account this Mac polls - see host/account-id.mjs. Refreshed at the
+// OAuth cadence, not per tick: ~/.claude.json can run to megabytes.
+let acctKey = "";
+// A person's own name for the account ("work"), sanitised and capped exactly like
+// a DECKHAND_MAC_TAG override. Unset = the device names the account by its Mac.
+const acctTag = process.env.DECKHAND_ACCOUNT_TAG ? macTag("", process.env.DECKHAND_ACCOUNT_TAG) : "";
+async function refreshAccountKey() {
+  try {
+    acctKey = accountKey(JSON.parse(await fs.readFile(path.join(os.homedir(), ".claude.json"), "utf8")));
+  } catch (e) {
+    // Absent file = signed out, clear. Any other failure (a half-written file, a parse
+    // error) keeps the last good key: dropping it would split this Mac off as its own
+    // account on the device for up to a whole refresh interval.
+    if (e && e.code === "ENOENT") acctKey = "";
+  }
+}
 const MAC_EMOJI_FILE = path.join(os.homedir(), ".claude", "deckhand-mac-emoji");
 // Re-read per tick rather than cached at startup: the menu-bar picker writes this file
 // and the change should show on the device within a tick, not at the next restart.
@@ -1069,6 +1086,14 @@ async function pollOauthUsage() {
     // rotates it; holding a cached copy once pinned the poller in a rate-limit
     // loop while the Keychain already had a good token. Refresh proactively if
     // it's expired/near-expiry so an always-on host survives the app being shut.
+    // The account key is re-read HERE, beside the token and after both early returns,
+    // so a /login (account switch) is labelled together with the quota it fetches: a
+    // poll that skips the network (back-off, spacing) keeps publishing the OLD
+    // account's cached quota, and this call relabelling that with the new key would
+    // file one account's numbers under the other on the device. (The independent
+    // OAUTH_POLL_INTERVAL_MS refresh at startup still can, inside a back-off - see
+    // docs/reference/usage-tab.md's known limits.)
+    await refreshAccountKey();
     const { token, cred, refreshed } = await getFreshAccessToken();
 
     // Record the attempt BEFORE the network call so a failure (429, timeout)
@@ -5896,7 +5921,7 @@ async function tick(generation = tickGeneration) {
     // device SIGNS (ask.voiceText), where repair would let the confirm screen
     // display text that is not what gets signed - that one is SUPPRESSED instead.
     const wire = asciiFit({
-      ...usage, hostId, hostTag, ...(hostEmoji ? { hostEmoji } : {}), remoteAnswer, voice: lastVoice,
+      ...usage, hostId, hostTag, ...(acctKey ? { acct: acctKey } : {}), ...(acctTag ? { acctTag } : {}), ...(hostEmoji ? { hostEmoji } : {}), remoteAnswer, voice: lastVoice,
       // rnonce: the credential a RESUME is signed against (see resumeNonce()
       // above). Published unconditionally rather than "only when the device
       // has a transcript open", because this end cannot know that and the
@@ -5935,6 +5960,7 @@ async function tick(generation = tickGeneration) {
         `sessionTok=${usage.sessionTokens} weekTok=${usage.weekAllTokens} ` +
         `weekFableTok=${usage.weekFableTokens} weekFablePct=${usage.weekFablePct ?? "?"} ` +
         `src=${usage.quotaSource} ` +
+        `acct=${acctKey || "?"} ` +
         // qage/cxage are HOW OLD the two quota readings are, in seconds, and they
         // are here for the menu-bar app rather than for a human reading the log:
         // this tick line is the Mac's only view of the numbers, so without them
@@ -6184,8 +6210,17 @@ console.log(
   );
 }
 setTimeout(pollOauthUsage, 0);
+// Its own schedule, independent of pollOauthUsage's back-off (which can return early for 15 minutes).
+// The FIRST read is the startup line below, not here: it has to finish before tick() runs.
+setInterval(refreshAccountKey, OAUTH_POLL_INTERVAL_MS);
 // Prune once at startup too: captures accumulate across runs, and a host that is only
 // restarted occasionally would otherwise never clear anything left by the previous one.
 pruneAudioCaptures().catch(() => {});
 recordRunStart();
-tick();
+// The first tick waits for the account key. Started unawaited, the read raced the
+// first tick and lost, so the first payload went out with no `acct` - and board 2
+// then keyed this Mac '@hostId' for one tick: a different account, which reset that
+// account's history ring and dropped a selection held on it. refreshAccountKey()
+// never rejects (it catches everything), and finally() runs tick() either way; a read
+// that never settled would be the watchdog's to restart, exactly like a stuck tick.
+refreshAccountKey().finally(tick);

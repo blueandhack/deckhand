@@ -650,6 +650,19 @@ const int RADIUS = R_MD;
 // against board.h's line ~20), so a header using them would not compile, and
 // every gap here is spelled as a literal "+ 8" instead.
 #define BOARD_USAGE_V2 1
+// The USAGE card header's "N/M" account indicator (which of the Claude accounts
+// this page is). OFF on this board too, because it does not fit: the widest card
+// label, "WEEK - 7 DAY, ALL MODELS", spans x=30..222 at Spleen8x16's 8px advance,
+// and the widest indicator - "2/2" + a space + a 7-char tag (HostLink's
+// tag[8]/acctTag[8] less the NUL; the icon form, 16px, is narrower) = 88px -
+// right-aligned at x=290 starts at x=202. With one advance of air the indicator
+// overflows by 28px onto the label (20px even at the host's 6-char macTag() cap).
+// So the account label, which changes on every switch, is the carrier here as on
+// board 1. usage-geom-check.mjs re-derives the overflow from the parsed labels,
+// buffers and font, and fails if the number quoted here goes stale - or if a
+// layout change ever makes it fit, so the flag gets re-decided rather than left
+// off by habit. A #define, never a const int - see BOARD_USAGE_V2 above.
+#define BOARD_USAGE_ACCT_INDEX 0
 
 // v1's card height. renderCard (v1's renderer) is #if'd out entirely on this
 // board now (deckhand_display.ino), so CARD_H is UNREAD here - it stays
@@ -685,7 +698,7 @@ const int CODEX_HIDE_FALLBACK_MIN = 10080;   // 7 days, the observed Codex windo
 // nothing may end past +179; the last clear ends +174, 5 rows clear.
 //
 //   +0..+1     border
-//   +3..+5     pin bar          CARD_PIN_BAR_Y 3
+//   +3..+5     blank            (was the pin bar, CARD_PIN_BAR_Y, gone with the pin 2026-10-03)
 //   +6..+21    label / icon     CARD_LABEL_Y 6, T_META 16px
 //   +26..+90   hero box         NOW_HERO_Y 26, CARD_HERO_H 65, CARD_HERO_W 132
 //   +39..+56   side fact 1      T_META, TR at LANE_X1 - the burn verdict
@@ -745,11 +758,27 @@ const unsigned long USAGE_RING_STEP_MS = (unsigned long) USAGE_RING_STEP_MIN * 6
 // difference is bounded by one poll interval, and in one interval the shortest
 // window this ring serves moves 100 * 5 / 300 = 1.67 points. So a 1- or 2-point
 // fall is explicable by a source switch and must NOT clear the ring; 3 is not.
+// That derivation is WITHIN ONE ACCOUNT (mergeAccount() choosing between Macs
+// signed into the same account): different accounts never share a ring - see
+// usageRingsSampleAll() - so a cross-account swing never reaches this test.
 const int USAGE_RING_DROP_PCT = 3;
 // The staleness threshold this ring and the burn gate key off. Board 2 only, so
 // board 1's own inline 900s in renderUsageTab is deliberately left alone rather
 // than replaced - naming it there would risk that board's binary for nothing.
 const int QUOTA_STALE_SEC = 900;
+// THE LONGEST GAP A RING MAY SPAN BETWEEN TWO SAMPLES, and it is the staleness
+// threshold on purpose: a ring that has gone QUOTA_STALE_SEC without a sample
+// stands exactly where a reading aged past stale does - nothing vouches that the
+// next number continues the same series (an account away overnight comes back in
+// a NEW 5-hour window, possibly only a few points higher, which the drop test
+// cannot see). 900s is three ring steps: a normal step (USAGE_RING_STEP_MS plus
+// the 1s tick's jitter) and even one missed poll (10 min) stay well inside it;
+// two missed polls in a row do not. It also bounds the ring's span at
+// (USAGE_RING_SLOTS - 1) * 15 = 450 min, so the caption ("LAST 7.5H" at most)
+// stays inside usageSpanCaption()'s certified 10 characters.
+const int USAGE_RING_GAP_SEC = QUOTA_STALE_SEC;
+static_assert((unsigned long) USAGE_RING_GAP_SEC * 1000UL >= 2 * USAGE_RING_STEP_MS,
+              "a normal ring step must never trip the gap reset");
 
 // ---------- The burn gate: ONE budget, every term derived from it ----------
 // T = elapsed * (100 - pct) / pct, so half a point of quantization on an integer
@@ -865,13 +894,14 @@ const int WEEK_FABLE_BAR_Y_SOLO = 148;
 //      touches the hero it sits above.
 //
 // The interior is +2..+161 = 160 rows. Exclusive content is 1 (the blank row at
-// +2) + 3 (pin bar) + 16 (label) + 65 (hero box) + 20 (bar clear) + 18 (stats
+// +2) + 3 (pin bar, blank since 2026-10-03) + 16 (label) + 65 (hero box) + 20 (bar clear) + 18 (stats
 // clear) + 18 (foot clear) = 141, leaving 19 rows of gap - the hero box alone
 // ate 11 of the 39 rows of gap the old, smaller hero left spare:
 //
 //   +0..+1    border
 //   +2        blank
-//   +3..+5    pin bar        (CARD_PIN_BAR_Y, 3 rows)
+//   +3..+5    blank          (was the pin bar, CARD_PIN_BAR_Y - removed with the
+//                             pin on 2026-10-03; the rows were left empty, not reused)
 //   +6..+21   label / icon   (CARD_LABEL_Y, Spleen8x16 = 16, and the Mac icon is
 //                              16x16 here - MAC_EMOJI_SIZE is the body cell height,
 //                              so the icon fills this row exactly rather than
@@ -893,7 +923,6 @@ const int WEEK_FABLE_BAR_Y_SOLO = 148;
 // OVERLAP by 3 rows and a token count changing erases the bottom of the tick
 // until the bar next repaints. Every band above is disjoint - tighter than the
 // old derivation's uniform 8px gaps, but never negative - so that cannot happen.
-const int CARD_PIN_BAR_Y = 3;
 const int CARD_LABEL_Y   = 6;
 const int CARD_HERO_Y    = 24;
 // 65, for a 64px native glyph plus 1px of slack - the same convention board 1

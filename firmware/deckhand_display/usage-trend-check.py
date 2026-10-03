@@ -10,6 +10,7 @@ import re, sys, pathlib
 D = pathlib.Path(__file__).parent
 HDR = (D / "board_es3c35p.h").read_text()
 INO = (D / "usage.ino").read_text()
+MAIN = (D / "deckhand_display.ino").read_text()
 
 def const(name, src=HDR):
     # SCANS EVERY const DECLARATION STATEMENT, not just one built around `name` -
@@ -128,6 +129,14 @@ SLOTS    = const_int("USAGE_RING_SLOTS")
 STEP_MIN = const_int("USAGE_RING_STEP_MIN")
 DROP     = const_int("USAGE_RING_DROP_PCT")
 SPAN     = (SLOTS - 1) * STEP_MIN
+# The sampler's gap reset (usageRingSample): a ring never spans more than this
+# between two consecutive samples. PARSED; it resolves through QUOTA_STALE_SEC.
+GAP_SEC  = const_int("USAGE_RING_GAP_SEC")
+GAP_MS   = GAP_SEC * 1000
+# The LONGEST span a ring can now hold: SLOTS-1 gaps, each at most GAP_MS (a
+# larger one resets). Before the gap reset this had no bound at all - an account
+# away overnight resumed its ring and the span grew without limit.
+MAX_RING_SPAN_MIN = (SLOTS - 1) * GAP_MS // 60000
 
 n = fails = 0
 def chk(cond, msg):
@@ -136,6 +145,49 @@ def chk(cond, msg):
     if not cond:
         fails += 1
         print("  FAIL " + msg)
+
+def strip_comments(s):
+    return re.sub(r"//[^\n]*", "", s)
+
+def func_body(name_with_open_paren, src):
+    """Brace-balanced extraction of a function body, starting from its own
+    DEFINITION text - not a forward declaration or a call site. The per-account
+    ring forward-declares its functions (a signature naming UsageRing cannot be
+    left to Arduino's generated prototypes), and the old "first occurrence, then
+    the next {" rule would have read a declaration's `;` straight past into
+    whatever function came next, certifying the wrong body. So each occurrence's
+    own parameter list is paren-matched, and only one followed by `{` counts."""
+    pos = 0
+    while True:
+        start = src.index(name_with_open_paren, pos)   # ValueError = no definition
+        p = src.index("(", start)
+        depth = 0
+        j = p
+        while True:
+            if src[j] == "(":
+                depth += 1
+            elif src[j] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        k = j + 1
+        while src[k].isspace():
+            k += 1
+        if src[k] != "{":
+            pos = start + 1          # a declaration or a call: keep looking
+            continue
+        brace = k
+        depth = 0
+        i = brace
+        while True:
+            if src[i] == "{":
+                depth += 1
+            elif src[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    return src[brace:i + 1]
+            i += 1
 
 # ---- the span is exactly 150 min, and a FULL ring's caption depends on it ---
 # 30 slots span 145, and a card captioned LAST 2.5H over a 145-minute ring
@@ -183,11 +235,23 @@ chk(span_caption(60) == "LAST 1.0H", "the hour branch starts exactly at 60 minut
 # jitter pushing a poll slightly past its nominal interval - captions to at
 # most 10 characters: the padLeftTo() width and the resetAt1Cache headroom
 # this fix is pinned to, not merely today's two known strings.
-worst_caption_len = max(len(span_caption(m)) for m in range(0, SPAN + 30))
+#
+# THE DOMAIN IS THE RING'S REAL MAXIMUM SPAN, not a full ring at nominal cadence.
+# A ring whose samples are each up to one GAP apart (USAGE_RING_GAP_SEC - any
+# longer gap resets it) spans up to (SLOTS-1)*GAP; that bound is what is swept,
+# and it includes the old 0..SPAN+29 domain. Without the gap reset there was no
+# bound: ~100 hours of resumed ring captions "LAST 100.0H", 11 characters.
+CAPTION_DOMAIN_MAX = max(SPAN + 29, MAX_RING_SPAN_MIN)
+worst_caption_len = max(len(span_caption(m)) for m in range(0, CAPTION_DOMAIN_MAX + 1))
 chk(worst_caption_len <= 10,
-    f"every reachable ring span (0..{SPAN + 29} min) captions to <= 10 "
-    f"characters (worst {worst_caption_len}), matching renderNowCard's "
-    f"`padLeftTo(buf, sizeof(buf), 10)` and resetAt1Cache[14]'s headroom")
+    f"every reachable ring span (0..{CAPTION_DOMAIN_MAX} min, the gap-bounded "
+    f"maximum (SLOTS-1)*USAGE_RING_GAP_SEC) captions to <= 10 characters (worst "
+    f"{worst_caption_len}), matching renderNowCard's `padLeftTo(buf, sizeof(buf), "
+    f"10)` and resetAt1Cache[14]'s headroom")
+chk(GAP_MS >= 2 * STEP_MIN * 60000 and GAP_MS > STEP_MIN * 60000 + 1000,
+    f"USAGE_RING_GAP_SEC ({GAP_SEC}s) is at least two ring steps "
+    f"({2 * STEP_MIN * 60}s), so a normal step plus the 1s tick's jitter can never "
+    f"trip the gap reset (the header's static_assert, checked here from the parse)")
 
 # ---- the ring must be able to measure the window it is used for ------------
 for name, win, want in [("5h session", 300, True), ("7d week", 10080, False)]:
@@ -336,7 +400,8 @@ BURN_NOT_YET, BURN_EMPTY_NOW = -1, -2
 BURN_WARMING = const_int("BURN_WARMING", INO)
 
 class Ring:
-    """Mirrors usageRingPct[]/usageRingAt[]/usageRingSample()/usageRingSlope()."""
+    """Mirrors ONE UsageRing (its pct[]/at[]/count/head/last/wasStale fields)
+    and usageRingSample(r, u)/usageRingSlope() over it."""
     def __init__(self):
         self.pct = [0] * SLOTS
         self.at  = [0] * SLOTS
@@ -352,7 +417,8 @@ class Ring:
         self.head  = 0
         self.last  = 0
 
-    def sample(self, quota_age_sec, five_hour_pct, now_ms, level_bug=False):
+    def sample(self, quota_age_sec, five_hour_pct, now_ms, level_bug=False,
+               no_gap_reset=False):
         stale = quota_age_sec > QUOTA_STALE
         # level_bug reproduces the item-1 injection (`stale != usageRingWasStale`
         # -> `if (stale)`): reset fires on every stale TICK rather than once on
@@ -370,6 +436,10 @@ class Ring:
             return
         if self.last != 0 and uwrap(now_ms - self.last) < STEP_MS:
             return
+        # The gap reset. no_gap_reset is the --selftest fault: the ring resumes
+        # across an absence, mixing two 5-hour windows.
+        if not no_gap_reset and self.count > 0 and uwrap(now_ms - self.last) > GAP_MS:
+            self.reset()
         if self.count > 0:
             prev = self.pct[(self.head + SLOTS - 1) % SLOTS]
             if five_hour_pct <= prev - DROP:
@@ -403,19 +473,279 @@ class Ring:
         span  = uwrap(self.at[newest] - self.at[oldest]) // 60000
         return slope, rise, span
 
+# ---- ONE RING PER ACCOUNT: the mirror of usageRings[]/usageRingFor()/
+# usageRingsSampleAll(). With two Claude accounts on two Macs a single ring fed
+# from the merged `usage` interleaved two quotas' series; USAGE_RING_DROP_PCT
+# (derived for two readings of ONE quota differing only in age) then either
+# cleared it on every swap or read the swing as a burst.
+mlm = re.search(r"#define\s+MAX_LINKS\s+(\d+)", MAIN)
+if not mlm:
+    sys.exit("FAIL: MAX_LINKS #define not found in deckhand_display.ino")
+MAX_LINKS = int(mlm.group(1))   # PARSED: usageRings[] is sized from it
+
+class AccountRings:
+    """Mirrors usageRings[MAX_LINKS] + usageRingFor() + usageRingsSampleAll()."""
+    def __init__(self):
+        self.rings = [Ring() for _ in range(MAX_LINKS)]
+        self.owner = [""] * MAX_LINKS
+
+    def ring_for(self, key, reading_keys, linked_keys, single_first_fit=False):
+        """reading_keys: accounts in usageAcctCount (a reading this tick).
+        linked_keys: accounts any linked Mac is on (usageAccountKeyLive()), a
+        SUPERSET - a linked Mac with no reading is in it. single_first_fit is the
+        --selftest fault: the brief's original one pass, "free OR not among the
+        accounts with a reading", which steals a linked-but-readingless account's
+        ring even while a free ring sits further along."""
+        for i in range(MAX_LINKS):
+            if self.owner[i] == key:
+                return self.rings[i]
+        pick = None
+        if single_first_fit:
+            for i in range(MAX_LINKS):
+                if not self.owner[i] or self.owner[i] not in reading_keys:
+                    pick = i
+                    break
+        else:
+            for i in range(MAX_LINKS):              # a FREE ring first
+                if not self.owner[i]:
+                    pick = i
+                    break
+            if pick is None:                        # then one no linked Mac is on
+                for i in range(MAX_LINKS):
+                    if self.owner[i] not in linked_keys:
+                        pick = i
+                        break
+        if pick is None:
+            return None
+        self.owner[pick] = key
+        self.rings[pick].reset()                    # a reused ring is ALWAYS reset
+        self.rings[pick].was_stale = False
+        return self.rings[pick]
+
+    def ring_of(self, key):
+        for i in range(MAX_LINKS):
+            if self.owner[i] == key:
+                return self.rings[i]
+        return None
+
+    def sample_all(self, accounts, sel, now_ms, fault_selected=False, linked=None,
+                   single_first_fit=False, no_gap_reset=False):
+        """accounts: [(key, quotaAgeSec, fiveHourPct)] in usageAcct[] order; sel is
+        usageAcctSelIdx. fault_selected is the --selftest injection: every ring fed
+        the SELECTED account's figures (the global `usage`) instead of its own
+        usageAcct[a] - the old single feed, wearing the new struct."""
+        reading = [a[0] for a in accounts]
+        linked_keys = set(reading) | set(linked or ())
+        for key, age, pct in accounts:
+            r = self.ring_for(key, reading, linked_keys, single_first_fit)
+            if r is None:
+                continue
+            src_age, src_pct = (accounts[sel][1], accounts[sel][2]) if fault_selected else (age, pct)
+            r.sample(src_age, src_pct, now_ms, no_gap_reset=no_gap_reset)
+
+def held(r):
+    """The values a ring currently holds, oldest first."""
+    oldest = (r.head + SLOTS - r.count) % SLOTS
+    return [r.pct[(oldest + i) % SLOTS] for i in range(r.count)]
+
+B_PCT = 70
+def two_account_scenario(fault_selected=False):
+    """Account A ramps 10->40, account B sits at 70, and the SELECTION alternates
+    every tick - the exact feed that interleaved them in one ring. Returns
+    [(name, ok, message)] so --selftest can ask for one assertion BY NAME."""
+    rs = AccountRings()
+    a_vals = set()
+    b_leak = a_leak = 0          # ticks on which a ring held the OTHER account's value
+    for i in range(SLOTS):
+        a_pct = 10 + i
+        a_vals.add(a_pct)
+        rs.sample_all([("acctA", 0, a_pct), ("acctB", 0, B_PCT)], i % 2,
+                      (i + 1) * STEP_MS, fault_selected)
+        ra, rb = rs.ring_of("acctA"), rs.ring_of("acctB")
+        if rb is not None and set(held(rb)) & a_vals:
+            b_leak += 1
+        if ra is not None and B_PCT in held(ra):
+            a_leak += 1
+    ra, rb = rs.ring_of("acctA"), rs.ring_of("acctB")
+    sa = ra.slope() if ra is not None else None
+    return [
+        ("mirror 12a", sa is not None and sa[0] > 0 and abs(sa[0] - 0.2) < 1e-9,
+         f"mirror 12a: account A's own ring (10->40, selection alternating A/B every tick) "
+         f"fits A's real slope 0.2 %/min (got {sa})"),
+        ("mirror 12b", rb is not None and b_leak == 0,
+         f"mirror 12b: B's ring never contains a value from A, on any tick "
+         f"({b_leak} of {SLOTS} ticks held one of A's values)"),
+        ("mirror 12c", ra is not None and a_leak == 0,
+         f"mirror 12c: A's ring never contains B's {B_PCT}, on any tick "
+         f"({a_leak} of {SLOTS} ticks held it)"),
+        ("mirror 12d", rb is not None and rb.count == SLOTS and held(rb) == [B_PCT] * SLOTS,
+         f"mirror 12d: B - selected on only half the ticks - is sampled on EVERY tick, so "
+         f"its ring is full of its own {B_PCT} (count={rb.count if rb else None}, want {SLOTS}): "
+         f"also what keeps 12b from passing over an empty ring"),
+    ]
+
+def ring_reuse_scenario():
+    """MAX_LINKS accounts fill every ring; one departs and a new one arrives. The
+    new account must get the DEPARTED one's ring, reset - never a live one's, and
+    never the departed account's history."""
+    rs = AccountRings()
+    keys = [f"acct{i}" for i in range(MAX_LINKS)]
+    for i in range(5):
+        rs.sample_all([(k, 0, 50 + j) for j, k in enumerate(keys)], 0, (i + 1) * STEP_MS)
+    kept = rs.ring_of(keys[0])
+    kept_before = held(kept)
+    gone = keys[-1]
+    gone_ring = rs.ring_of(gone)
+    new = [(k, 0, 50 + j) for j, k in enumerate(keys[:-1])] + [("acctNEW", 0, 20)]
+    rs.sample_all(new, 0, 6 * STEP_MS)
+    nr = rs.ring_of("acctNEW")
+    return [
+        ("mirror 12e", nr is not None and nr is gone_ring and held(nr) == [20],
+         f"mirror 12e: a new account reclaims the DEPARTED account's ring and starts it "
+         f"empty (holds {held(nr) if nr else None}, want [20])"),
+        ("mirror 12f", rs.ring_of(keys[0]) is kept and held(kept) == kept_before + [50],
+         f"mirror 12f: a LIVE account's ring is never the one reclaimed (holds "
+         f"{held(kept)}, want {kept_before + [50]})"),
+    ]
+
+def no_steal_scenario(single_first_fit=False):
+    """An account whose Mac is still LINKED but has no reading this tick (not in
+    usageAcctCount - exactly the state mergeUsage()'s selection-keeping covers)
+    keeps its ring: a new account takes a FREE ring first, else the ring of an
+    account no linked Mac is on - never the readingless one's."""
+    rs = AccountRings()
+    for i in range(5):
+        rs.sample_all([("acctA", 0, 40 + i)], 0, (i + 1) * STEP_MS)
+    a_before = held(rs.ring_of("acctA"))
+    # Tick 6: A's Mac is linked but readingless; B arrives with a reading.
+    rs.sample_all([("acctB", 0, 70)], 0, 6 * STEP_MS, linked=["acctA"],
+                  single_first_fit=single_first_fit)
+    ra, rb = rs.ring_of("acctA"), rs.ring_of("acctB")
+    ok1 = ra is not None and held(ra) == a_before and rb is not None and held(rb) == [70]
+    # Second shape: no ring is free. A (linked, readingless) and C own both rings;
+    # C's Mac is GONE. New account D must take C's ring, not A's.
+    rs2 = AccountRings()
+    keys = ["acctA"] + [f"acctC{j}" for j in range(MAX_LINKS - 1)]
+    for i in range(5):
+        rs2.sample_all([(k, 0, 40 + j) for j, k in enumerate(keys)], 0, (i + 1) * STEP_MS)
+    a2_before = held(rs2.ring_of("acctA"))
+    rs2.sample_all([("acctD", 0, 20)], 0, 6 * STEP_MS, linked=["acctA"] + keys[2:],
+                   single_first_fit=single_first_fit)
+    ra2, rd = rs2.ring_of("acctA"), rs2.ring_of("acctD")
+    ok2 = ra2 is not None and held(ra2) == a2_before and rd is not None and held(rd) == [20]
+    return [("mirror 12g", ok1 and ok2,
+             f"mirror 12g: a LINKED but readingless account's ring is never taken - "
+             f"a free ring is preferred (A kept {held(ra) if ra else None}, B got "
+             f"{held(rb) if rb else None}), and with none free the ring of an account "
+             f"no Mac is on goes first (A kept {held(ra2) if ra2 else None}, D got "
+             f"{held(rd) if rd else None})")]
+
+def gap_scenario(no_gap_reset=False):
+    """An account away LONGER than USAGE_RING_GAP_SEC (its Mac asleep overnight:
+    link pruned, ring frozen, no staleness edge) comes back in a new window only 3
+    points higher - not a drop. Its ring must hold ONLY post-return samples. And
+    an absence of EXACTLY the gap does not reset (the bound is `>`)."""
+    rs = AccountRings()
+    t = STEP_MS
+    for i in range(5):
+        rs.sample_all([("acctA", 0, 2)], 0, t); t += STEP_MS
+    last = t - STEP_MS
+    t = last + GAP_MS + STEP_MS                     # away past the gap
+    rs.sample_all([("acctA", 0, 5)], 0, t, no_gap_reset=no_gap_reset)
+    t += STEP_MS
+    rs.sample_all([("acctA", 0, 6)], 0, t, no_gap_reset=no_gap_reset)
+    ra = rs.ring_of("acctA")
+    rs2 = AccountRings()
+    for i in range(3):
+        rs2.sample_all([("acctA", 0, 40)], 0, (i + 1) * STEP_MS)
+    rs2.sample_all([("acctA", 0, 41)], 0, 3 * STEP_MS + GAP_MS)
+    rb = rs2.ring_of("acctA")
+    return [
+        ("mirror 13a", ra is not None and held(ra) == [5, 6],
+         f"mirror 13a: an account away longer than USAGE_RING_GAP_SEC ({GAP_SEC}s) that "
+         f"returns 3 points HIGHER (a new window the drop test cannot see) holds only "
+         f"its post-return samples (holds {held(ra) if ra else None}, want [5, 6])"),
+        ("mirror 13b", rb is not None and held(rb) == [40, 40, 40, 41],
+         f"mirror 13b: an absence of exactly USAGE_RING_GAP_SEC does NOT reset - the "
+         f"bound is `>` (holds {held(rb) if rb else None})"),
+    ]
+
+# The structural half of the per-account feed, as a FUNCTION of the source text,
+# so --selftest can hand it a faulted copy of usage.ino.
+def check_sample_all(src):
+    """[(name, ok, message)] for usageRingsSampleAll()'s own body."""
+    try:
+        body = strip_comments(func_body("void usageRingsSampleAll()", src))
+    except (ValueError, IndexError):
+        body = ""
+    loop = re.search(r"for\s*\(\s*int\s+(\w+)\s*=\s*0\s*;\s*(\w+)\s*<\s*usageAcctCount\s*;", body)
+    v = re.escape(loop.group(1)) if loop and loop.group(1) == loop.group(2) else "no_such_var_xyz"
+    return [
+        ("structural 9b", loop is not None and loop.group(1) == loop.group(2)
+         and re.search(rf"usageRingSample\s*\(\s*\*\s*\w+\s*,\s*usageAcct\[\s*{v}\s*\]\s*\)", body) is not None,
+         "structural 9b: usageRingsSampleAll() loops a < usageAcctCount and samples EACH "
+         "account's own usageAcct[a] - never the selected account's global `usage`"),
+        ("structural 9c", re.search(rf"accountKeyFor\s*\(\s*usageAcctFirstLink\[\s*{v}\s*\]", body) is not None
+         and re.search(r"usageRingFor\s*\(", body) is not None,
+         "structural 9c: usageRingsSampleAll() picks each account's ring BY ITS KEY "
+         "(accountKeyFor(usageAcctFirstLink[a]) -> usageRingFor()), not by index"),
+    ]
+
+def check_ring_for(src):
+    """[(name, ok, message)] for usageRingFor()'s reclaim order."""
+    try:
+        body = strip_comments(func_body("UsageRing* usageRingFor(", src))
+    except (ValueError, IndexError):
+        body = ""
+    free_m = re.search(r"if\s*\(\s*!\s*usageRings\[\s*\w+\s*\]\.owner\[0\]\s*\)", body)
+    live_m = re.search(r"if\s*\(\s*!\s*usageAccountKeyLive\s*\(\s*usageRings\[\s*\w+\s*\]\.owner\s*\)\s*\)", body)
+    return [("structural 9j", free_m is not None and live_m is not None
+             and free_m.start() < live_m.start()
+             and re.search(r"\bfor\s*\(", body[free_m.end():live_m.start()]) is not None
+             and "usageAcctCount" not in body,
+             "structural 9j: usageRingFor() takes a FREE ring in one pass, THEN (a separate "
+             "loop) one whose owner no linked Mac is on (!usageAccountKeyLive(owner)) - never "
+             "\"not among usageAcctCount\", which would take a linked-but-readingless account's ring")]
+
+def check_gap_reset(src):
+    """[(name, ok, message)] for usageRingSample()'s gap reset."""
+    sig = re.search(r"void\s+usageRingSample\s*\(\s*UsageRing\s*&\s*(\w+)\s*,", strip_comments(src))
+    rv = re.escape(sig.group(1)) if sig else "no_such_ring_xyz"
+    try:
+        body = strip_comments(func_body("void usageRingSample(", src))
+    except (ValueError, IndexError):
+        body = ""
+    gap = re.search(rf"if\s*\(\s*{rv}\.count\s*>\s*0\s*&&\s*now\s*-\s*{rv}\.last\s*>\s*"
+                    rf"\(unsigned long\)\s*USAGE_RING_GAP_SEC\s*\*\s*1000UL\s*\)\s*"
+                    rf"usageRingReset\s*\(\s*{rv}\s*\)\s*;", body)
+    rate = re.search(rf"now\s*-\s*{rv}\.last\s*<\s*USAGE_RING_STEP_MS", body)
+    drop = re.search(r"USAGE_RING_DROP_PCT", body)
+    return [("structural 9m", gap is not None and rate is not None and drop is not None
+             and rate.start() < gap.start() < drop.start(),
+             "structural 9m: usageRingSample() resets its ring when `now - r.last > "
+             "USAGE_RING_GAP_SEC * 1000` (r.count > 0), after the rate limit and BEFORE "
+             "the drop test - an account away overnight cannot resume across two windows")]
+
 def run_selftest():
     """--selftest, same teeth-proving convention as palette-check.mjs: exit 0
-    ONLY when the injected fault IS caught by the checker's own assertion,
-    non-zero if the checker would be blind to it. The fault is the permanent
-    in-mirror `level_bug` variant (Ring.sample's level_bug=True path, added
-    for item 4's inline teeth-proof): a stale-triggered ring reset that fires
-    on every stale TICK instead of once on the EDGE into staleness - the exact
-    regression item 4's `mirror 4` assertion (reset_calls == 1) exists to
-    catch. This reruns that scenario through the injected variant and checks
-    that mirror 4's own condition would now report FAIL, rather than merely
-    trusting the teeth-proof already embedded in the normal run (mirror 4
-    teeth, which proves the MIRROR can tell the two apart, not that this
-    checker's own --selftest flag does)."""
+    ONLY when EVERY injected fault IS caught by the checker's own assertion,
+    BY NAME, non-zero if the checker would be blind to any of them.
+
+    Fault 1 is the permanent in-mirror `level_bug` variant (Ring.sample's
+    level_bug=True path, added for item 4's inline teeth-proof): a
+    stale-triggered ring reset that fires on every stale TICK instead of once
+    on the EDGE into staleness - the exact regression item 4's `mirror 4`
+    assertion (reset_calls == 1) exists to catch. This reruns that scenario
+    through the injected variant and checks that mirror 4's own condition
+    would now report FAIL, rather than merely trusting the teeth-proof already
+    embedded in the normal run (mirror 4 teeth, which proves the MIRROR can
+    tell the two apart, not that this checker's own --selftest flag does).
+
+    Fault 2 is the per-account ring's defining regression: usageRingsSampleAll()
+    feeding `usage` (the SELECTED account's figures) into every ring. Injected
+    into the mirror, `mirror 12b` (B's ring never contains A's value) must
+    FAIL; injected into a copy of usage.ino's own text, `structural 9b` must."""
+    caught = True
     print("--selftest: injecting the level_bug variant (reset on every stale "
           "tick, not on the edge into staleness) into mirror 4's scenario.")
     r = Ring()
@@ -426,12 +756,118 @@ def run_selftest():
     print(f"  injected: reset_calls={r.reset_calls} (mirror 4 wants exactly 1)")
     if r.reset_calls != 1:
         print(f"  mirror 4's `reset_calls == 1` assertion correctly reports FAIL "
-              f"under the injected fault (reset_calls={r.reset_calls}) - selftest PASSES")
-        sys.exit(0)
+              f"under the injected fault (reset_calls={r.reset_calls}) - caught")
     else:
         print("  mirror 4's `reset_calls == 1` assertion is BLIND to the injected "
-              "fault (still reads 1 under it) - selftest FAILS")
-        sys.exit(1)
+              "fault (still reads 1 under it)")
+        caught = False
+
+    print("--selftest: injecting `usage` (the selected account) into EVERY ring, "
+          "into the two-account mirror.")
+    clean = {name: ok for name, ok, _ in two_account_scenario(False)}
+    faulted = {name: (ok, msg) for name, ok, msg in two_account_scenario(True)}
+    if not clean.get("mirror 12b"):
+        print("  mirror 12b FAILS even WITHOUT the fault - the selftest proves nothing")
+        caught = False
+    elif not faulted["mirror 12b"][0]:
+        print(f"  mirror 12b correctly reports FAIL under the fault: {faulted['mirror 12b'][1]} - caught")
+    else:
+        print("  mirror 12b is BLIND to the injected fault")
+        caught = False
+
+    print("--selftest: injecting `usage` for `usageAcct[a]` into a copy of "
+          "usageRingsSampleAll()'s own source.")
+    try:
+        body = func_body("void usageRingsSampleAll()", INO)
+    except (ValueError, IndexError):
+        body = None
+    if body is None:
+        print("  usageRingsSampleAll() has no definition in usage.ino - nothing to inject into")
+        caught = False
+    else:
+        bad_body, k = re.subn(r"usageAcct\[\s*(\w+)\s*\]\s*\)", "usage)", body)
+        clean9 = {name: ok for name, ok, _ in check_sample_all(INO)}
+        bad9 = {name: ok for name, ok, _ in check_sample_all(INO.replace(body, bad_body))}
+        if k == 0:
+            print("  the injection matched nothing - the fault was never applied")
+            caught = False
+        elif not clean9["structural 9b"]:
+            print("  structural 9b FAILS even WITHOUT the fault - the selftest proves nothing")
+            caught = False
+        elif not bad9["structural 9b"]:
+            print("  structural 9b correctly reports FAIL on the faulted source - caught")
+        else:
+            print("  structural 9b is BLIND to the faulted source")
+            caught = False
+
+    def mirror_fault(label, scen, name):
+        nonlocal caught
+        print(f"--selftest: {label}, into the mirror.")
+        clean = {nm: ok for nm, ok, _ in scen(False)}
+        bad = {nm: (ok, msg) for nm, ok, msg in scen(True)}
+        if not clean.get(name):
+            print(f"  {name} FAILS even WITHOUT the fault - the selftest proves nothing")
+            caught = False
+        elif not bad[name][0]:
+            print(f"  {name} correctly reports FAIL under the fault: {bad[name][1]} - caught")
+        else:
+            print(f"  {name} is BLIND to the injected fault")
+            caught = False
+
+    def source_fault(label, func_sig, old_re, new_text, checker, name):
+        nonlocal caught
+        print(f"--selftest: {label}, into a copy of the real source.")
+        try:
+            body = func_body(func_sig, INO)
+        except (ValueError, IndexError):
+            print(f"  {func_sig} has no definition in usage.ino - nothing to inject into")
+            caught = False
+            return
+        bad_body, k = re.subn(old_re, new_text, body, flags=re.S)
+        clean = {nm: ok for nm, ok, _ in checker(INO)}
+        bad = {nm: ok for nm, ok, _ in checker(INO.replace(body, bad_body))}
+        if k == 0:
+            print("  the injection matched nothing - the fault was never applied")
+            caught = False
+        elif not clean[name]:
+            print(f"  {name} FAILS even WITHOUT the fault - the selftest proves nothing")
+            caught = False
+        elif not bad[name]:
+            print(f"  {name} correctly reports FAIL on the faulted source - caught")
+        else:
+            print(f"  {name} is BLIND to the faulted source")
+            caught = False
+
+    # Fault 3: the gap reset removed - an account away overnight resumes its ring.
+    mirror_fault("removing the gap reset", gap_scenario, "mirror 13a")
+    source_fault("deleting usageRingSample()'s gap-reset statement",
+                 "void usageRingSample(",
+                 r"\n[ \t]*if \(r\.count > 0 && now - r\.last > \(unsigned long\) USAGE_RING_GAP_SEC \* 1000UL\) usageRingReset\(r\);",
+                 "", check_gap_reset, "structural 9m")
+    # Fault 4: usageRingFor() reverted to the brief's single first-fit pass.
+    mirror_fault("reverting usageRingFor() to a single first-fit pass", no_steal_scenario,
+                 "mirror 12g")
+    source_fault("replacing usageRingFor()'s two passes with the single first-fit original",
+                 "UsageRing* usageRingFor(",
+                 r"int pick = -1;.*return &usageRings\[pick\];",
+                 """for (int i = 0; i < MAX_LINKS; i++) {
+    bool live = false;
+    char k[14];
+    for (int a = 0; a < usageAcctCount && !live; a++) {
+      accountKeyFor(usageAcctFirstLink[a], k, sizeof(k));
+      live = strcmp(k, usageRings[i].owner) == 0;
+    }
+    if (!usageRings[i].owner[0] || !live) {
+      strlcpy(usageRings[i].owner, key, sizeof(usageRings[i].owner));
+      usageRingReset(usageRings[i]);
+      usageRings[i].wasStale = false;
+      return &usageRings[i];
+    }
+  }
+  return nullptr;""", check_ring_for, "structural 9j")
+
+    print("--selftest PASSES" if caught else "--selftest FAILS")
+    sys.exit(0 if caught else 1)
 
 if "--selftest" in sys.argv:
     run_selftest()
@@ -652,11 +1088,21 @@ chk(avg_clamped == BURN_MAX_LEFT_MIN,
 # synthetic ~13.9-day span (not a realistic OAuth-poll cadence, just large
 # enough that (100-pct)/slope clears BURN_MAX_LEFT_MIN before the clamp, and
 # still safely inside the ~49.7-day millis() wrap this repo documents).
+#
+# FILLED DIRECTLY, NOT THROUGH sample(), since the gap reset: 40,000,000 ms between
+# samples is far past USAGE_RING_GAP_SEC, so the sampler now (correctly) resets on
+# every one of them and this ring would never hold two samples. What this case
+# tests is usageBurnMinutes()'s CLAMP arithmetic on a near-zero positive slope, and
+# that slope is still reachable on hardware through a gap-legal but oddly shaped
+# series (a high middle between a low oldest and a slightly higher newest), so the
+# clamp still matters; the ring's fields are set exactly as sample() would have
+# left them without the gap reset.
 r14 = Ring()
 STEP_LARGE_MS = 40_000_000
 for i in range(SLOTS):
-    pct = 40 + (i * RING_RISE) // (SLOTS - 1)
-    r14.sample(0, pct, i * STEP_LARGE_MS)
+    r14.pct[i] = 40 + (i * RING_RISE) // (SLOTS - 1)
+    r14.at[i] = i * STEP_LARGE_MS
+r14.count, r14.head, r14.last = SLOTS, 0, (SLOTS - 1) * STEP_LARGE_MS
 ring_clamped = burn_minutes(41, 0, RING_MAX, False, r14)
 chk(ring_clamped == BURN_MAX_LEFT_MIN,
     f"mirror 11b: a ring-slope estimate from a near-zero positive slope also "
@@ -680,6 +1126,15 @@ chk(abs(truncated_slope - 3.0) < 1e-9 and abs(precise_slope - truncated_slope) >
     f"of {precise_slope} - the case usage.ino:389's fix exists for, and the case a mirror written "
     f"against the truncating version would have enshrined")
 
+# ---- item 12: ONE RING PER ACCOUNT (see AccountRings above) ----------------
+for _name, ok, msg in (two_account_scenario() + ring_reuse_scenario()
+                        + no_steal_scenario()):
+    chk(ok, msg)
+
+# ---- item 13: THE GAP RESET (an account away overnight) --------------------
+for _name, ok, msg in gap_scenario():
+    chk(ok, msg)
+
 MIRROR_COUNT = n
 
 # =============================================================================
@@ -691,38 +1146,46 @@ MIRROR_COUNT = n
 # actual text instead, so an edit to the real function - not merely to this
 # checker's model of it - is what these can catch.
 # =============================================================================
-def strip_comments(s):
-    return re.sub(r"//[^\n]*", "", s)
-
-def func_body(name_with_open_paren, src):
-    """Brace-balanced extraction of a function body, starting from its own
-    definition text (not a forward declaration or a call site)."""
-    start = src.index(name_with_open_paren)
-    brace = src.index("{", start)
-    depth = 0
-    i = brace
-    while True:
-        if src[i] == "{":
-            depth += 1
-        elif src[i] == "}":
-            depth -= 1
-            if depth == 0:
-                return src[brace:i + 1]
-        i += 1
+# (strip_comments() and func_body() moved above run_selftest(), which needs them
+# for the per-account source fault.)
 
 # 1. usageRingSample tests the staleness flag for INEQUALITY, not merely truth -
 # the edge-vs-level distinction from mirror item 4, bound to the actual code.
-body1 = strip_comments(func_body("void usageRingSample()", INO))
-chk(re.search(r"if\s*\(\s*stale\s*!=\s*usageRingWasStale\s*\)", body1) is not None,
-    "structural 1: usageRingSample() tests `stale != usageRingWasStale` (an EDGE), "
-    "not `if (stale)` (a LEVEL)")
+#
+# PER ACCOUNT: the sampler takes its ring and its reading as PARAMETERS
+# (usageRingSample(UsageRing& r, const Usage& u)), so every assertion on its body
+# is bound to the parameter names CAPTURED from its own signature - not to `r`/`u`
+# spelled here, and not to the old globals, which no longer exist.
+def body_of(name, src=INO):
+    """func_body() with comments stripped, or "" when there is no DEFINITION -
+    so a missing function FAILS its assertions by name instead of crashing."""
+    try:
+        return strip_comments(func_body(name, src))
+    except (ValueError, IndexError):   # no definition, or unbalanced source
+        return ""
+INO_NC = strip_comments(INO)
+sig1 = re.search(r"void\s+usageRingSample\s*\(\s*UsageRing\s*&\s*(\w+)\s*,"
+                 r"\s*const\s+Usage\s*&\s*(\w+)\s*\)\s*\{", INO_NC)
+R1 = re.escape(sig1.group(1)) if sig1 else "no_such_ring_xyz"
+U1 = re.escape(sig1.group(2)) if sig1 else "no_such_usage_xyz"
+body1 = body_of("void usageRingSample(")
+chk(re.search(rf"if\s*\(\s*stale\s*!=\s*{R1}\.wasStale\s*\)", body1) is not None,
+    "structural 1: usageRingSample() tests `stale != r.wasStale` (an EDGE, on ITS "
+    "OWN ring's flag), not `if (stale)` (a LEVEL)")
 
 # 2. usageRingSlope takes x from the stored TIMESTAMPS, not the slot index - a
 # missed poll leaves a real gap, and indexing would silently mis-fit it.
-body2 = strip_comments(func_body("bool usageRingSlope(", INO))
-chk(re.search(r"double\s+x\s*=.*usageRingAt\[idx\]\s*-\s*usageRingAt\[oldest\]", body2) is not None,
-    "structural 2: usageRingSlope() derives x from usageRingAt[idx] (the stored "
-    "timestamp), not from the loop index")
+# The readers bind `const UsageRing& X = usageRingSelected();` and read X's
+# fields; X is CAPTURED per function (see SELECTED_BIND), never assumed.
+SELECTED_BIND = r"const\s+UsageRing\s*&\s*(\w+)\s*=\s*usageRingSelected\s*\(\s*\)\s*;"
+def selected_var(body):
+    m = re.search(SELECTED_BIND, body)
+    return re.escape(m.group(1)) if m else "no_such_ring_xyz"
+body2 = body_of("bool usageRingSlope(")
+R2 = selected_var(body2)
+chk(re.search(rf"double\s+x\s*=.*{R2}\.at\[idx\]\s*-\s*{R2}\.at\[oldest\]", body2) is not None,
+    "structural 2: usageRingSlope() derives x from r.at[idx] (the SELECTED ring's "
+    "stored timestamp), not from the loop index")
 chk(re.search(r"double\s+x\s*=\s*\(double\)\s*i\s*;", body2) is None,
     "structural 2b: x is not merely the slot index i")
 
@@ -759,13 +1222,15 @@ chk(warm_check is not None and generic_check is not None
     "generic `mins < 0` catch-all - reversed, BURN_WARMING would always print "
     "\"burn --\" instead of \"measuring\"")
 
-# 5. usageRingReset() is reached from BOTH reset paths inside usageRingSample -
-# the drop and the staleness edge - counted rather than eyeballed.
-reset_calls_in_sample = len(re.findall(r"\busageRingReset\s*\(\s*\)", body1))
-chk(reset_calls_in_sample == 2,
-    f"structural 5: usageRingReset() is called from both reset paths inside "
-    f"usageRingSample() (found {reset_calls_in_sample} call sites, want 2: the "
-    f"staleness edge and the drop)")
+# 5. usageRingReset() is reached from ALL THREE reset paths inside usageRingSample -
+# the staleness edge, the gap (an account away past USAGE_RING_GAP_SEC) and the
+# drop - counted rather than eyeballed. Was 2 before the gap reset; 9m binds the
+# gap's own site and its order.
+reset_calls_in_sample = len(re.findall(rf"\busageRingReset\s*\(\s*{R1}\s*\)", body1))
+chk(reset_calls_in_sample == 3,
+    f"structural 5: usageRingReset(r) - on the sampler's OWN ring parameter - is "
+    f"called from all three reset paths inside usageRingSample() (found "
+    f"{reset_calls_in_sample} call sites, want 3: the staleness edge, the gap and the drop)")
 
 # 6. usageBurnMinutes() CLAMPS its estimate in BOTH branches against
 # BURN_MAX_LEFT_MIN - not merely in the mirror above, which would keep passing
@@ -826,11 +1291,105 @@ chk('"LAST 2.5H"' not in body_now,
 # usageRingSpanMin() itself must return 0 for a not-yet-fillable ring - the
 # same shape battTrendSpanMin() (power.ino) uses, so a caption built on it can
 # never claim history that was never sampled.
-body_span = strip_comments(func_body("int usageRingSpanMin()", INO))
-chk(re.search(r"usageRingCount\s*<\s*2", body_span) is not None
-    and re.search(r"return\s+0\s*;", body_span) is not None,
-    "structural 8c: usageRingSpanMin() returns 0 when usageRingCount < 2, "
-    "mirroring battTrendSpanMin()'s own guard")
+body_span = body_of("int usageRingSpanMin()")
+R8 = selected_var(body_span)
+chk(re.search(rf"{R8}\.count\s*<\s*2\s*\)\s*return\s+0\s*;", body_span) is not None,
+    "structural 8c: usageRingSpanMin() returns 0 when the SELECTED ring's "
+    "count < 2, mirroring battTrendSpanMin()'s own guard")
+
+# 9. ONE RING PER ACCOUNT, bound to the real source. The mirror (item 12) proves
+# the algorithm; these prove usage.ino is that algorithm.
+#
+# 9a. The sampler's ring and reading are PARAMETERS, and its body never reads the
+# global `usage` - which is the SELECTED account's merged reading, i.e. exactly the
+# feed that interleaved two accounts in one ring.
+chk(sig1 is not None,
+    "structural 9a: usageRingSample takes (UsageRing& r, const Usage& u) - the ring "
+    "and the reading are both parameters")
+chk(body1 != "" and re.search(r"\busage\s*\.", body1) is None
+    and re.search(rf"\b{U1}\.fiveHourPct\b", body1) is not None
+    and re.search(rf"\bstale\s*=\s*{U1}\.quotaAgeSec\s*>\s*QUOTA_STALE_SEC", body1) is not None,
+    "structural 9a2: usageRingSample()'s body reads its OWN reading parameter "
+    "(u.fiveHourPct, and u.quotaAgeSec for staleness) and never the global `usage.`")
+chk(re.search(rf"{R1}\.pct\[\s*{R1}\.head\s*\]\s*=\s*\(uint8_t\)\s*{U1}\.fiveHourPct\s*;", body1) is not None
+    and re.search(r"usageRings\s*\[", body1) is None,
+    "structural 9a3: usageRingSample() stores u.fiveHourPct into r.pct[r.head] - "
+    "its OWN ring parameter, never a hard-wired usageRings[i]")
+
+# 9b/9c. The feed: every account, its own reading, its own ring by key.
+for _name, ok, msg in check_sample_all(INO):
+    chk(ok, msg)
+chk(re.search(r"\busageRingsSampleAll\s*\(\s*\)\s*;", strip_comments(MAIN)) is not None
+    and re.search(r"\busageRingSample\s*\(", strip_comments(MAIN)) is None,
+    "structural 9d: the 1s tick in deckhand_display.ino calls usageRingsSampleAll(), "
+    "and nothing there calls usageRingSample() directly")
+chk(re.search(r"\bUsageRing\s+usageRings\s*\[\s*MAX_LINKS\s*\]", INO_NC) is not None,
+    "structural 9e: usageRings[] is sized MAX_LINKS - one ring per possible account")
+
+# 9f. The readers - slope, span, the sparkline and its hash - all go through
+# usageRingSelected(), and none indexes usageRings[] itself (a reader hard-wired
+# to one slot would show account 0's history under account 1's header).
+for fname in ("bool usageRingSlope(", "int usageRingSpanMin()",
+              "uint32_t usageRingHash()", "void drawUsageSpark("):
+    b = body_of(fname)
+    v = selected_var(b)
+    fn = re.search(r"(\w+)\s*\(", fname).group(1)
+    chk(b != "" and re.search(SELECTED_BIND, b) is not None
+        and re.search(rf"\b{v}\.(count|pct|at|head)\b", b) is not None
+        and re.search(r"usageRings\s*\[", b) is None,
+        f"structural 9f: {fn}() reads the ring through "
+        f"`const UsageRing& r = usageRingSelected();` and its fields, never usageRings[] directly")
+# The burn verdict reads the ring ONLY through usageRingSlope() (9f binds that).
+chk(re.search(r"\busageRingSlope\s*\(", body3) is not None
+    and re.search(r"usageRings\s*\[|usageRingSelected\s*\(", body3) is None,
+    "structural 9g: usageBurnMinutes() reads the ring only through usageRingSlope(), "
+    "which reads the SELECTED account's ring")
+
+# 9h. No bare old global survives anywhere in the sketch's code. Each one is a
+# single ring shared by every account; one left behind is a reader still looking
+# at the interleaved series.
+OLD_GLOBALS = r"\b(usageRingPct|usageRingAt|usageRingCount|usageRingHead|usageRingLast|usageRingWasStale)\b"
+left_old = sorted({(f.name, m.group(1)) for f in D.glob("*.ino")
+                   for m in re.finditer(OLD_GLOBALS, strip_comments(f.read_text()))})
+chk(not left_old,
+    f"structural 9h: no bare usageRingPct[/usageRingAt[/usageRingCount/... global remains "
+    f"in any .ino's code (found {left_old})")
+
+# 9i. usageRingFor(): a reclaimed ring is ALWAYS reset - another account's history
+# is not this one's - and the reclaim is gated on the owner no longer being live.
+body_for = body_of("UsageRing* usageRingFor(")
+own = list(re.finditer(r"strlcpy\s*\(\s*usageRings\[\s*(\w+)\s*\]\.owner\s*,\s*key\b", body_for))
+rst = re.search(rf"usageRingReset\s*\(\s*usageRings\[\s*{re.escape(own[0].group(1))}\s*\]\s*\)",
+                body_for[own[0].end():]) if len(own) == 1 else None
+chk(len(own) == 1 and rst is not None,
+    "structural 9i: usageRingFor() claims a ring at exactly one site, and resets THAT "
+    "ring after writing its new owner")
+# 9j: a FREE ring first, then (separately) one no LINKED Mac is on - see
+# check_ring_for(); a function so --selftest can hand it the single-pass original.
+for _name, ok, msg in check_ring_for(INO):
+    chk(ok, msg)
+# 9m: the gap reset - see check_gap_reset(), same reason.
+for _name, ok, msg in check_gap_reset(INO):
+    chk(ok, msg)
+
+# 9k. usageRingSelected(): the selected account's ring by KEY, an empty ring when
+# there is no account.
+body_sel = body_of("const UsageRing& usageRingSelected()")
+empty = re.search(r"static\s+UsageRing\s+(\w+)\s*;", body_sel)
+ev = re.escape(empty.group(1)) if empty else "no_such_ring_xyz"
+chk(re.search(rf"usageAcctSelIdx\s*<\s*0\s*\)\s*return\s+{ev}\s*;", body_sel) is not None
+    and re.search(r"accountKeyFor\s*\(\s*usageAcctFirstLink\[\s*usageAcctSelIdx\s*\]", body_sel) is not None,
+    "structural 9k: usageRingSelected() returns an EMPTY ring with no account selected, "
+    "else the ring owned by the selected account's key")
+
+# 9l. The owner field holds a whole account key: sized from the SAME number as
+# usageAcctSel[], which accountKeyFor() fills. A shorter owner would truncate two
+# keys to one prefix and hand both accounts the same ring.
+own_sz = re.search(r"char\s+owner\s*\[\s*(\d+)\s*\]", INO_NC)
+sel_sz = re.search(r"char\s+usageAcctSel\s*\[\s*(\d+)\s*\]", INO_NC)
+chk(own_sz is not None and sel_sz is not None and int(own_sz.group(1)) >= int(sel_sz.group(1)),
+    f"structural 9l: UsageRing.owner[{own_sz.group(1) if own_sz else '?'}] holds a whole "
+    f"account key (usageAcctSel[{sel_sz.group(1) if sel_sz else '?'}])")
 
 def fn_body(src, name):
     """The braces-balanced body of a C function, comments stripped."""
