@@ -1093,6 +1093,45 @@ check("the awake arm carries the latency and the slow arm does not - asleep the 
       re.search(r"latency = slow \? 0 : BLE_AWAKE_LATENCY", _bsi) is not None
       and re.search(r"p\.latency = latency;", _bsi) is not None)
 
+# ---- THE TWO NEW POWER-OFF STEPS: USB PADS AND THE SD BUS ------------------
+# Both found by reading the core's sdkconfig, which carries explicit sleep
+# leakage workarounds for FLASH and PSRAM and none for USB-Serial-JTAG - while
+# CONFIG_USJ_ENABLE_USB_SERIAL_JTAG is y because CDCOnBoot=cdc needs it. The SD
+# bus is the other: a card is physically present and the pins were left as found.
+_bits = dict(re.findall(r"#define\s+(PWROFF_[A-Z_]+)\s+(0x[0-9A-Fa-f]+)", MAIN))
+_val = {k: int(v, 16) for k, v in _bits.items()}
+check("both new power-off steps exist as BITS, the shape this file requires - "
+      "'nothing here is unconditional any more'",
+      "PWROFF_USB_ISOLATE" in _val and "PWROFF_SD_ISOLATE" in _val)
+# DISTINCT, derived rather than transcribed: two steps sharing a bit would make one
+# of them unreachable while every report still printed both.
+check("...on distinct bits, or one step silently rides the other's flag",
+      len(set(_val.values())) == len(_val))
+_dflt = re.search(r"uint32_t pwrOffMode =([^;]+);", MAIN)
+_dflt = _dflt.group(1) if _dflt else ""
+check("both default OFF - a saving that defaults ON optimises the 'before' leg of "
+      "every future A/B, which poisons a measurement rather than breaking it",
+      "PWROFF_USB_ISOLATE" not in _dflt and "PWROFF_SD_ISOLATE" not in _dflt)
+_pw = POWER
+check("the USB step is GATED on its own bit",
+      re.search(r"if \(pwrOffMode & PWROFF_USB_ISOLATE\)", _pw) is not None)
+check("the SD step is GATED on its own bit",
+      re.search(r"if \(pwrOffMode & PWROFF_SD_ISOLATE\)", _pw) is not None)
+# The SD pins are PARSED from the board header, never retyped: a re-pinned board
+# would otherwise isolate six pins belonging to something else entirely.
+check("the SD step names the PIN_SD_* constants rather than literals, so a re-pin "
+      "follows instead of isolating six unrelated pins",
+      all(f"PIN_SD_{n}" in _pw for n in ("CLK", "CMD", "D0", "D1", "D2", "D3")))
+# rtc_gpio_isolate() only reaches GPIO 0..21 on the S3 (SOC_RTCIO_PIN_COUNT 22).
+# A pin outside that range is a silent no-op - the call returns and nothing floats.
+_usb = re.findall(r"rtc_gpio_isolate\(\(gpio_num_t\) (\d+)\)", _pw)
+check("the USB pads named are inside the RTC set (0..21), or rtc_gpio_isolate is a "
+      "silent no-op and the step does nothing at all",
+      len(_usb) >= 2 and all(0 <= int(g) <= 21 for g in _usb))
+check("PWROFFMODE reports both new flags, or a mode cannot be read back and an A/B "
+      "cannot attribute its own legs",
+      "usbIso=%d" in MAIN and "sdIso=%d" in MAIN)
+
 # ---- THE POWER-OFF RECEIPT REACHES A HOST THAT IS NOT ON THE CABLE ---------
 # sendLineToHost() fans out to Serial AND BLE, but its BLE half is gated on
 # bleConnected - and at boot no central has connected yet. So the receipt for a

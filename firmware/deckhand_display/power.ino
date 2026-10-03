@@ -1196,6 +1196,29 @@ void enterDeepSleep() {
 
   if (pwrOffMode & PWROFF_QSPI_ISOLATE)
     for (unsigned i = 0; i < sizeof(qspi) / sizeof(qspi[0]); i++) rtc_gpio_isolate(qspi[i]);
+  // 6. FLOAT THE USB D-/D+ PADS. This core sets CONFIG_USJ_ENABLE_USB_SERIAL_JTAG
+  //    and CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG (CDCOnBoot=cdc requires them), so the
+  //    USB-Serial-JTAG PHY and its pads are powered the whole time this board is
+  //    "off". The core carries explicit sleep-leakage workarounds for FLASH and for
+  //    PSRAM and none for this one. Costs nothing on the way out: deep sleep here
+  //    ends in a RESET, which re-initialises the pads before USB is used again.
+  if (pwrOffMode & PWROFF_USB_ISOLATE) {
+    rtc_gpio_isolate((gpio_num_t) 19);
+    rtc_gpio_isolate((gpio_num_t) 20);
+  }
+  // 7. FLOAT THE SDMMC BUS. A card is PRESENT on this board (SDPROBE: ok width=4
+  //    type=SDHC size=14911MB) and SDPROBE leaves GPIO 2..7 as it found them, so
+  //    the bus sits driving or floating into a card that was never deselected for
+  //    the entire power-off. Isolating cannot cut the card's VDD - nothing on this
+  //    board gates it - so this is the ceiling of what software can do here, and
+  //    it is a bit rather than a default because that ceiling may well be zero.
+  if (pwrOffMode & PWROFF_SD_ISOLATE) {
+    const gpio_num_t sd[] = {
+      (gpio_num_t) PIN_SD_CLK, (gpio_num_t) PIN_SD_CMD, (gpio_num_t) PIN_SD_D0,
+      (gpio_num_t) PIN_SD_D1,  (gpio_num_t) PIN_SD_D2,  (gpio_num_t) PIN_SD_D3,
+    };
+    for (unsigned i = 0; i < sizeof(sd) / sizeof(sd[0]); i++) rtc_gpio_isolate(sd[i]);
+  }
   // NOT powering down VDD_SPI here, and that is a REVERSAL of an earlier guess.
   // This core already sets CONFIG_ESP_SLEEP_{PSRAM,FLASH}_LEAKAGE_WORKAROUND and
   // CONFIG_ESP_SLEEP_MSPI_NEED_ALL_IO_PU, and esp_deep_sleep_start() powers the

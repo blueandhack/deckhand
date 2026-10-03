@@ -772,6 +772,25 @@ bool saveLightIdle = false;
 // discovering later that a figure was credited to the wrong change.
 #define PWROFF_LED_LOW      0x10  // hold the WS2812's data line low
 #define PWROFF_RTC_OFF      0x20  // power down the RTC domains
+// TWO CONSUMERS THE TEARDOWN NEVER TOUCHED, found by reading the SDK config
+// rather than by guessing at the panel again. Both DEFAULT 0, because the rule
+// above is the whole reason this is a bitmask: two changes once shipped on
+// reasoning and neither moved the number.
+//
+// USB: CONFIG_USJ_ENABLE_USB_SERIAL_JTAG and CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+// are both y in this core (CDCOnBoot=cdc needs them), so the USB-Serial-JTAG PHY
+// and its D-/D+ pads are live. The core already carries the FLASH and PSRAM sleep
+// leakage workarounds - this path has no equivalent, and nothing here has ever
+// addressed it. GPIO19/20 are inside the RTC set (0..21), so they take
+// rtc_gpio_isolate() exactly like the six QSPI pins.
+#define PWROFF_USB_ISOLATE  0x40  // float the USB D-/D+ pads
+// SD: SDPROBE measured a card PRESENT (ok width=4 type=SDHC size=14911MB) and
+// says it "leaves GPIO 2..7 as it found them". A card that is never deselected
+// holds its own standby current, and the bus pins are left driving or floating
+// into it for the whole power-off. Isolating cannot cut the card's VDD - no pin
+// on this board gates it - so this is the most that software can do here, and
+// whether it is worth anything is a measurement rather than a claim.
+#define PWROFF_SD_ISOLATE   0x80  // float the SDMMC bus
 // DEFAULT 0x7, AND THE DEFAULT MOVED BECAUSE THE ANSWER WAS SEEN. It shipped as
 // 0 while every step was a guess - a saving defaulting ON silently optimises the
 // "before" leg of every future A/B, which poisons a measurement rather than
@@ -8789,14 +8808,16 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     char line[200];
     snprintf(line, sizeof(line),
              "PWROFFMODE 0x%lX (panelSleep=%d icReset=%d codecDown=%d qspiIsolate=%d "
-             "ledLow=%d rtcOff=%d) - 0 is the original teardown, the baseline",
+             "ledLow=%d rtcOff=%d usbIso=%d sdIso=%d) - 0 is the original teardown, the baseline",
              (unsigned long) pwrOffMode,
              (pwrOffMode & PWROFF_PANEL_SLEEP) ? 1 : 0,
              (pwrOffMode & PWROFF_IC_RESET) ? 1 : 0,
              (pwrOffMode & PWROFF_CODEC_DOWN) ? 1 : 0,
              (pwrOffMode & PWROFF_QSPI_ISOLATE) ? 1 : 0,
              (pwrOffMode & PWROFF_LED_LOW) ? 1 : 0,
-             (pwrOffMode & PWROFF_RTC_OFF) ? 1 : 0);
+             (pwrOffMode & PWROFF_RTC_OFF) ? 1 : 0,
+             (pwrOffMode & PWROFF_USB_ISOLATE) ? 1 : 0,
+             (pwrOffMode & PWROFF_SD_ISOLATE) ? 1 : 0);
     sendLineToHost(line);
     sendLineToHost(pwrOffReport);
   } else if (buf == "SAVINGS") {
