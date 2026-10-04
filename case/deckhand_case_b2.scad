@@ -733,35 +733,43 @@ btn_switch_h = 2.5;
 // slot, hinged at its inboard end, carrying a post on its inner face that reaches
 // down to the switch. One print, nothing to drop in, nothing to lose.
 //
-// THE SPAN IS NOW MEASURED, AND IT REVERSES THE ARGUMENT ABOVE. The plunger note
-// rejected "a thin membrane carrying a 10 mm post" because the span was 10.5+. It
-// is 7.8, measured, and the objection was to a MEMBRANE (a pad hinged all round,
-// which only sags) - a CANTILEVER tongue is stiff sideways (it is 6 mm wide in its
-// own plane) and soft only in the one direction a press goes. What a cantilever
-// costs instead is TILT: the tongue rotates about its root, so the post's tip
-// swings toward the root as it goes down. That is paid by btn_flex_lean below.
+// THE SPAN IS NOW MEASURED, AND THE ARGUMENT ABOVE DOES NOT APPLY TO THIS. The
+// plunger note rejected "a thin membrane carrying a 10 mm post". The span is 10.9,
+// measured - about what that note feared - but its objection was to a MEMBRANE (a
+// pad hinged all round, which only sags). A CANTILEVER tongue is stiff sideways (it
+// is 6 mm wide in its own plane) and soft only in the one direction a press goes.
+// What a cantilever costs instead is TILT: the tongue rotates about its root, so
+// the post's tip swings toward the root as it goes down. btn_flex_lean pays that.
 //
-// MEASURED 2026-10-04, cover off: from the BODY'S TOP EDGE - the plane the cover's
-// inner plate face sits on - down to the top of the button. "About 7.8."
-//
-// IT DISAGREES WITH THE MODEL, and the measurement wins. The model puts the
-// board's back body_d - z_pcb_b = 14.0 below that edge, which makes the switch
-// 6.2 tall - past the vendor's 4.70 "tallest thing on the back". Either the
-// switch is taller than the drawing says, or the board was riding high (not yet
-// clamped by the cover screws) when it was measured. THE SECOND CASE IS THE SAFE
-// ONE: clamping moves the board AWAY from the cover, so the post ends up short,
-// never long. Nothing else in this file reads this number - in particular
-// btn_switch_h and the plunger above still carry the old guess, untouched.
+// TWO READINGS, AND THE FIRST WAS WRONG BY 3.1 MM. Kept, because it is the reason
+// the coupon exists:
+//   1. 7.8 - cover off, "from the body's top edge to the top of the button". It
+//      disagreed with the model (it made the switch 6.2 tall, past the vendor's
+//      4.70 for the whole back) and it was taken over the model anyway. The
+//      coupon's posts, cut to 7.8 - 0.4, then stopped "about 3.5" SHORT.
+//   2. 10.9 = 7.4 + 3.5 - THE COUPON ON THE BOARD, screw pillars standing on the PCB
+//      exactly as the screws will clamp them (photographed 2026-10-04). That is the
+//      installed geometry itself, so no plane can be the wrong one this time. It
+//      also puts the switch at 14.0 - 10.9 = 3.1 above the board's back - under the
+//      4.70, i.e. the model and the measurement now AGREE, which the first did not.
+// btn_switch_h and the plunger above still carry their own 2.5 guess, untouched.
 btn_flex       = true;    // false = the separate plunger above (cover_buttons)
 // The plunger's features (guide hole, sleeve, landing, solid boss) exist only
 // when it is the plunger that is wanted. One name, so no site can disagree.
 btn_plunger    = cover_buttons && !btn_flex;
-btn_meas_gap   = 7.8;     // MEASURED: cover's inner plate face to the switch top
+btn_meas_gap   = 7.4 + 3.5;   // MEASURED with the coupon: cover's inner plate face to the switch top
 // The tip's gap to the switch AT REST. 0.4 where the plunger used 0.3, and the
-// asymmetry is the same one as always, pointed at a new risk: "about 7.8" is a
-// caliper reading of a recessed part, and a flexure that rests ON the switch holds
-// RESET down - a device that looks bricked. A short post costs only travel, and a
-// tongue has travel to spare (see the strain note); a plunger did not care.
+// asymmetry is the same one as always, pointed at a new risk: "about 3.5" is an
+// eyeballed gap, and a flexure that holds the switch down holds RESET down - a
+// device that looks bricked. A short post costs only travel, and a tongue has
+// travel to spare (see the strain note).
+//
+// THE TONGUE IS ALSO TOO WEAK TO HOLD THE SWITCH BY ACCIDENT, which is the margin
+// the reading needs. Its spring is ~3 N/mm in PLA (~1.8 PETG, modelled - see
+// btn_flex_t) against a tactile's ~1.6 N, so a post that lands ON the switch must
+// still bend the tongue ~0.5 mm more before the switch gives. Overlength up to
+// rest + that, ~0.9 mm in PLA, touches the actuator without pressing it. Past it,
+// RESET is held. Both figures are typical-part numbers, NOT this board's.
 btn_flex_rest  = 0.4;
 btn_flex_travel = 0.25;   // the tactile's own stroke - typical SMD, UNMEASURED
 btn_post_len   = btn_meas_gap - btn_flex_rest;   // from the plate's inner face
@@ -1700,10 +1708,10 @@ btn_flex_ramp = cover_th - btn_flex_t;
 btn_flex_len  = mm(abs(btn_y - btn_fence_near) - btn_flex_ramp - 0.5);
 // THE TILT, PAID IN ADVANCE. A cantilever's slope at its tip is 1.5 * d / L, so the
 // post's tip swings toward the root by that times its length as it goes down -
-// 0.44 mm by the time it touches, 0.78 at the bottom of the stroke, against an
+// 0.61 mm by the time it touches, 0.98 at the bottom of the stroke, against an
 // actuator that is ~1.5 mm across in this direction. So the post LEANS the other
 // way by the swing at mid-stroke: it is centred over the switch at the click,
-// rather than at rest where nothing is happening. 0.6 mm, or 4.6 deg - a lean any
+// rather than at rest where nothing is happening. 0.85 mm, or 4.6 deg - a lean any
 // printer takes without support, whichever face is down.
 btn_flex_lean = mm(1.5 * (btn_flex_rest + btn_flex_travel/2) * btn_post_len / btn_flex_len);
 btn_flex_strain = 3 * btn_flex_t * (btn_flex_rest + btn_flex_travel) / (2 * btn_flex_len * btn_flex_len);
@@ -2797,8 +2805,8 @@ module coupon(){
 // the lip, and the two screw pillars at that end - so it SCREWS ONTO THE BODY YOU
 // ALREADY HAVE, with two of the four M3s, and the buttons can be pressed for real
 // on the real board. A whole cover is hours; this is a fraction of it, and it
-// answers the three things the model cannot: does the post reach (btn_meas_gap was
-// "about 7.8"), does it land on the actuator (btn_in was never confirmed on a
+// answers the three things the model cannot: does the post reach (it did not -
+// btn_meas_gap's first reading was 3.1 mm out), does it land on the actuator (btn_in was never confirmed on a
 // cover), and does the press feel right in your filament.
 //
 // Cut on the inboard side just short of the battery fence, so no sliver of the

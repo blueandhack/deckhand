@@ -362,37 +362,60 @@ openscad -o stl/deckhand_b2_cover.stl      -D 'part="cover"'     deckhand_case_b
 openscad -o stl/deckhand_b2_btn_coupon.stl -D 'part="btncoupon"' deckhand_case_b2.scad
 ```
 
-### The span is measured, and the model disagrees with it
+### The span is measured — twice, and the first reading was 3.1 mm out
 
-**7.8 mm, measured with the cover off, from the body's top edge — the plane the cover's inner
-face sits on — to the top of the button.** That is `btn_meas_gap`, and the post is
-`btn_meas_gap − btn_flex_rest` = **7.4** long, measured from the plate's inner face.
+**The post is `btn_meas_gap − btn_flex_rest` = 10.9 − 0.4 = 10.5 mm**, measured from the
+plate's inner face. 10.9 is the second reading. The first was wrong, and is kept because it is
+why the coupon exists:
 
-The model says otherwise: it puts the board's back `body_d − z_pcb_b` = 14.0 below that edge,
-which makes the switch **6.2 mm** tall, past the vendor's 4.70 for the tallest thing on the
-back. **The measurement wins**, and nothing else in the file reads it (`btn_switch_h` and the
-plunger still carry the old 2.5 guess). Two explanations, and the likelier one is safe:
+| | reading | post | what happened |
+|---|---|---|---|
+| 1 | **7.8**, cover off, "from the body's top edge to the top of the button" | 7.4 | the printed coupon's posts stopped **about 3.5 short** |
+| 2 | **10.9** = 7.4 + 3.5, the coupon on the board | **10.5** | the current value |
 
-- the board was **riding high** when measured, not yet clamped by the cover screws. Clamping
-  moves it *away* from the cover, so the post ends up **short** — the safe direction.
-- the switch really is taller than the drawing says. Then 7.4 is right as it stands.
+**The second reading is the installed geometry itself.** The coupon's screw pillars stood on
+the PCB, exactly as the screws will clamp them (photographed 2026-10-04), so no reference plane
+can be the wrong one this time. The photo also showed **each post square over its switch**, so
+`btn_in` holds. That is the first time it has been checked on a cover.
 
-**Neither leaves the post long**, and long is the failure that matters: a post resting on the
-switch holds RESET down, the only way out of deep sleep on this board, so the device looks
-bricked. So `btn_flex_rest` is **0.4**, more than the plunger's 0.3: a tongue has travel to
-spare, and "about 7.8" is a caliper reading of a recessed part.
+**The first reading disagreed with the model, and was taken over it anyway.** The model puts
+the board's back `body_d − z_pcb_b` = 14.0 below the cover's inner face. That made a 7.8 gap a
+**6.2 mm** switch, past the vendor's 4.70 for the tallest thing on the back. That disagreement
+was written down here as a likely board-riding-high problem, which "errs the post short". It
+did err short, by 3.1 mm. **The second reading agrees with the model**: 14.0 − 10.9 = a
+**3.1 mm** switch, under the 4.70. The rule to take from it: when a measurement and the model
+disagree by more than tolerance, the next step is a part that settles which, not a choice
+between them. That part was the coupon, and it cost one short print. (`btn_switch_h` and the
+plunger still carry their own 2.5 guess, untouched.)
+
+**Long is the failure that matters**: a post holding the switch holds RESET down, the only way
+out of deep sleep on this board, so the device looks bricked. So `btn_flex_rest` is **0.4**,
+more than the plunger's 0.3. "About 3.5" was eyeballed, and a tongue has travel to spare.
+
+**The tongue is too weak to hold the switch by accident, and that is the margin the reading
+needs.** Its spring is ~3 N/mm in PLA (~1.8 PETG, modelled) against a tactile's ~1.6 N, so a
+post that lands *on* the switch still has to bend the tongue ~0.5 mm further before the
+switch gives. **Up to ~0.9 mm too long in PLA** (the rest gap plus that), the post touches the
+actuator without pressing it. Past that, RESET is held. Both figures are typical-part numbers,
+not this board's.
+
+**The speaker must be taped over the grille.** In the coupon photo it lay loose on the board,
+under the right-hand post. Taped where `spk_grille` puts it (x 22.5–37.5), it is 6 mm clear of
+either post; loose, it can wedge under one.
 
 ### Why a cantilever tongue, when the plunger note rejected a flexure
 
-The plunger section below rejected *"a thin membrane carrying a 10 mm post"*. The span is now
-7.8, and the rejection was of a **membrane**, a pad hinged all round that can only sag. A
+The plunger section below rejected *"a thin membrane carrying a 10 mm post"*. The span turned
+out to be 10.9, about what it feared, but the rejection was of a **membrane**, a pad hinged
+all round that can only sag. A
 **cantilever** is 6 mm wide in its own plane, so it is stiff sideways, and it is soft only in
 the one direction a press goes.
 
 What a cantilever costs is **tilt**. It rotates about its root, so the post's tip swings
-*toward the root* as it goes down: 0.43 mm by the time it touches, 0.69 at the bottom of the
+*toward the root* as it goes down: 0.61 mm by the time it touches, 0.98 at the bottom of the
 stroke, against an actuator ~1.5 mm across in that direction. So **the post leans the other
-way by `btn_flex_lean` = 0.6 mm** (4.6°), the swing at mid-stroke. It is centred over the
+way by `btn_flex_lean` = 0.85 mm** (4.6°), the swing at mid-stroke. It scales with the post,
+so it grew from 0.6 when the post did. It is centred over the
 switch at the click, not at rest where nothing happens.
 
 ### The numbers — set by strain, not by feel
@@ -564,9 +587,9 @@ Found while sizing `btn_flex`, and recorded rather than fixed because the plunge
 the default. `btn_stem_len = btn_span − btn_rest_gap` is measured from the **plate's inner face**,
 but `button()` hangs it **below the flange**, which sits under the 3.0 sleeve, the 1.9 cone and
 the 1.2 flange. So the tip lands **6.1 mm deeper than intended** in the model's own terms
-(17.3 below the inner face against a 11.2 target), and 9.5 mm past the top of the *measured*
-switch. It would not hold RESET down, since nothing presses a loose plunger but its own
-weight. It would rest on the switch with its head standing ~11 mm proud instead of 1.5. Fix before ever
+(17.3 below the inner face against a 11.2 target), and 6.4 mm past the top of the *measured*
+switch (10.9). It would not hold RESET down, since nothing presses a loose plunger but its own
+weight. It would rest on the switch with its head standing ~8 mm proud instead of 1.5. Fix before ever
 printing `part="buttons"` again: subtract `btn_sleeve_h + cham + btn_flange_t` and size
 `btn_span` from `btn_meas_gap`.
 
@@ -1709,12 +1732,13 @@ case.
 
 ## What is NOT verified
 
-**The printed-in buttons (`btn_flex`) have not been printed.** The model, the checker and the
-renders agree. The beam numbers (force, strain, tilt) are hand mechanics for a uniform layered
-PLA/PETG cantilever, not measurements. `btn_meas_gap` is one caliper reading that disagrees
-with the vendor drawing by 1.5 mm. `btn_flex_travel` (0.25) and the actuator's size are
-typical-part figures, not this board's. Print `part="btncoupon"` first: it closes every one of
-these on the real board.
+**The printed-in buttons (`btn_flex`): one coupon printed, at the WRONG length, and not yet
+pressed.** That coupon (7.4 mm posts) verified that the part prints and screws down, and that
+the posts land over the switches. It measured the shortfall the 10.9 now comes from. **The
+10.5 mm post has not been printed.** "About 3.5" was eyeballed, so reprint the coupon and press
+both buttons before the full cover. The beam numbers (force, strain, tilt, the ~0.9 mm it
+takes to hold a switch down) are hand mechanics for a uniform PLA/PETG cantilever and typical
+switch figures, not measurements. So are `btn_flex_travel` (0.25) and the actuator's size.
 
 
 **Nothing here has been printed.** Every part renders in OpenSCAD with no errors and the
