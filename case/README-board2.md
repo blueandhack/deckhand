@@ -7,7 +7,7 @@ it is proven. What changed is what board 2 actually changes.
 
 ```
 openscad -o stl/deckhand_b2_body.stl -D 'part="body"' deckhand_case_b2.scad
-# parts: body | cover | retainer | stand | buttons | btngauge | coupon | section | all
+# parts: body | cover | retainer | stand | buttons | btngauge | btncoupon | coupon | section | all
 ```
 
 ![assembled, with a real capture on the screen](../docs/device-hero.png)
@@ -348,7 +348,156 @@ which is correct for forming in plastic.
 **Set `board_screws = false` to get the locating pins back**, which is board 1's
 behaviour: they fix the board laterally and hold it against nothing.
 
-## Printed buttons instead of open holes
+## The buttons are printed with the cover now — `btn_flex`
+
+Asked for 2026-10-04: *"I don't want to print the buttons separately."* With `btn_flex = true`
+(the default) each of RESET and BOOT is a **tongue cut out of the cover's own 2.0 mm plate** by
+a U-shaped slot, hinged at its inboard end, with a **post** on its inner face reaching down to
+the switch. One part. Nothing to drop in, nothing to lose, no guide hole to fit.
+
+![the service end from inside: two tongues, their posts, the grille between](preview_btnflex.png)
+
+```
+openscad -o stl/deckhand_b2_cover.stl      -D 'part="cover"'     deckhand_case_b2.scad
+openscad -o stl/deckhand_b2_btn_coupon.stl -D 'part="btncoupon"' deckhand_case_b2.scad
+```
+
+### The span is measured, and the model disagrees with it
+
+**7.8 mm, measured with the cover off, from the body's top edge — the plane the cover's inner
+face sits on — to the top of the button.** That is `btn_meas_gap`, and the post is
+`btn_meas_gap − btn_flex_rest` = **7.4** long, measured from the plate's inner face.
+
+The model says otherwise: it puts the board's back `body_d − z_pcb_b` = 14.0 below that edge,
+which makes the switch **6.2 mm** tall, past the vendor's 4.70 for the tallest thing on the
+back. **The measurement wins**, and nothing else in the file reads it (`btn_switch_h` and the
+plunger still carry the old 2.5 guess). Two explanations, and the likelier one is safe:
+
+- the board was **riding high** when measured, not yet clamped by the cover screws. Clamping
+  moves it *away* from the cover, so the post ends up **short** — the safe direction.
+- the switch really is taller than the drawing says. Then 7.4 is right as it stands.
+
+**Neither leaves the post long**, and long is the failure that matters: a post resting on the
+switch holds RESET down, the only way out of deep sleep on this board, so the device looks
+bricked. So `btn_flex_rest` is **0.4**, more than the plunger's 0.3: a tongue has travel to
+spare, and "about 7.8" is a caliper reading of a recessed part.
+
+### Why a cantilever tongue, when the plunger note rejected a flexure
+
+The plunger section below rejected *"a thin membrane carrying a 10 mm post"*. The span is now
+7.8, and the rejection was of a **membrane**, a pad hinged all round that can only sag. A
+**cantilever** is 6 mm wide in its own plane, so it is stiff sideways, and it is soft only in
+the one direction a press goes.
+
+What a cantilever costs is **tilt**. It rotates about its root, so the post's tip swings
+*toward the root* as it goes down: 0.43 mm by the time it touches, 0.69 at the bottom of the
+stroke, against an actuator ~1.5 mm across in that direction. So **the post leans the other
+way by `btn_flex_lean` = 0.6 mm** (4.6°), the swing at mid-stroke. It is centred over the
+switch at the click, not at rest where nothing happens.
+
+### The numbers — set by strain, not by feel
+
+Root strain for a cantilever is `3·t·d / (2·L²)`. It falls with the **square** of the length,
+and length is what this corner lacks: the battery fence (a 6 mm wall at y 89.3) on one side and
+the cover lip (inner face at y 103.95) on the other. **`btn_flex_len` is derived from both**
+(9.7 mm, post centre to root). The tongue's free end is derived from the post's foot, and an
+assert keeps its slot off the lip.
+
+| | value | why |
+|---|---|---|
+| `btn_flex_t` | **0.8** (4 × 0.2 layers) | at the full 2.0 plate the root would strain 2.1% per press and crack |
+| `btn_flex_w` | 6.0 | the post plus a wall either side |
+| `btn_flex_len` | 9.7 | derived: fence to post, less the root ramp and 0.5 |
+| `btn_flex_slot` | 1.1 modelled, **~0.6 printed** | `mm(0.6 + print_shrink)` — a slot is a long hole, and modelled at 0.6 it prints at 0.1 and fuses |
+| post | Ø3.0, Ø2.4 round tip, 0.3 flared foot | the round tip slides across the actuator through the tilt instead of catching an edge |
+| finger dish | Ø4.0 × 0.5 on the outer face | **flush, not proud**: the plunger stood 1.5 out, so a device laid on its back pressed RESET under its own weight |
+
+**Modelled, for the full press (rest 0.4 + the switch's ~0.25 stroke = 0.65 mm):**
+
+| | force from the tongue | root strain |
+|---|---|---|
+| PLA (E ≈ 3.5 GPa) | **~2.0 N**, plus the switch's own ~1.6 | 0.86% |
+| PETG (E ≈ 2.1 GPa) | ~1.2 N, plus the switch | 0.86% |
+
+That makes a firm small button, not a stiff one. 0.86% is inside PLA's low-cycle comfort (~1%)
+and far inside PETG's. **PETG is the better filament for this part**: same strain, more
+fatigue margin. The model asserts the uniform-beam figure at ≤ 1.2%, and the checker
+re-measures the thickness off the mesh.
+
+**Do not lever the tongue with the cover off.** Installed, the switch's own hard stop limits
+the stroke. Off the device, pushing a tongue 2 mm strains it 2.6%, past where PLA yields.
+
+**The thin span is cut from the INNER face**, so the outer face stays flat whichever way up the
+cover prints, and the tongue is never a cantilever floating over the bed. Both ends of the thin
+span are **45° ramps**, and the root's ramp runs on into the plate past the slot, so neither
+end is a sharp step for a crack to start at. **The slot ends at the root in round caps** for
+the same reason.
+
+### Printing it
+
+**The cover prints exactly as before** — the kickstand lugs on its outer face still force it
+onto support whichever way up it goes. The tongues just ride on that support. Three things:
+
+1. **Set the support Z-distance so it releases cleanly** (0.2 is typical), and **peel support
+   off a tongue toward its free end**, never by prying at the root.
+2. **Check both slots are open all the way round.** If the first layer bridged one, run a
+   blade through it once. Nothing depends on the slot's exact width.
+3. **Printed inner face down**, the post's round tip lands on a support column. Sand off the
+   scar; the tip is the contact face.
+
+### Print the button coupon first — `part="btncoupon"`
+
+`stl/deckhand_b2_btn_coupon.stl`, 56 × 16 × 16 mm: the cover's **service end only** — both
+tongues, both posts, the grille, the lip and the two screw pillars at that end. It **screws onto
+the body you already have** with two of the four M3s, so the buttons can be pressed for real on
+the real board. It answers what the model cannot:
+
+1. **Does the post reach?** A firm press should click, with the tongue moving in under a
+   millimetre. No click → the post is short; raise `btn_meas_gap` by what is missing. **Clicked already with the coupon just
+   screwed down → too long**; lower it. Do not print the cover until it is neither.
+2. **Does it land on the actuator?** `btn_in` (4.0 from the edge to the button centre) was never
+   confirmed on a cover. A press that clicks only when pushed toward one end is landing
+   off-centre.
+3. **Does the press feel right in your filament?** `btn_flex_t` sets that: 0.6 is softer, 1.0
+   much stiffer (force scales with the cube).
+
+**It needs no support at all**, unlike the cover: the lugs are what force the cover onto support,
+and they are at the far end, outside the coupon. So it is exported **outer face down**, the tongue
+is the first four layers on the bed, and everything else grows straight up. Its tongues therefore
+print slightly *better* than the cover's. It proves the reach and the landing exactly, and the
+feel to within that difference.
+
+### `btn_flex = false` brings the plunger back, unchanged
+
+`btn_plunger = cover_buttons && !btn_flex` gates every plunger feature (guide hole, sleeve,
+landing, solid boss), and with `btn_flex = false` the cover's **vertex set is identical** to the
+one exported before this change. Checked by sorted-vertex hash, since the cover's STL is not
+byte-reproducible (see below). **A plateau cover must use the plunger**: `btn_flex` refuses
+`cover_rise > 0` by name, because the buttons would then sit on the taper. `part="buttons"`
+refuses by name while `btn_flex` is on, rather than exporting plungers for a cover with no guide
+hole. `stl/deckhand_b2_buttons.stl` is left as it was, for that path, with the defect noted
+under *The plunger's stem is long* below.
+
+### What the checker binds
+
+`case-b2-check.mjs` gained nine assertions and eight injected faults, each fault caught by
+name. Six assertions are measured on the cover's own mesh, at points placed from echoed constants:
+
+- the post tip stops `btn_flex_rest` short of the **measured** switch (not of `btn_post_len`,
+  so a post drawn longer than its own constant fails)
+- the post leans toward the service edge, found by scanning for the tip rather than assumed
+- the slot is open through the plate at 11 points per tongue, and **material crosses the root
+  line**, so a slot that closes behind the root and frees the tongue fails
+- the thin span measures `btn_flex_t`, and the **strain is recomputed from that measured
+  thickness**, so a recess that silently stops cutting fails even though the model's own
+  strain assert still reads `btn_flex_t` and passes
+
+Three are structural: the post is sized from `btn_meas_gap` and not the modelled span, and
+`btn_flex_slot` carries `print_shrink` and goes through `mm()`. The four plateau-config faults that were
+already there had to select `btn_flex: 'false'`: `btn_flex` refusing a plateau stopped them
+building, which is the *"that trap cost four uncaught faults once"* note, a second time.
+
+## Printed buttons instead of open holes — SUPERSEDED by `btn_flex`, kept for `btn_flex = false`
 
 `cover_buttons = true` (default). The cover's holes shrink to a **sliding fit** on a stem
 and a separate printed plunger rides in each, so nothing is open to dust and RESET/BOOT
@@ -408,6 +557,18 @@ one board where RESET is the only way out of deep sleep.
 So the default assumes **2.5 mm**, taller than a typical SMD tactile (1.5–1.9), because a
 taller assumption makes a *shorter* stem. Measure the switch's height above the board's
 back face and set it; the stem follows.
+
+### The plunger's stem is long — found 2026-10-04, NOT fixed
+
+Found while sizing `btn_flex`, and recorded rather than fixed because the plunger is no longer
+the default. `btn_stem_len = btn_span − btn_rest_gap` is measured from the **plate's inner face**,
+but `button()` hangs it **below the flange**, which sits under the 3.0 sleeve, the 1.9 cone and
+the 1.2 flange. So the tip lands **6.1 mm deeper than intended** in the model's own terms
+(17.3 below the inner face against a 11.2 target), and 9.5 mm past the top of the *measured*
+switch. It would not hold RESET down, since nothing presses a loose plunger but its own
+weight. It would rest on the switch with its head standing ~11 mm proud instead of 1.5. Fix before ever
+printing `part="buttons"` again: subtract `btn_sleeve_h + cham + btn_flange_t` and size
+`btn_span` from `btn_meas_gap`.
 
 ## The buttons could not be fitted, and one missing term is why
 
@@ -1547,6 +1708,14 @@ second points the blade at the service edge. Flipping one alone aims the blade o
 case.
 
 ## What is NOT verified
+
+**The printed-in buttons (`btn_flex`) have not been printed.** The model, the checker and the
+renders agree. The beam numbers (force, strain, tilt) are hand mechanics for a uniform layered
+PLA/PETG cantilever, not measurements. `btn_meas_gap` is one caliper reading that disagrees
+with the vendor drawing by 1.5 mm. `btn_flex_travel` (0.25) and the actuator's size are
+typical-part figures, not this board's. Print `part="btncoupon"` first: it closes every one of
+these on the real board.
+
 
 **Nothing here has been printed.** Every part renders in OpenSCAD with no errors and the
 front face was checked visually (window asymmetry correct, one mic port in the top bezel

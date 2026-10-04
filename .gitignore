@@ -26,6 +26,7 @@ case/example/
 # --- scratch renders ---
 case/preview_*.png
 !case/preview_hero.png
+!case/preview_btnflex.png
 
 # --- anything that looks like a credential, belt and braces ---
 *.pem

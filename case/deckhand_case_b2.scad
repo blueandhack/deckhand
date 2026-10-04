@@ -62,7 +62,7 @@
 // 59.4 x 107.9 x 21.9 mm (board 54.5 x 102.0) - measured off the rendered STLs, not
 // approximated: the header said "~60.5 x 108.5 x 21" while the case was 24.4 thick.
 //
-// Render:  openscad -D part="body|cover|retainer|stand|coupon|section|all" ...
+// Render:  openscad -D part="body|cover|retainer|stand|buttons|btngauge|btncoupon|coupon|section|all" ...
 // ============================================================================
 
 part = "all";
@@ -666,6 +666,8 @@ btn_cham = 0.8;     // outward flare at the cover's outer face, so a nail can fi
 // is wider than the hole, so the button cannot fall out; the stem passes through
 // the hole, stands btn_proud above the outer face to press, and reaches down to
 // just short of the switch.
+// NO LONGER THE DEFAULT: btn_flex (below) prints the buttons as part of the cover,
+// and every plunger feature is gated on btn_plunger = cover_buttons && !btn_flex.
 cover_buttons = true;
 btn_stem_d   = 3.4;                    // the shaft
 // WAS 4.0, AND THAT IS THE WHOLE DEFECT: "the two button holes are small, and the
@@ -724,6 +726,82 @@ btn_rest_gap = 0.3;                    // tip sits this far above the switch AT 
 // default assumes a TALLER switch than typical SMD tactiles (1.5-1.9), because a
 // taller switch means a shorter stem.
 btn_switch_h = 2.5;
+
+// ---------- Buttons printed AS PART OF the cover: a flexure tongue + a post ----------
+// ASKED FOR 2026-10-04: "I don't want to print the buttons separately." With
+// btn_flex on, each button is a TONGUE cut out of the 2.0 mm plate by a U-shaped
+// slot, hinged at its inboard end, carrying a post on its inner face that reaches
+// down to the switch. One print, nothing to drop in, nothing to lose.
+//
+// THE SPAN IS NOW MEASURED, AND IT REVERSES THE ARGUMENT ABOVE. The plunger note
+// rejected "a thin membrane carrying a 10 mm post" because the span was 10.5+. It
+// is 7.8, measured, and the objection was to a MEMBRANE (a pad hinged all round,
+// which only sags) - a CANTILEVER tongue is stiff sideways (it is 6 mm wide in its
+// own plane) and soft only in the one direction a press goes. What a cantilever
+// costs instead is TILT: the tongue rotates about its root, so the post's tip
+// swings toward the root as it goes down. That is paid by btn_flex_lean below.
+//
+// MEASURED 2026-10-04, cover off: from the BODY'S TOP EDGE - the plane the cover's
+// inner plate face sits on - down to the top of the button. "About 7.8."
+//
+// IT DISAGREES WITH THE MODEL, and the measurement wins. The model puts the
+// board's back body_d - z_pcb_b = 14.0 below that edge, which makes the switch
+// 6.2 tall - past the vendor's 4.70 "tallest thing on the back". Either the
+// switch is taller than the drawing says, or the board was riding high (not yet
+// clamped by the cover screws) when it was measured. THE SECOND CASE IS THE SAFE
+// ONE: clamping moves the board AWAY from the cover, so the post ends up short,
+// never long. Nothing else in this file reads this number - in particular
+// btn_switch_h and the plunger above still carry the old guess, untouched.
+btn_flex       = true;    // false = the separate plunger above (cover_buttons)
+// The plunger's features (guide hole, sleeve, landing, solid boss) exist only
+// when it is the plunger that is wanted. One name, so no site can disagree.
+btn_plunger    = cover_buttons && !btn_flex;
+btn_meas_gap   = 7.8;     // MEASURED: cover's inner plate face to the switch top
+// The tip's gap to the switch AT REST. 0.4 where the plunger used 0.3, and the
+// asymmetry is the same one as always, pointed at a new risk: "about 7.8" is a
+// caliper reading of a recessed part, and a flexure that rests ON the switch holds
+// RESET down - a device that looks bricked. A short post costs only travel, and a
+// tongue has travel to spare (see the strain note); a plunger did not care.
+btn_flex_rest  = 0.4;
+btn_flex_travel = 0.25;   // the tactile's own stroke - typical SMD, UNMEASURED
+btn_post_len   = btn_meas_gap - btn_flex_rest;   // from the plate's inner face
+// THE TONGUE. Thin where it bends, full plate where it does not.
+//
+// 0.8 is four 0.2 layers, and the number is set by STRAIN, not by feel. For a
+// cantilever the root strain at a tip deflection d is 3*t*d / (2*L^2), so it
+// scales with THICKNESS and falls with the square of LENGTH - and length is the
+// one thing this corner does not have (the battery fence on one side, the lip on
+// the other; see btn_flex_len). At t 0.8, L 9.7 the press (rest + travel, 0.65)
+// strains the root 0.83%: inside PLA's low-cycle comfort (~1%) and far inside
+// PETG's. Left at the full 2.0 plate it would be 2.1% - a hinge that cracks.
+// Modelled force for that press: ~1.9 N in PLA (~1.2 PETG) on top of the switch's
+// own ~1.6 - a firm small button, not a stiff one.
+//
+// THINNED FROM THE INNER FACE, NOT THE OUTER, and that is a printing decision: the
+// outer face stays flat whichever way up the cover is printed, so the tongue is
+// never a cantilever floating over the bed or over support.
+btn_flex_t     = 0.8;
+btn_flex_w     = 6.0;     // tongue width; the post (3.0) and a wall either side
+// THE SLOT CARRIES print_shrink. A slot is a hole that is long in one direction:
+// both walls move in by half of print_shrink, exactly as a bore's do, so a slot
+// modelled at the 0.6 you want prints at 0.1 and FUSES - the same trap the speaker
+// grille documents. Modelled 1.1, printed ~0.6. If the first layer still bridges
+// it, run a blade through once; nothing else depends on its width.
+btn_flex_slot  = mm(0.6 + print_shrink);
+// The post: a 3.0 column on a flared foot, ending in a rounded tip so it slides
+// across the actuator during the tilt rather than catching an edge of it.
+btn_post_d     = 3.0;
+btn_post_tip_d = 2.4;
+btn_post_foot  = 0.3;     // 45 deg flare where the post meets the tongue - and no more:
+                          // it sets the tongue's free end, which the lip boxes in
+// The tip's distance from the post centre to the tongue's thick/thin step: past
+// the flared foot, so the inner-face recess never bites into the post.
+btn_flex_stiff = mm(btn_post_d/2 + btn_post_foot + 0.4);
+// A shallow dish on the outer face over the post, so a finger finds the tongue.
+// FLUSH, NOT PROUD, on purpose: the old plunger stood 1.5 mm out of the back, and a
+// device laid on its back would press RESET with its own weight. A dish cannot.
+btn_dish_d     = 4.0;
+btn_dish_z     = 0.5;
 
 // ---------- Front-face microphone port (board 2 only) ----------
 // The mic is ON THE BOARD, facing FORWARD, at 3.94 from the mic-end edge and
@@ -1273,6 +1351,13 @@ plat_wall   = 2.0;    // and the thickness of that wall
 // the ask: the cover is LOCATED by this edge and 1 mm was not enough of it. 3.0
 // keeps a millimetre of the reduction rather than undoing it wholesale.
 lip_h    = 3.0;     // cover lip depth; 0 removes it. Shared with the retainer risers
+// The lip's clearance in the body opening, sides and ends. They lived as locals
+// inside cover() - see the long note there for why the ends get more - and moved
+// up here, unchanged, because the button tongues have to know where the lip's
+// inner face is, and a second transcription of 0.55 is exactly what drifts.
+lip_g    = 0.3;
+lip_gy   = lip_g + 0.25;
+lip_t    = wall - 1.0;   // the lip's wall thickness (cover()'s lip_in)
 oc_r     = 7.0;
 soft_r   = 1.6;
 
@@ -1328,6 +1413,10 @@ total_th   = z_floor + cover_th;
 // saying so (mic_pcb_x0, screw_skin); writing a third one directly above the
 // mistake did not prevent it. The assert did.
 btn_span     = body_d - z_pcb_b - btn_switch_h;   // the rim, not the plateau
+// DEFECT, FOUND 2026-10-04 AND NOT FIXED (the plunger is no longer the default):
+// this is measured from the plate's inner face, but button() hangs it BELOW the
+// flange - under btn_sleeve_h, the cone and btn_flange_t - so the tip lands 6.1
+// deeper than meant. See README-board2.md, "The plunger's stem is long".
 btn_stem_len = btn_span - btn_rest_gap;
 assert(btn_stem_len > 0, "btn_switch_h is taller than the cavity: no room for a plunger.");
 assert(btn_proud > btn_rest_gap + 0.4,
@@ -1402,7 +1491,7 @@ assert(!cover_shell || cover_rise == 0 || shell_x0 < plat_x0 && shell_y0 < plat_
 // The button bosses sit between the grille and the case edge, and the grille is
 // the thing they can run into. Asserted because a merged boss-and-grille is a
 // blocked speaker port, which looks like a rendering artefact rather than a fault.
-assert(!spk_grille || !cover_buttons || cover_rise == 0 ||
+assert(!spk_grille || !btn_plunger || cover_rise == 0 ||
        abs(reset_dx) - btn_boss_d/2 >= spk_grille_w/2 + 0.5,
        "a button's solid boss overlaps the speaker grille - narrow btn_boss_d or move the grille.");
 
@@ -1585,6 +1674,68 @@ spk_grille_cx = bcx;    // centred between the two button sleeves
 // the lip, too high and it overlaps the battery retaining rib.
 spk_grille_inset = 10.6;   // centre, in from the SERVICE-edge end of the cover
 spk_grille_cy = usb_at_top ? out_h - spk_grille_inset : spk_grille_inset;
+
+// ---------- The button tongues' plan, DERIVED from what boxes them in ----------
+// Down here rather than with btn_flex's own numbers because it reads btn_y, the
+// battery and the grille - OpenSCAD does not hoist (see "A build that succeeded
+// and lost the screw holes"). Each tongue is drawn in a LOCAL frame: origin at the
+// post centre, +v toward the SERVICE EDGE, so usb_at_top flips one sign here and
+// nothing below has to know about it.
+btn_out = usb_at_top ? 1 : -1;
+// OUTBOARD: the lip's inner face. The lip hangs off the plate's inner face, so a
+// slot under it would leave the lip standing on nothing.
+btn_lip_clear = usb_at_top ? (out_h - wall - lip_gy - lip_t) - btn_y
+                           :  btn_y - (wall + lip_gy + lip_t);
+// INBOARD: the battery fence, a 6 mm wall hanging off the same face.
+btn_fence_near = usb_at_top ? batt_y0 + batt_h + batt_fence_gap + batt_fence_t
+                            : batt_y0 - batt_fence_gap - batt_fence_t;
+// The tongue's free end, just past the post's flared foot.
+btn_flex_tip  = mm(btn_post_d/2 + btn_post_foot + 0.3);
+// The 45 deg ramps that take the plate down to btn_flex_t and back. Same length as
+// they are deep, so neither end of the thin span is a sharp step for a crack to
+// start at - and the ROOT's ramp runs on into the plate past the slot's end.
+btn_flex_ramp = cover_th - btn_flex_t;
+// THE LENGTH IS WHATEVER THE FENCE LEAVES, and it is the number that sets the
+// strain (see btn_flex_t). Post centre to root, where the slot ends.
+btn_flex_len  = mm(abs(btn_y - btn_fence_near) - btn_flex_ramp - 0.5);
+// THE TILT, PAID IN ADVANCE. A cantilever's slope at its tip is 1.5 * d / L, so the
+// post's tip swings toward the root by that times its length as it goes down -
+// 0.44 mm by the time it touches, 0.78 at the bottom of the stroke, against an
+// actuator that is ~1.5 mm across in this direction. So the post LEANS the other
+// way by the swing at mid-stroke: it is centred over the switch at the click,
+// rather than at rest where nothing is happening. 0.6 mm, or 4.6 deg - a lean any
+// printer takes without support, whichever face is down.
+btn_flex_lean = mm(1.5 * (btn_flex_rest + btn_flex_travel/2) * btn_post_len / btn_flex_len);
+btn_flex_strain = 3 * btn_flex_t * (btn_flex_rest + btn_flex_travel) / (2 * btn_flex_len * btn_flex_len);
+assert(!btn_flex || cover_rise == 0,
+       str("btn_flex needs a FLAT plate at the buttons and cover_rise is ", cover_rise,
+           " - on a plateau cover they sit on the taper. Set btn_flex = false for the plunger."));
+assert(!btn_flex || btn_flex_tip + btn_flex_slot <= btn_lip_clear,
+       str("a button tongue's slot runs under the cover lip: needs ", btn_flex_tip + btn_flex_slot,
+           " from the post, the lip is at ", btn_lip_clear));
+assert(!btn_flex || btn_flex_len >= 8.0,
+       str("the button tongue is only ", btn_flex_len, " mm long - the battery fence has ",
+           "crowded it, and a short tongue is a strained one (see btn_flex_t)"));
+assert(!btn_flex || btn_flex_strain <= 0.012,
+       str("the button tongue's root would strain ", btn_flex_strain * 100, "% per press, over ",
+           "the 1.2% a printed PLA hinge survives - thin btn_flex_t or lengthen the tongue"));
+assert(!btn_flex || btn_flex_stiff + btn_flex_ramp < btn_flex_len - 2.0,
+       "the button tongue has no thin span left - btn_flex_stiff and the ramps eat it all");
+assert(!btn_flex || !spk_grille ||
+       abs(reset_dx) - (btn_flex_w/2 + btn_flex_slot) >= spk_grille_w/2 + 1.0,
+       "a button tongue's slot runs into the speaker grille");
+// The slot's footprint, in case coordinates - the tongue plus the slot round it,
+// including the round end-caps that run half a slot past the root.
+function btn_flex_box(dx) =
+  let(x  = bcx + dx,
+      ya = btn_y + btn_out * -(btn_flex_len + btn_flex_slot/2),
+      yb = btn_y + btn_out *  (btn_flex_tip + btn_flex_slot))
+  [x - btn_flex_w/2 - btn_flex_slot, x + btn_flex_w/2 + btn_flex_slot, min(ya, yb), max(ya, yb)];
+function rect_gap(p, r) = norm([max(r[0] - p[0], 0, p[0] - r[1]), max(r[2] - p[1], 0, p[1] - r[3])]);
+assert(!btn_flex || !cover_screws ||
+       min([for (dx = [reset_dx, boot_dx]) for (c = holes()) rect_gap(c, btn_flex_box(dx))])
+         >= screw_keep_d/2 + 0.5,
+       "a button tongue's slot runs into a screw pillar's keep-out");
 
 // USB-C cutout centre in Z (the connector sits toward the back of the board)
 usb_z      = z_pcb_b + usb_up/2 + usb_z_off;
@@ -2089,6 +2240,61 @@ assert(!spk_grille ||
 // 16.5 at the service end, so a symmetric profile built on the mean would slide the
 // plateau 0.25 mm down the case - and with it the battery corral, the button
 // landings and the stand's pivot, all of which are placed off plat_*.
+// ---- The printed-in buttons (btn_flex) ----
+// Both in the local frame btn_flex's plan is derived in: origin at the post
+// centre, +y toward the service edge, z the cover's own (outer face at rim0).
+module btn_local(dx){
+  translate([bcx + dx, btn_y, 0]) scale([1, btn_out, 1]) children();
+}
+// The tongue's outline: square at the root, where it stays joined to the plate,
+// rounded at the free end.
+module btn_tongue2d(){
+  r = 1.0;
+  hull(){
+    translate([-btn_flex_w/2, -btn_flex_len]) square([btn_flex_w, 0.01]);
+    for (sx = [-1, 1]) translate([sx * (btn_flex_w/2 - r), btn_flex_tip - r]) circle(r = r);
+  }
+}
+module btn_flex_cut(){
+  z0 = cover_rise + cover_th;          // the plate's inner face
+  L = btn_flex_len;  s = btn_flex_slot;  d = btn_flex_ramp;  w = btn_flex_w;
+  // THE U-SLOT, through the plate and nothing else. Cut off square at the root
+  // line, then given round END-CAPS there: a slot that ends in a sharp corner is
+  // a crack that has already started, at the one place the tongue bends most.
+  translate([0, 0, -1]) linear_extrude(z0 + 1.01)
+    difference(){
+      union(){
+        intersection(){
+          offset(r = s) btn_tongue2d();
+          translate([-w, -L]) square([2*w, L + btn_flex_tip + 2*s]);
+        }
+        for (sx = [-1, 1]) translate([sx * (w/2 + s/2), -L]) circle(d = s, $fn = 24);
+      }
+      btn_tongue2d();
+    }
+  // THE THIN SPAN, cut from the INNER face (see btn_flex_t for why that face).
+  // One hull of two flat slabs is the trapezoid: 45 deg ramps at both ends, the
+  // root's running on past the slot into the plate.
+  hull(){
+    translate([-w/2 - 0.01, -(L + d), z0]) cube([w + 0.02, L + d - btn_flex_stiff, 0.01]);
+    translate([-w/2 - 0.01, -L, z0 - d])   cube([w + 0.02, L - btn_flex_stiff - d, 0.01]);
+  }
+  // THE FINGER DISH on the outer face, over the post. A spherical cap btn_dish_z deep.
+  R = (btn_dish_d * btn_dish_d / 4 + btn_dish_z * btn_dish_z) / (2 * btn_dish_z);
+  translate([0, 0, cover_rise - (R - btn_dish_z)]) sphere(r = R, $fn = 96);
+}
+// The post: a flared foot on the tongue, a column that LEANS by btn_flex_lean
+// toward the service edge (the tilt, paid in advance), and a round tip.
+module btn_post(){
+  z0 = cover_rise + cover_th;
+  translate([0, 0, z0 - 0.01])
+    cylinder(d1 = btn_post_d + 2*btn_post_foot, d2 = btn_post_d, h = btn_post_foot + 0.01);
+  hull(){
+    translate([0, 0, z0 - 0.01]) cylinder(d = btn_post_d, h = 0.01);
+    translate([0, btn_flex_lean, z0 + btn_post_len - btn_post_tip_d/2])
+      sphere(d = btn_post_tip_d, $fn = 36);
+  }
+}
 module cover_outer(){
   rx0 = wall - 0.1;            rx1 = rx0 + in_w + 0.2;
   ry0 = wall - 0.1;            ry1 = ry0 + in_h + 0.2;
@@ -2112,8 +2318,8 @@ module cover_outer(){
   }
 }
 module cover(){
-  lip_in = wall - 1.0;                 // lip that slides into the body opening (lip_h is global)
-  g  = 0.3;                            // lip clearance on the SIDES (width) — kept snug
+  lip_in = lip_t;                      // lip that slides into the body opening (lip_h is global)
+  g  = lip_g;                          // lip clearance on the SIDES (width) — kept snug
   // Lip clearance on the ENDS (length). SECOND report of the same thing - it was
   // g + 0.1 because "the cover felt a touch long", and it is still tight. Now
   // g + 0.25, i.e. 0.55/end: +0.15 a side, 0.3 mm shorter overall.
@@ -2131,7 +2337,7 @@ module cover(){
   // If it is the LONG SIDES that bind rather than the ends - i.e. the cover is too
   // WIDE rather than too long - raise g instead; that is the one to change and
   // this comment is here so the next reader does not have to guess which.
-  gy = g + 0.25;
+  gy = lip_gy;                         // = g + 0.25, now a global - see lip_gy
   // THE COVER HAS TWO REFERENCE PLANES NOW. rim0 is the thin rim's outer face and
   // rimI its inner face - the one that lands on the body wall. The PLATEAU's
   // outer face is still cover-local z 0, so total_th is unchanged and every
@@ -2177,13 +2383,16 @@ module cover(){
       // Guide sleeves for the printed buttons. The plate alone is 2.0 mm of
       // bearing for a 4 mm stem, which would let the button cock over; the
       // sleeve triples that. Inboard of the lip, so it does not foul it.
-      if (cover_buttons)
+      if (btn_plunger)
         for (dx = [reset_dx, boot_dx])
           translate([bcx + dx, btn_y, rimI - 0.01])
             difference(){
               cylinder(d = btn_guide_d + 2.0, h = btn_sleeve_h + 0.01);
               translate([0,0,-0.1]) cylinder(d = btn_guide_d, h = btn_sleeve_h + 0.3);
             }
+      // ...or, with btn_flex, the post on each tongue that reaches the switch
+      if (btn_flex)
+        for (dx = [reset_dx, boot_dx]) btn_local(dx) btn_post();
 
       // Battery corral - see batt_ribs. Positioned off the SAME expression the
       // preview ghost and the retainer use, so all three agree by construction
@@ -2287,7 +2496,7 @@ module cover(){
         translate([plat_x0, plat_y0, cover_th - 1]) cube([pw, ph, rimI - cover_th + 2]);
         // ...plus a solid column at each button, or the shell severs the guide
         // sleeve from the plate it hangs off - see btn_boss_d
-        if (cover_buttons)
+        if (btn_plunger)
           for (dx = [reset_dx, boot_dx])
             translate([bcx + dx, btn_y, cover_th - 1])
               cylinder(d = btn_boss_d, h = rimI - cover_th + 2);
@@ -2303,7 +2512,7 @@ module cover(){
     // A FLAT LANDING FOR EACH BUTTON - see btn_pad_z. Cut square to the board and
     // deep enough that the whole hole is level, so btn_proud means the same thing
     // all the way round the head instead of varying across the slope.
-    if (cover_buttons && cover_rise > 0 && btn_pad_z > 0.05)
+    if (btn_plunger && cover_rise > 0 && btn_pad_z > 0.05)
       for (dx = [reset_dx, boot_dx])
         translate([bcx + dx, btn_y, -1]) cylinder(d = btn_pad_d, h = btn_pad_z + 1);
     // The screw landings and their bores. The landing is cut to pad_depth, which
@@ -2319,9 +2528,14 @@ module cover(){
       }
     // The hole starts ABOVE the outer surface wherever that surface has got to,
     // rather than at a fixed z: on a taper there is no single outer plane.
+    // With btn_flex there is no hole at all: the tongue's U-slot, its thinned
+    // span and the finger dish - see btn_flex_cut().
+    if (btn_flex)
+      for (dx = [reset_dx, boot_dx]) btn_local(dx) btn_flex_cut();
+    else
     for (dx = [reset_dx, boot_dx])
       translate([bcx + dx, btn_y, -1]) {
-        d = cover_buttons ? btn_guide_d : btn_d;
+        d = btn_plunger ? btn_guide_d : btn_d;
         cylinder(d = d, h = rimI + lip_h + btn_sleeve_h + 2);
         translate([0,0,1 + btn_pad_z])
           cylinder(d1 = d + 2*btn_cham, d2 = d, h = btn_cham + 0.01);
@@ -2477,6 +2691,9 @@ module button(){
   }
 }
 module buttons(){
+  // REFUSED BY NAME rather than exported empty: with btn_flex the buttons ARE the
+  // cover, and a plunger printed for a cover with no guide hole fits nothing.
+  assert(!btn_flex, "btn_flex is on: the buttons are printed as part of the cover. Set btn_flex = false for the separate plungers.");
   for (i = [0,1]) translate([i * (btn_flange_d + 4), 0, 0]) button();
 }
 
@@ -2573,6 +2790,37 @@ module coupon(){
   }
 }
 
+// ============================================================================
+// BUTTON COUPON — part="btncoupon"
+// ============================================================================
+// THE COVER'S SERVICE END AND NOTHING ELSE: both tongues, their posts, the grille,
+// the lip, and the two screw pillars at that end - so it SCREWS ONTO THE BODY YOU
+// ALREADY HAVE, with two of the four M3s, and the buttons can be pressed for real
+// on the real board. A whole cover is hours; this is a fraction of it, and it
+// answers the three things the model cannot: does the post reach (btn_meas_gap was
+// "about 7.8"), does it land on the actuator (btn_in was never confirmed on a
+// cover), and does the press feel right in your filament.
+//
+// Cut on the inboard side just short of the battery fence, so no sliver of the
+// fence comes with it.
+//
+// EXPORTED OUTER FACE DOWN, unlike the cover, and NEEDS NO SUPPORT AT ALL: the
+// kickstand lugs are what force the cover onto support (they stand off its outer
+// face) and they are at the far end, outside the coupon. Everything left - lip,
+// pillars, posts - grows straight up off the plate, and the tongue is the first
+// four layers on the bed. So the coupon's tongues print BETTER than the cover's,
+// which sit on support whichever way the cover goes: it proves the fit and the
+// reach exactly, and the feel to within that difference.
+module btn_coupon(){
+  assert(btn_flex, "part=\"btncoupon\" tests the printed-in buttons, and btn_flex is off.");
+  y0 = usb_at_top ? btn_fence_near + 0.2 : -1;
+  y1 = usb_at_top ? out_h + 1 : btn_fence_near - 0.2;
+  intersection(){
+    cover();
+    translate([-1, y0, -50]) cube([out_w + 2, y1 - y0, 100]);
+  }
+}
+
 module assembly(){
   color("DimGray") body();
   color("Tan") translate([wall,wall,z_pcb_b]) retainer();
@@ -2595,6 +2843,7 @@ else if (part=="cover")    translate([0,0,cover_th]) rotate([180,0,0]) cover();
 else if (part=="stand")    stand();
 else if (part=="retainer") { if (use_retainer) retainer(); }
 else if (part=="buttons")  buttons();
+else if (part=="btncoupon") btn_coupon();   // outer face on the bed - see btn_coupon()
 else if (part=="btngauge") btngauge();
 else if (part=="coupon")   coupon();
 else if (part=="section")  section();
