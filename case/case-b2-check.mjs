@@ -174,7 +174,7 @@ function run(scadPath, defines = {}) {
   // Every derived FIT goes through mm(). Without it btn_guide_d evaluates to
   // 4.199999999999999 and moves six vertices in the exported cover - a hash change
   // on a revision whose claim was that the cover does not change.
-  for (const c of ['ks_barrel', 'ks_head_d', 'ks_bore', 'ks_pilot', 'btn_guide_d']) {
+  for (const c of ['ks_barrel', 'ks_head_d', 'ks_bore', 'ks_pilot', 'btn_guide_d', 'btn_flex_slot']) {
     const m = src.match(new RegExp(`^${c}\\s*=\\s*([^;]+);`, 'm'));
     check(`${c} is quantised with mm()`, !!m && /^mm\(/.test(m[1].trim()),
       m ? `= ${m[1].trim()}` : '(not found)');
@@ -198,12 +198,20 @@ function run(scadPath, defines = {}) {
     /\bm3_clear\b/.test(coverBody),
     '(the four case screws stay M3)');
 
-  for (const c of ['ks_pilot', 'ks_head_d', 'ks_bore']) {
+  for (const c of ['ks_pilot', 'ks_head_d', 'ks_bore', 'btn_flex_slot']) {
     const m = src.match(new RegExp(`^${c}\\s*=\\s*([^;]+);`, 'm'));
     check(`${c} carries print_shrink`,
       !!m && /print_shrink/.test(m[1]),
       m ? `= ${m[1].trim()}` : '(not found)');
   }
+
+  // The printed-in buttons' post is sized from the MEASURED gap. The model's own
+  // span (body_d - z_pcb_b - btn_switch_h) says 11.5 where the caliper said 7.8, so a
+  // post derived from it would stand 3.7 mm into the switch: RESET held down, a
+  // device that looks bricked.
+  check('the post is sized from the MEASURED gap, not the modelled switch',
+    /^btn_post_len\s*=\s*btn_meas_gap\s*-\s*btn_flex_rest\s*;/m.test(src),
+    '(btn_post_len = btn_meas_gap - btn_flex_rest)');
 
   // ---- GEOMETRIC: parsed constants and measured meshes ----
   const v = scadEcho(scadPath, [
@@ -245,6 +253,7 @@ function run(scadPath, defines = {}) {
     // 1 mm3 at (-50,-50,-50) can never touch the part, so the export always has
     // something and its volume is subtracted back off below.
     `else if (what=="glasshit") { intersection(){ body(); glass(); } translate([-50,-50,-50]) cube(1); }\n` +
+    `else if (what=="cover") cover();\n` +
     `else stand_placed();\n`);
   const dArgs = Object.entries(defines).flatMap(([k, val]) => ['-D', `${k}=${val}`]);
   const build = (what, file, extra = []) => execFileSync('openscad',
@@ -470,6 +479,80 @@ function run(scadPath, defines = {}) {
   check('the pilot reaches as deep as the arithmetic says', Math.abs(pilotDepth - wantDepth) < 0.05,
     `measured ${pilotDepth.toFixed(2)} vs z_pcb_f - screw_skin = ${wantDepth.toFixed(2)}`);
 
+  // ---- the printed-in buttons (btn_flex) ----
+  // Measured on the COVER'S OWN MESH, in its own frame (outer face at cover_rise,
+  // inner face up), at points placed from echoed constants - never transcribed.
+  const bf = scadEcho(scadPath, [
+    'btn_flex ? 1 : 0', 'bcx', 'reset_dx', 'boot_dx', 'btn_y', 'btn_out',
+    'btn_flex_len', 'btn_flex_tip', 'btn_flex_slot', 'btn_flex_w', 'btn_flex_t',
+    'btn_flex_stiff', 'btn_flex_ramp', 'btn_flex_lean', 'btn_meas_gap', 'btn_flex_rest',
+    'btn_flex_travel', 'cover_rise', 'cover_th'
+  ], defines);
+  const FLEX = ['the post tip stops btn_flex_rest short of the measured switch',
+                'the post leans toward the service edge',
+                'the tongue is free on three sides',
+                "the tongue's root is still joined to the plate",
+                'the tongue is btn_flex_t thick where it bends',
+                'the tongue bends within PLA low-cycle strain'];
+  if (!bf['btn_flex ? 1 : 0']) {
+    for (const n of FLEX) skip(n, 'btn_flex is off - the buttons are separate plungers');
+  } else {
+    const cv = join(dir, 'cover.stl');
+    build('cover', cv);
+    const CT = stlTris(cv);
+    const z0 = bf.cover_rise + bf.cover_th;               // the plate's inner face
+    const L = bf.btn_flex_len, s = bf.btn_flex_slot, w = bf.btn_flex_w;
+    const tipWant = z0 + bf.btn_meas_gap - bf.btn_flex_rest;
+    // max z of material on a vertical line; -Infinity is "nothing there at all"
+    const at = (dx, u, v) => heightAt(CT, bf.bcx + dx + u, bf.btn_y + bf.btn_out * v);
+    let worstTip = 0, worstLean = 0, openBad = [], rootBad = [], thin = [], nSlot = 0;
+    for (const dx of [bf.reset_dx, bf.boot_dx]) {
+      // The tip: the highest point over the post, found by scanning along v so the
+      // LEAN is measured too rather than assumed.
+      let best = -Infinity, bestV = 0;
+      for (let v = -2; v <= 2; v += 0.02) {
+        const h = at(dx, 0, v);
+        if (h > best) { best = h; bestV = v; }
+      }
+      worstTip = Math.max(worstTip, Math.abs(best - tipWant));
+      worstLean = Math.max(worstLean, Math.abs(bestV - bf.btn_flex_lean));
+      // The slot, sampled down both sides and across the free end.
+      const slotPts = [];
+      for (const sx of [-1, 1])
+        for (const v of [-L + 0.3, -L / 2, 0, bf.btn_flex_tip - 1.2])
+          slotPts.push([sx * (w / 2 + s / 2), v]);
+      for (const u of [-w / 4, 0, w / 4]) slotPts.push([u, bf.btn_flex_tip + s / 2]);
+      nSlot += slotPts.length;
+      for (const [u, v] of slotPts)
+        if (at(dx, u, v) > -Infinity) openBad.push(`(${u.toFixed(2)},${v.toFixed(2)})`);
+      // The root: material straight across the line the slot ends on.
+      for (const u of [-w / 2 + 0.3, 0, w / 2 - 0.3])
+        if (!(at(dx, u, -L - s / 2) > bf.cover_rise + 0.1)) rootBad.push(u.toFixed(2));
+      // The thin span, mid-way between the root ramp and the stiff end's ramp.
+      const vMid = -(L + bf.btn_flex_stiff + bf.btn_flex_ramp) / 2;
+      thin.push(at(dx, 0, vMid) - bf.cover_rise);
+    }
+    check(FLEX[0], worstTip < 0.05,
+      `tip at ${(tipWant).toFixed(2)} wanted (inner face ${z0} + measured ${bf.btn_meas_gap} - ` +
+      `rest ${bf.btn_flex_rest}); worst miss ${worstTip.toFixed(3)} mm`);
+    check(FLEX[1], worstLean < 0.15,
+      `tip found ${bf.btn_flex_lean} toward the edge wanted, worst miss ${worstLean.toFixed(2)} mm ` +
+      `(the press swings it back toward the root)`);
+    check(FLEX[2], openBad.length === 0,
+      openBad.length ? `material in the slot at ${openBad.join(' ')}` : `${nSlot} slot samples all open, through the plate`);
+    check(FLEX[3], rootBad.length === 0,
+      rootBad.length ? `nothing at the root line for u = ${rootBad.join(', ')}` : 'material across the root line');
+    const tMax = Math.max(...thin), tMin = Math.min(...thin);
+    check(FLEX[4], Math.abs(tMax - bf.btn_flex_t) < 0.02 && Math.abs(tMin - bf.btn_flex_t) < 0.02,
+      `measured ${tMin.toFixed(2)}..${tMax.toFixed(2)} vs btn_flex_t ${bf.btn_flex_t}`);
+    // From the MEASURED thickness, so a recess that silently stops cutting fails here
+    // even though btn_flex_t - and the model's own strain assert - still read fine.
+    const strain = 3 * tMax * (bf.btn_flex_rest + bf.btn_flex_travel) / (2 * L * L);
+    check(FLEX[5], strain <= 0.012,
+      `${(strain * 100).toFixed(2)}% at the root per press (rest ${bf.btn_flex_rest} + ` +
+      `stroke ${bf.btn_flex_travel} over L ${L}); 1.2% is the ceiling`);
+  }
+
   rmSync(dir, { recursive: true, force: true });
   return failures;
 }
@@ -516,11 +599,11 @@ const FAULTS = [
               linear_extrude(0.01) rrect_c(in_w+0.2, in_h+0.2, max(oc_r-wall,2));
           }`),
     expect: 'the outside never steps back inward - no perimeter flange',
-    defines: { rim_extra: 4, screw_len: 18 } },
+    defines: { rim_extra: 4, screw_len: 18, btn_flex: 'false' } },
   { name: 'ks_leaf_margin stops tracking the top fillet (blade too WIDE)',
     patch: s => s.replace(/^ks_leaf_margin = 0\.6 \+ edge_t1\([^;]+;/m, 'ks_leaf_margin = 0.6;'),
     expect: 'the folded blade lands on FLAT plateau, not on the top fillet',
-    defines: { rim_extra: 4, screw_len: 18 } },
+    defines: { rim_extra: 4, screw_len: 18, btn_flex: 'false' } },
   // NOT out_h*0.60, which is what this used to inject. That literal produced a
   // 0.12 mm margin when cover_rise was 5; at 3 the top fillet bites less and the
   // same literal happens to FIT, so the fault stopped reproducing a defect and the
@@ -531,7 +614,7 @@ const FAULTS = [
     patch: s => s.replace(/^ks_leaf_l  = plat_y1 - edge_t1\([\s\S]*?cover_rise\) - ks_lug_y - 0\.6;/m,
                           'ks_leaf_l  = plat_y1 - ks_lug_y;'),
     expect: 'the folded blade lands on FLAT plateau, not on the top fillet',
-    defines: { rim_extra: 4, screw_len: 18 } },
+    defines: { rim_extra: 4, screw_len: 18, btn_flex: 'false' } },
   { name: 'the pillar drives INTO the board',
     patch: s => s.replace(/^screw_pillar_gap = 0\.0;/m, 'screw_pillar_gap = -0.5;'),
     expect: 'the screw pillar does not reach past the board' },
@@ -564,11 +647,50 @@ const FAULTS = [
   // config has none (rim_extra 6). So this fault SELECTS one - and has to carry a
   // screw_len that is valid there, or the model's own length assert refuses the
   // build and the fault proves nothing. That trap cost four uncaught faults once.
+  // IT COST THEM A SECOND TIME, the same way: btn_flex (the printed-in buttons)
+  // refuses a plateau cover by name, so all four plateau faults stopped building
+  // the day it landed. They now select the plunger too - btn_flex: 'false' - which
+  // is what a plateau cover has to use.
   { name: 'the head pocket is deepened until it eats the shelf',
     patch: s => s.replace(/cylinder\(d = screw_cb_d, h = screw_pad_z \+ screw_cb_z \+ 1\);/,
                           'cylinder(d = screw_cb_d, h = screw_pad_z + screw_cb_z + 1.6);'),
-    defines: { rim_extra: 4, screw_len: 18 },
+    defines: { rim_extra: 4, screw_len: 18, btn_flex: 'false' },
     expect: 'the screw pillar is CONTINUOUS with the plate' },
+  // The printed-in buttons. NOT "btn_meas_gap = 11.5": the post follows the
+  // measurement by construction, so moving the measurement moves the post and the
+  // check (correctly) still passes. What has to be caught is the post going back
+  // to the MODEL's span, or the geometry drifting off its own constants.
+  { name: 'the post is sized from the modelled span again',
+    patch: s => s.replace(/^btn_post_len   = btn_meas_gap - btn_flex_rest;/m,
+                          'btn_post_len   = 11.5 - btn_flex_rest;'),
+    expect: 'the post is sized from the MEASURED gap, not the modelled switch' },
+  { name: 'the post is drawn 1 mm longer than btn_post_len',
+    patch: s => s.replace('translate([0, btn_flex_lean, z0 + btn_post_len - btn_post_tip_d/2])',
+                          'translate([0, btn_flex_lean, z0 + btn_post_len + 1.0 - btn_post_tip_d/2])'),
+    expect: 'the post tip stops btn_flex_rest short of the measured switch' },
+  { name: 'the post leans the wrong way',
+    patch: s => s.replace('translate([0, btn_flex_lean, z0 + btn_post_len - btn_post_tip_d/2])',
+                          'translate([0, -btn_flex_lean, z0 + btn_post_len - btn_post_tip_d/2])'),
+    expect: 'the post leans toward the service edge' },
+  { name: 'btn_flex_slot loses its print_shrink term (prints 0.1 and fuses)',
+    patch: s => s.replace(/^btn_flex_slot  = mm\(0\.6 \+ print_shrink\);/m, 'btn_flex_slot  = mm(0.6);'),
+    expect: 'btn_flex_slot carries print_shrink' },
+  { name: 'the slot is cut only part-way through the plate',
+    patch: s => s.replace('translate([0, 0, -1]) linear_extrude(z0 + 1.01)',
+                          'translate([0, 0, -1]) linear_extrude(1.5)'),
+    expect: 'the tongue is free on three sides' },
+  { name: 'the slot closes across the root and frees the tongue',
+    patch: s => s.replace('translate([-w, -L]) square([2*w, L + btn_flex_tip + 2*s]);',
+                          'translate([-w, -L - 2*s]) square([2*w, L + btn_flex_tip + 4*s]);'),
+    expect: "the tongue's root is still joined to the plate" },
+  { name: 'the thin span is cut half as deep',
+    patch: s => s.replace('translate([-w/2 - 0.01, -L, z0 - d])', 'translate([-w/2 - 0.01, -L, z0 - d/2])'),
+    expect: 'the tongue is btn_flex_t thick where it bends' },
+  // Model arithmetic intact, geometry not: the model's own strain assert reads
+  // btn_flex_t and still passes, so only the mesh can see this.
+  { name: 'the thin span barely cut at all',
+    patch: s => s.replace('translate([-w/2 - 0.01, -L, z0 - d])', 'translate([-w/2 - 0.01, -L, z0 - d/4])'),
+    expect: 'the tongue bends within PLA low-cycle strain' },
   { name: 'the axle is dropped so the blade buries itself',
     patch: s => s.replace(/^ks_axle_z\s*=\s*-ks_bz;/m, 'ks_axle_z  = -ks_bz + 3.0;'),
     expect: 'the folded blade does not penetrate the cover' },
