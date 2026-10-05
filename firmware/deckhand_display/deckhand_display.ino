@@ -791,6 +791,33 @@ bool saveLightIdle = false;
 // on this board gates it - so this is the most that software can do here, and
 // whether it is worth anything is a measurement rather than a claim.
 #define PWROFF_SD_ISOLATE   0x80  // float the SDMMC bus
+// THE AMP ENABLE, WHICH THE TEARDOWN HAS NEVER TOUCHED. R26 is a 10K pull-up and
+// AMP_EN_ENABLE_LEVEL is LOW, so this board's wiring INTENDS board 1's scheme -
+// pulled high = muted, drive low to enable - and on board 1 that pull-up keeps
+// the amp muted through deep sleep for free, which is most of why board 1 "loses
+// almost nothing" in the same state.
+//
+// Here it is broken by a rail mismatch the header already measured: U6's VDD is
+// +5, so a 3.3V high "cannot reach" its threshold. That does not merely mean the
+// pin fails to mute - it means the input sits BELOW V_IH on a 5V-referenced CMOS
+// input, i.e. in the indeterminate band where both devices of the input stage
+// conduct. That is shoot-through, it is milliamps rather than microamps, and the
+// pin has floated there for every power-off this board has ever done.
+//
+// WHAT THIS CAN AND CANNOT DO, because the difference matters. It CANNOT mute the
+// amp: that needs a clean 5V high and no 3.3V GPIO can make one. It CAN give the
+// input a DEFINED level instead of a mid-threshold one.
+//
+// THE SIGN IS NOT PREDICTED, and that is why this is a bit rather than a default.
+// A hard low is also the nominal ENABLE level, so it may hold the amp more firmly
+// on. Indeterminate-and-enabled against defined-and-enabled is a measurement, not
+// a datasheet argument, and TONETEST's "both levels are audible" says nothing
+// about quiescent current in deep sleep.
+//
+// gpio_hold_en, NOT rtc_gpio_isolate - the opposite of the QSPI pins. Isolate
+// drops the pull resistors too, leaving the input genuinely floating, which is
+// worse than the 10K it has now.
+#define PWROFF_AMP_LOW      0x100 // drive the amp enable to a hard low and hold it
 // DEFAULT 0x7, AND THE DEFAULT MOVED BECAUSE THE ANSWER WAS SEEN. It shipped as
 // 0 while every step was a guess - a saving defaulting ON silently optimises the
 // "before" leg of every future A/B, which poisons a measurement rather than
@@ -8808,7 +8835,7 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     char line[200];
     snprintf(line, sizeof(line),
              "PWROFFMODE 0x%lX (panelSleep=%d icReset=%d codecDown=%d qspiIsolate=%d "
-             "ledLow=%d rtcOff=%d usbIso=%d sdIso=%d) - 0 is the original teardown, the baseline",
+             "ledLow=%d rtcOff=%d usbIso=%d sdIso=%d ampLow=%d) - 0 is the original teardown, the baseline",
              (unsigned long) pwrOffMode,
              (pwrOffMode & PWROFF_PANEL_SLEEP) ? 1 : 0,
              (pwrOffMode & PWROFF_IC_RESET) ? 1 : 0,
@@ -8817,7 +8844,8 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
              (pwrOffMode & PWROFF_LED_LOW) ? 1 : 0,
              (pwrOffMode & PWROFF_RTC_OFF) ? 1 : 0,
              (pwrOffMode & PWROFF_USB_ISOLATE) ? 1 : 0,
-             (pwrOffMode & PWROFF_SD_ISOLATE) ? 1 : 0);
+             (pwrOffMode & PWROFF_SD_ISOLATE) ? 1 : 0,
+             (pwrOffMode & PWROFF_AMP_LOW) ? 1 : 0);
     sendLineToHost(line);
     sendLineToHost(pwrOffReport);
   } else if (buf == "SAVINGS") {

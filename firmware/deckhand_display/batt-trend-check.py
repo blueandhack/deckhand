@@ -1132,6 +1132,29 @@ check("PWROFFMODE reports both new flags, or a mode cannot be read back and an A
       "cannot attribute its own legs",
       "usbIso=%d" in MAIN and "sdIso=%d" in MAIN)
 
+# ---- THE AMP ENABLE GETS A DEFINED LEVEL ----------------------------------
+# Never touched by the teardown until now, so it floated to 3.3V on R26's 10K -
+# the exact voltage the header proves U6 cannot read as a high, which parks a
+# 5V-referenced CMOS input mid-threshold for the whole power-off.
+check("the amp-enable step exists as its own bit", "PWROFF_AMP_LOW" in _val)
+check("...distinct from every other step", len(set(_val.values())) == len(_val))
+check("...and DEFAULT OFF: a hard low is also the nominal ENABLE level, so the sign "
+      "is a measurement rather than a prediction",
+      "PWROFF_AMP_LOW" not in _dflt)
+_amp = re.search(r"if \(pwrOffMode & PWROFF_AMP_LOW\) \{(.*?)\n  \}", POWER, re.S)
+_amp = _amp.group(1) if _amp else ""
+check("the amp step is gated on its own bit and has a body", len(_amp) > 40)
+# DRIVEN AND HELD, never isolated - the opposite of the QSPI pins, and getting it
+# backwards would drop the 10K and leave the input floating outright, which is
+# worse than what it replaces.
+check("it DRIVES the pin low and HOLDS it through sleep, rather than isolating it - "
+      "isolate drops the pull-up and leaves the input genuinely floating",
+      "digitalWrite(PIN_AMP_EN, LOW)" in _amp
+      and "gpio_hold_en" in _amp and "rtc_gpio_isolate" not in _amp)
+check("it names PIN_AMP_EN rather than a literal, so a re-pin follows",
+      "PIN_AMP_EN" in _amp)
+check("PWROFFMODE reports it, or the leg cannot be attributed", "ampLow=%d" in MAIN)
+
 # ---- THE POWER-OFF RECEIPT REACHES A HOST THAT IS NOT ON THE CABLE ---------
 # sendLineToHost() fans out to Serial AND BLE, but its BLE half is gated on
 # bleConnected - and at boot no central has connected yet. So the receipt for a

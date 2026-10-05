@@ -1212,6 +1212,17 @@ void enterDeepSleep() {
   //    the entire power-off. Isolating cannot cut the card's VDD - nothing on this
   //    board gates it - so this is the ceiling of what software can do here, and
   //    it is a bit rather than a default because that ceiling may well be zero.
+  // 8. GIVE THE AMP ENABLE A DEFINED LEVEL. It has never been touched here, so it
+  //    floats to 3.3V on R26's 10K - the one voltage the header proves U6 cannot
+  //    read as a high, which puts a 5V-referenced CMOS input mid-threshold for the
+  //    whole power-off. Driven, not isolated: isolate would drop the pull-up and
+  //    leave it floating outright, which is worse. Deep sleep here ends in a
+  //    RESET, so audio is re-initialised on the way back and nothing is stranded.
+  if (pwrOffMode & PWROFF_AMP_LOW) {
+    pinMode(PIN_AMP_EN, OUTPUT);
+    digitalWrite(PIN_AMP_EN, LOW);
+    gpio_hold_en((gpio_num_t) PIN_AMP_EN);
+  }
   if (pwrOffMode & PWROFF_SD_ISOLATE) {
     const gpio_num_t sd[] = {
       (gpio_num_t) PIN_SD_CLK, (gpio_num_t) PIN_SD_CMD, (gpio_num_t) PIN_SD_D0,
