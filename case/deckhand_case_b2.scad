@@ -62,7 +62,7 @@
 // 59.4 x 107.9 x 21.9 mm (board 54.5 x 102.0) - measured off the rendered STLs, not
 // approximated: the header said "~60.5 x 108.5 x 21" while the case was 24.4 thick.
 //
-// Render:  openscad -D part="body|cover|retainer|stand|buttons|btngauge|btncoupon|coupon|section|all" ...
+// Render:  openscad -D part="body|cover|lugs|retainer|stand|buttons|btngauge|btncoupon|coupon|section|all" ...
 // ============================================================================
 
 part = "all";
@@ -1152,8 +1152,61 @@ ks_barrel  = mm(ks_head_d + 2*ks_head_rim);  // 7.0 - shared by the cover bosses
                    // copy is the thing that goes stale when the rim or the head
                    // moves. Re-measuring print_shrink now re-derives the barrel,
                    // and with it the folded thickness of the whole device.
-ks_leaf_th = 2.5;  // blade thickness - OF THE WHOLE BLADE, not just the tip.
+// 2.5 -> 2.0, ASKED FOR 2026-10-04 ("a thin stand"): the folded blade stands
+// 0.5 mm less off the back. The barrel (7.0) does not move - it is set by the M2
+// head, see ks_barrel. Bending stiffness goes with the cube, so the blade is about
+// half as stiff (0.51x); it props a ~100 g device, which it can afford.
+ks_leaf_th = 2.0;  // blade thickness - OF THE WHOLE BLADE, not just the tip.
                    // See stand(): this used to describe only the last 12 mm.
+
+// ---------- How the hinge lugs meet the cover: ks_mount ----------
+// ASKED FOR 2026-10-04: "I want to print the back case lay down on plate."
+// The lugs were the ONE feature on the cover's outer face, and they are what
+// forced the whole cover onto support whichever way up it printed (README: "the
+// kickstand lugs on its outer face still force it onto support"). So:
+//   "integrated" - the lugs are part of the cover, as before
+//   "bolton"     - THE DEFAULT. The cover's outer face is flat and it exports
+//                  OUTER FACE DOWN, no support; each lug is its own small part
+//                  (part="lugs") that drops into a socket and takes one M2 screw
+//                  from inside the cover.
+//   "none"       - a flat back and no stand at all
+ks_mount = "bolton";
+ks_bolton = ks_mount == "bolton";   // one name for the checker (its echo cannot carry quotes)
+// ABOVE THE SURFACE A BOLT-ON LUG IS THE INTEGRATED LUG, EXACTLY - ks_pedestal()
+// is the same module for both - so the stand's notches, its swing and every
+// clearance the stand has been fitted to are untouched. Everything new is BELOW
+// the outer face, where the blade never goes:
+//
+// THE FOOT, in a SOCKET. The socket locates the lug (so the two stay coaxial and
+// ks_gap apart, set by the one rigid part that is the cover) and carries the
+// stand's load in its walls; the screw only has to hold it down. It is bigger
+// than the pedestal - 7 across, and 9 along with the extra 2 toward the MIC edge,
+// away from the blade - because the foot is under the surface and costs nothing.
+// It cannot grow toward the blade: the battery fence is 3.1 mm from the axle.
+ks_foot_w    = 7.0;          // across the axle's run (X)
+ks_foot_back = 5.5;          // axle to foot end, toward the mic edge
+// The socket goes through the 2.0 plate into a PAD on the inner face. The cover
+// prints outer face down now, so the pad grows straight up off the plate.
+ks_sock_d    = 4.0;          // socket depth from the outer face = the foot's height
+// THE SCREW: M2 x 8, up from inside through ks_sock_floor into the foot. Its
+// pilot stops 0.5 short of the pivot screw's own pilot (they cross at the lug's
+// centre), which caps it at ks_sock_d + ks_lug_pilot_top = 5.95 of thread hole.
+// So the floor is what makes an x8 fit: 8 - 2.5 = 5.5 of thread, 0.45 to spare.
+// An M2 x 5 also holds (2.5 of thread) - the socket takes the load, not the screw.
+ks_lug_screw = 8;            // length the floor is sized for
+ks_sock_floor = 2.5;         // under the screw head
+// ks_barrel/2 rather than ks_bz: ks_bz is declared ~600 lines further down.
+ks_lug_pilot_top = mm(ks_barrel/2 - ks_pilot/2 - 0.5);   // above the outer face
+// A FIT, so it is written the way btn_guide_d is: the socket is a HOLE and loses
+// print_shrink, the foot is a PEG and gains print_grow, and only ks_sock_fit is
+// left over. Snug rather than sliding - 0.2 printed, against the buttons' 0.3 -
+// because a lug that rocks in its socket moves the pivot; the screw then pulls
+// the foot flat onto the floor, which is what removes the last of the tilt.
+ks_sock_fit  = 0.2;          // PRINTED clearance, per dimension
+ks_sock_w    = mm(ks_foot_w + print_grow + ks_sock_fit + print_shrink);
+ks_sock_l    = mm(ks_foot_back + ks_barrel/2 + print_grow + ks_sock_fit + print_shrink);
+ks_lug_clear = mm(2.0 + 0.4 + print_shrink);   // the M2's clearance through the floor
+ks_pad_wall  = 1.6;
 
 // ---------- Fit / structure ----------
 clr      = 0.5;     // board-to-wall clearance along the LENGTH (Y, USB↔far end)
@@ -1775,6 +1828,37 @@ ks_dir     = usb_at_top ? 1 : -1;          // leaf extends toward the service ed
 ks_bz      = ks_barrel/2;                  // axis height in the stand's own frame
 ks_axle_z  = -ks_bz;                       // axis height outside the cover's outer face
 ks_nose_hw = ks_gap/2 + ks_boss_w/2 + ks_hgap + ks_ear_w;   // blade nose half-width
+
+// ---- The bolt-on lug's socket and pad, derived (ks_mount = "bolton") ----
+// In each lug's own frame: v along the case, +v toward the BLADE (ks_dir), so
+// usb_at_top flips one sign here and nothing below needs to know.
+// The foot runs v -ks_foot_back .. +ks_barrel/2; the socket is centred on it.
+ks_sock_vc   = (ks_barrel/2 - ks_foot_back) / 2;
+// The battery fence's INNER face, toward the blade - the pad may merge into the
+// fence (it is one part) but must stop at the corral, or the cell cannot seat.
+ks_fence_in_v = usb_at_top ? (batt_y0 - batt_fence_gap) - ks_lug_y
+                           : ks_lug_y - (batt_y0 + batt_h + batt_fence_gap);
+ks_pad_v0    = ks_sock_vc - ks_sock_l/2 - ks_pad_wall;
+ks_pad_v1    = min(ks_sock_vc + ks_sock_l/2 + ks_pad_wall, ks_fence_in_v);
+ks_pad_h     = ks_sock_d + ks_sock_floor - cover_th;    // below the inner face
+assert(ks_mount == "integrated" || ks_mount == "bolton" || ks_mount == "none",
+       str("ks_mount is \"", ks_mount, "\" - it must be \"integrated\", \"bolton\" or \"none\""));
+assert(ks_mount != "bolton" || cover_rise == 0,
+       str("ks_mount = \"bolton\" needs the FLAT cover and cover_rise is ", cover_rise,
+           " - its pads would hang into the plateau's cell cavity. Use \"integrated\"."));
+assert(ks_mount != "bolton" || ks_fence_in_v - (ks_sock_vc + ks_sock_l/2) >= 1.0,
+       "a lug socket's wall toward the battery is under 1 mm - the fence is too close to the pivot");
+// THE SCREW MUST NOT BOTTOM OUT: what passes the floor has to fit the pilot,
+// with 0.3 to spare for the chips a thread-former pushes ahead of it.
+assert(ks_mount != "bolton" || ks_lug_screw - ks_sock_floor + 0.3 <= ks_sock_d + ks_lug_pilot_top,
+       str("an M2 x ", ks_lug_screw, " lug screw bottoms out: ", ks_lug_screw - ks_sock_floor,
+           " past the floor into ", ks_sock_d + ks_lug_pilot_top, " of pilot - thicken ks_sock_floor"));
+// ...and its head, under the pad, must clear the board's back components.
+// 2.0 is an M2 socket cap's head; a pan head is lower, so this is the worst case.
+assert(ks_mount != "bolton" ||
+       (z_floor - ks_pad_h - 2.0) - (z_pcb_b + comp_back) >= 1.0,
+       str("a lug pad + its screw head reaches within ", (z_floor - ks_pad_h - 2.0) - (z_pcb_b + comp_back),
+           " mm of comp_back - shorten ks_sock_d or ks_sock_floor"));
 // DERIVED, not out_h*0.60. The leaf's WIDTH has always been sized to the plateau
 // (see ks_leaf_margin); its LENGTH was a fraction of the case, which happened to
 // land inside the plateau and stopped happening the moment the top edge was
@@ -2248,6 +2332,59 @@ assert(!spk_grille ||
 // 16.5 at the service end, so a symmetric profile built on the mean would slide the
 // plateau 0.25 mm down the case - and with it the battery corral, the button
 // landings and the stand's pivot, all of which are placed off plat_*.
+// ---- The hinge lugs (ks_mount) ----
+// THE PEDESTAL, SHARED: the integrated lug IS this, and the bolt-on lug is this
+// plus a foot below the surface - so above the surface the two are the same solid
+// by construction, and the stand cannot tell which cover it is on.
+// A barrel at the axis blended down into the plate; its base block stops exactly
+// at the plate's inner face, so nothing punches through into the battery cavity.
+module ks_pedestal(){
+  hull(){
+    translate([0,0,ks_axle_z]) rotate([0,90,0]) cylinder(d=ks_barrel, h=ks_boss_w, center=true);
+    translate([-ks_boss_w/2, -ks_barrel/2, 0]) cube([ks_boss_w, ks_barrel, cover_th]);
+  }
+}
+// One bolt-on lug, in the cover's own frame at its pivot: outer face z=0, the
+// foot running +z into the socket. part="lugs" prints two of them FOOT DOWN.
+module ks_lug(){
+  ch = 0.4;                                   // foot's bottom edge: elephant's foot
+  difference(){
+    union(){
+      ks_pedestal();
+      scale([1, ks_dir, 1]) translate([0, ks_sock_vc, 0]) hull(){
+        linear_extrude(ks_sock_d - ch) rrect_c(ks_foot_w, ks_foot_back + ks_barrel/2, 1.2);
+        translate([0, 0, ks_sock_d - 0.01]) linear_extrude(0.01)
+          rrect_c(ks_foot_w - 2*ch, ks_foot_back + ks_barrel/2 - 2*ch, 1.2 - ch);
+      }
+    }
+    // the pivot screw's pilot - the same hole the integrated lug had
+    translate([0, 0, ks_axle_z]) rotate([0,90,0]) cylinder(d=ks_pilot, h=ks_boss_w+2, center=true);
+    // the lug screw's pilot, up from the foot's bottom, stopping short of the one above
+    translate([0, 0, -ks_lug_pilot_top]) cylinder(d=ks_pilot, h=ks_lug_pilot_top + ks_sock_d + 1, $fn=24);
+  }
+}
+// The socket it drops into: through the plate into the pad, a clearance hole for
+// the screw through the floor, and a lead-in at the mouth - the mouth is on the
+// BED when the cover prints, where the first layer squeezes it shut.
+module ks_socket(){
+  scale([1, ks_dir, 1]) translate([0, ks_sock_vc, 0]) {
+    translate([0, 0, -1]) linear_extrude(ks_sock_d + 1) rrect_c(ks_sock_w, ks_sock_l, 1.0);
+    translate([0, 0, -0.01]) hull(){
+      linear_extrude(0.01) rrect_c(ks_sock_w + 0.8, ks_sock_l + 0.8, 1.4);
+      translate([0, 0, 0.4]) linear_extrude(0.01) rrect_c(ks_sock_w, ks_sock_l, 1.0);
+    }
+  }
+  translate([0, 0, ks_sock_d - 0.01]) cylinder(d=ks_lug_clear, h=ks_sock_floor + 1, $fn=24);
+}
+module ks_lugs_placed(){
+  if (ks_mount == "bolton")
+    for(s=[-1,1]) translate([out_w/2+s*ks_gap/2, ks_lug_y, 0]) ks_lug();
+}
+module lugs(){
+  assert(ks_mount == "bolton", "part=\"lugs\" is the bolt-on hinge, and ks_mount is not \"bolton\".");
+  for (i = [0, 1]) translate([i * (ks_foot_w + 6), 0, ks_sock_d]) rotate([180,0,0]) ks_lug();
+}
+
 // ---- The printed-in buttons (btn_flex) ----
 // Both in the local frame btn_flex's plan is derived in: origin at the post
 // centre, +y toward the service edge, z the cover's own (outer face at rim0).
@@ -2458,10 +2595,14 @@ module cover(){
       // Each boss is a rounded pad: a barrel at the axis blended down into the
       // plate. The base of the hull is a flat BLOCK that stops exactly at the
       // plate's inner face, so nothing punches through into the battery cavity.
-      for(s=[-1,1]) translate([out_w/2+s*ks_gap/2, ks_lug_y, 0]) hull(){
-        translate([0,0,ks_axle_z]) rotate([0,90,0]) cylinder(d=ks_barrel, h=ks_boss_w, center=true);
-        translate([-ks_boss_w/2, -ks_barrel/2, 0]) cube([ks_boss_w, ks_barrel, cover_th]);
-      }
+      // ONLY with ks_mount = "integrated"; "bolton" makes them their own part
+      // (ks_lug) and leaves a PAD here for each one's socket.
+      if (ks_mount == "integrated")
+        for(s=[-1,1]) translate([out_w/2+s*ks_gap/2, ks_lug_y, 0]) ks_pedestal();
+      if (ks_mount == "bolton")
+        for(s=[-1,1]) translate([out_w/2+s*ks_gap/2, ks_lug_y, 0]) scale([1, ks_dir, 1])
+          translate([-(ks_sock_w/2 + ks_pad_wall), ks_pad_v0, cover_th - 0.01])
+            cube([ks_sock_w + 2*ks_pad_wall, ks_pad_v1 - ks_pad_v0, ks_pad_h + 0.01]);
     }
     // ---- RESET and BOOT, through the cover ----
     // Referenced to the BOARD (bx0/bcx, btn_y), not to the shell, so they track
@@ -2549,9 +2690,13 @@ module cover(){
           cylinder(d1 = d + 2*btn_cham, d2 = d, h = btn_cham + 0.01);
       }
     if (spk_grille) speaker_grille();
-    // pilot hole in each boss — the M3 screw threads straight into the plastic
-    for(s=[-1,1]) translate([out_w/2+s*ks_gap/2, ks_lug_y, ks_axle_z])
-      rotate([0,90,0]) cylinder(d=ks_pilot, h=ks_boss_w+2, center=true);
+    // pilot hole in each boss — the M2 screw threads straight into the plastic
+    if (ks_mount == "integrated")
+      for(s=[-1,1]) translate([out_w/2+s*ks_gap/2, ks_lug_y, ks_axle_z])
+        rotate([0,90,0]) cylinder(d=ks_pilot, h=ks_boss_w+2, center=true);
+    // ...or, bolt-on, each lug's SOCKET and the clearance hole for its screw
+    if (ks_mount == "bolton")
+      for(s=[-1,1]) translate([out_w/2+s*ks_gap/2, ks_lug_y, 0]) ks_socket();
   }
 }
 
@@ -2833,6 +2978,7 @@ module assembly(){
   color("DimGray") body();
   color("Tan") translate([wall,wall,z_pcb_b]) retainer();
   color([.82,.82,.85]) translate([out_w,0,total_th]) rotate([0,180,0]) cover();  // flipped onto the back
+  color("SlateGray") translate([out_w,0,total_th]) rotate([0,180,0]) ks_lugs_placed();
   color("SteelBlue") stand_placed();
   %translate([bx0,by0,z_glass]) cube([board_w,board_h,glass_up+board_t]);       // board+display
   %translate([wall+(in_w-batt_w)/2-batt_dx,batt_y0,z_pcb_b+batt_seat]) cube([batt_w,batt_h,batt_t]);
@@ -2847,7 +2993,11 @@ module section(){
 }
 
 if      (part=="body")     body();
-else if (part=="cover")    translate([0,0,cover_th]) rotate([180,0,0]) cover();
+// With the lugs off it, the cover's outer face is flat: it exports OUTER FACE DOWN
+// (its own frame), no support. Integrated, it keeps the old flip.
+else if (part=="cover")    { if (ks_mount == "integrated") translate([0,0,cover_th]) rotate([180,0,0]) cover();
+                             else cover(); }
+else if (part=="lugs")     lugs();
 else if (part=="stand")    stand();
 else if (part=="retainer") { if (use_retainer) retainer(); }
 else if (part=="buttons")  buttons();

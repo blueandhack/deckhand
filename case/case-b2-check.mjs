@@ -174,7 +174,8 @@ function run(scadPath, defines = {}) {
   // Every derived FIT goes through mm(). Without it btn_guide_d evaluates to
   // 4.199999999999999 and moves six vertices in the exported cover - a hash change
   // on a revision whose claim was that the cover does not change.
-  for (const c of ['ks_barrel', 'ks_head_d', 'ks_bore', 'ks_pilot', 'btn_guide_d', 'btn_flex_slot']) {
+  for (const c of ['ks_barrel', 'ks_head_d', 'ks_bore', 'ks_pilot', 'btn_guide_d', 'btn_flex_slot',
+                   'ks_sock_w', 'ks_sock_l', 'ks_lug_clear']) {
     const m = src.match(new RegExp(`^${c}\\s*=\\s*([^;]+);`, 'm'));
     check(`${c} is quantised with mm()`, !!m && /^mm\(/.test(m[1].trim()),
       m ? `= ${m[1].trim()}` : '(not found)');
@@ -198,7 +199,7 @@ function run(scadPath, defines = {}) {
     /\bm3_clear\b/.test(coverBody),
     '(the four case screws stay M3)');
 
-  for (const c of ['ks_pilot', 'ks_head_d', 'ks_bore', 'btn_flex_slot']) {
+  for (const c of ['ks_pilot', 'ks_head_d', 'ks_bore', 'btn_flex_slot', 'ks_sock_w', 'ks_sock_l', 'ks_lug_clear']) {
     const m = src.match(new RegExp(`^${c}\\s*=\\s*([^;]+);`, 'm'));
     check(`${c} carries print_shrink`,
       !!m && /print_shrink/.test(m[1]),
@@ -246,7 +247,12 @@ function run(scadPath, defines = {}) {
   const probe = join(dir, 'p.scad');
   writeFileSync(probe,
     `part="none"; what="stand";\ninclude <${scadPath}>\n` +
-    `if (what=="hit") intersection(){ translate([out_w,0,total_th]) rotate([0,180,0]) cover(); stand_placed(); }\n` +
+    // THE COVER AS ASSEMBLED, bolt-on lugs included: with ks_mount = "bolton" the
+    // lugs are not in cover() at all, and a check against cover() alone would
+    // certify a stand against a hinge that is not there.
+    `if (what=="hit") intersection(){ translate([out_w,0,total_th]) rotate([0,180,0]) { cover(); ks_lugs_placed(); } stand_placed(); }\n` +
+    `else if (what=="swing") { intersection(){ translate([out_w,0,total_th]) rotate([0,180,0]) { cover(); ks_lugs_placed(); } stand_placed(); } translate([-50,-50,-50]) cube(1); }\n` +
+    `else if (what=="lug") ks_lug();\n` +
     // A MARKER CUBE RIDES ALONG, and it is not decoration: OpenSCAD refuses to
     // export an empty geometry and exits non-zero, so the PASSING case - no
     // interference at all - crashed the checker while the failing case worked.
@@ -267,6 +273,78 @@ function run(scadPath, defines = {}) {
   const hv = stlVolume(hit);
   check('the folded blade does not penetrate the cover', hv < 1e-3,
     `intersection volume ${hv.toFixed(4)} mm3 (contact is coplanar, so 0)`);
+
+  // ---- THE WHOLE SWING, not just folded ----
+  // Folded is the one pose the check above sees, and it is the pose a hinge that
+  // grew is LEAST likely to show up in. Swept against the cover AS ASSEMBLED, so
+  // a bolt-on lug is judged where it really sits. The 1 mm3 marker cube keeps the
+  // export non-empty when nothing collides (see the probe), and is taken back off.
+  // POSITIVE CONTROL, measured when this was written: ks_open = -10 (into the
+  // cover) reads 1365.9 mm3, so a zero here is a reading and not a blind probe.
+  {
+    const sw = join(dir, 'sw.stl');
+    const hits = [];
+    for (const a of [0, 15, 30, 45, 60, 75, 90, 105, 120, 135, 150]) {
+      build('swing', sw, ['-D', `ks_open=${a}`]);
+      const vol = stlVolume(sw) - 1;
+      if (vol > 1e-3) hits.push(`${a}deg ${vol.toFixed(3)}`);
+    }
+    check('the stand swings clear of the hinge, 0..150 deg', hits.length === 0,
+      hits.length ? `collides at ${hits.join(', ')} mm3` : 'zero intersection at all 11 angles, lugs included');
+  }
+
+  // ---- the bolt-on lugs (ks_mount = "bolton") ----
+  const kl = scadEcho(scadPath, [
+    'ks_bolton ? 1 : 0', 'ks_foot_w', 'ks_foot_back', 'ks_barrel', 'ks_sock_w',
+    'ks_sock_l', 'ks_sock_d', 'ks_sock_floor', 'ks_lug_screw', 'ks_lug_pilot_top', 'ks_pilot',
+    'ks_bz', 'print_shrink', 'print_grow', 'out_w', 'ks_gap', 'ks_lug_y', 'cover_th'
+  ], defines);
+  const LUG = ['the lug drops into its socket',
+               'the lug screw cannot reach the pivot screw',
+               'an M2 x 8 lug screw does not bottom out'];
+  if (!kl['ks_bolton ? 1 : 0']) {
+    for (const n of LUG) skip(n, 'ks_mount is not "bolton" - the lugs are part of the cover, or absent');
+  } else {
+    // The fit the way the button's is checked: hole loses print_shrink, peg gains
+    // print_grow, and what is left over is what you actually assemble.
+    const cw = (kl.ks_sock_w - kl.print_shrink) - (kl.ks_foot_w + kl.print_grow);
+    const cl = (kl.ks_sock_l - kl.print_shrink) - (kl.ks_foot_back + kl.ks_barrel / 2 + kl.print_grow);
+    check(LUG[0], cw >= 0.1 && cw <= 0.35 && cl >= 0.1 && cl <= 0.35,
+      `printed clearance ${cw >= 0 ? '+' : ''}${cw.toFixed(2)} across, ${cl >= 0 ? '+' : ''}${cl.toFixed(2)} along ` +
+      `(snug: a lug that rocks moves the pivot; negative cannot be assembled)`);
+    // MEASURED on the lug's own mesh with RODS, because both pilots are internal
+    // and no surface sample can see them. A rod of half the pilot's diameter up the
+    // lug's centre line, minus the lug, is the VOID along that line:
+    //   rodA  foot bottom -> pivot axis: pilot + web + half the pivot pilot
+    //   rodB  foot bottom -> the web's middle: the lug screw's pilot alone
+    // web = rodA's length - rodA's void. Placed from echoed constants, never typed.
+    const area = Math.PI * (kl.ks_pilot / 4) ** 2;
+    const zA = kl.ks_bz, zB = kl.ks_lug_pilot_top + 0.25;
+    const rod = (name, zTop) => {
+      const f = join(dir, `${name}.scad`), o = join(dir, `${name}.stl`);
+      writeFileSync(f, `part="none";\ninclude <${scadPath}>\n` +
+        `difference(){ translate([0,0,-${zTop}]) cylinder(d=ks_pilot/2, h=${zTop}+ks_sock_d, $fn=48); ks_lug(); }\n` +
+        `translate([-50,-50,-50]) cube(1);\n`);
+      execFileSync('openscad', ['--export-format=binstl', '-o', o, '-D', 'part="none"', ...dArgs, f],
+        { stdio: ['ignore', 'ignore', 'ignore'] });
+      return (stlVolume(o) - 1) / area;
+    };
+    const voidA = rod('rodA', zA), voidB = rod('rodB', zB);
+    const web = (zA + kl.ks_sock_d) - voidA;
+    check(LUG[1], web >= 0.3,
+      `${web.toFixed(2)} mm of plastic between the lug screw's pilot and the pivot pilot (needs >= 0.3)`);
+    // The floor is measured too: the pad's top over the screw, less the socket.
+    const CV = join(dir, 'cvl.stl');
+    writeFileSync(join(dir, 'cvl.scad'), `part="none";\ninclude <${scadPath}>\ncover();\n`);
+    execFileSync('openscad', ['--export-format=binstl', '-o', CV, '-D', 'part="none"', '-D', '$fn=28',
+      ...dArgs, join(dir, 'cvl.scad')], { stdio: ['ignore', 'ignore', 'ignore'] });
+    const padTop = heightAt(stlTris(CV), kl.out_w / 2 - kl.ks_gap / 2 + 2.6, kl.ks_lug_y);
+    const floor = padTop - kl.ks_sock_d;
+    const past = kl.ks_lug_screw - floor;          // what of the screw reaches the foot
+    check(LUG[2], voidB >= past + 0.3,
+      `M2 x ${kl.ks_lug_screw}: ${past.toFixed(2)} past a ${floor.toFixed(2)} floor into ` +
+      `${voidB.toFixed(2)} of pilot (needs 0.3 spare)`);
+  }
 
   // ---- THE BEZEL MUST NOT SIT IN THE GLASS ----
   // This is the defect that started the check: the window is a through-hole
@@ -599,11 +677,11 @@ const FAULTS = [
               linear_extrude(0.01) rrect_c(in_w+0.2, in_h+0.2, max(oc_r-wall,2));
           }`),
     expect: 'the outside never steps back inward - no perimeter flange',
-    defines: { rim_extra: 4, screw_len: 18, btn_flex: 'false' } },
+    defines: { rim_extra: 4, screw_len: 18, btn_flex: 'false', ks_mount: '"integrated"' } },
   { name: 'ks_leaf_margin stops tracking the top fillet (blade too WIDE)',
     patch: s => s.replace(/^ks_leaf_margin = 0\.6 \+ edge_t1\([^;]+;/m, 'ks_leaf_margin = 0.6;'),
     expect: 'the folded blade lands on FLAT plateau, not on the top fillet',
-    defines: { rim_extra: 4, screw_len: 18, btn_flex: 'false' } },
+    defines: { rim_extra: 4, screw_len: 18, btn_flex: 'false', ks_mount: '"integrated"' } },
   // NOT out_h*0.60, which is what this used to inject. That literal produced a
   // 0.12 mm margin when cover_rise was 5; at 3 the top fillet bites less and the
   // same literal happens to FIT, so the fault stopped reproducing a defect and the
@@ -614,7 +692,7 @@ const FAULTS = [
     patch: s => s.replace(/^ks_leaf_l  = plat_y1 - edge_t1\([\s\S]*?cover_rise\) - ks_lug_y - 0\.6;/m,
                           'ks_leaf_l  = plat_y1 - ks_lug_y;'),
     expect: 'the folded blade lands on FLAT plateau, not on the top fillet',
-    defines: { rim_extra: 4, screw_len: 18, btn_flex: 'false' } },
+    defines: { rim_extra: 4, screw_len: 18, btn_flex: 'false', ks_mount: '"integrated"' } },
   { name: 'the pillar drives INTO the board',
     patch: s => s.replace(/^screw_pillar_gap = 0\.0;/m, 'screw_pillar_gap = -0.5;'),
     expect: 'the screw pillar does not reach past the board' },
@@ -650,11 +728,13 @@ const FAULTS = [
   // IT COST THEM A SECOND TIME, the same way: btn_flex (the printed-in buttons)
   // refuses a plateau cover by name, so all four plateau faults stopped building
   // the day it landed. They now select the plunger too - btn_flex: 'false' - which
-  // is what a plateau cover has to use.
+  // is what a plateau cover has to use. AND A THIRD TIME, the same day the hinge
+  // went bolt-on: ks_mount = "bolton" refuses a plateau too, so they select
+  // ks_mount "integrated" as well.
   { name: 'the head pocket is deepened until it eats the shelf',
     patch: s => s.replace(/cylinder\(d = screw_cb_d, h = screw_pad_z \+ screw_cb_z \+ 1\);/,
                           'cylinder(d = screw_cb_d, h = screw_pad_z + screw_cb_z + 1.6);'),
-    defines: { rim_extra: 4, screw_len: 18, btn_flex: 'false' },
+    defines: { rim_extra: 4, screw_len: 18, btn_flex: 'false', ks_mount: '"integrated"' },
     expect: 'the screw pillar is CONTINUOUS with the plate' },
   // The printed-in buttons. NOT "btn_meas_gap = 11.5": the post follows the
   // measurement by construction, so moving the measurement moves the post and the
@@ -691,6 +771,25 @@ const FAULTS = [
   { name: 'the thin span barely cut at all',
     patch: s => s.replace('translate([-w/2 - 0.01, -L, z0 - d])', 'translate([-w/2 - 0.01, -L, z0 - d/4])'),
     expect: 'the tongue bends within PLA low-cycle strain' },
+  // The bolt-on lugs.
+  { name: 'the lug socket loses its print_shrink term',
+    patch: s => s.replace(/^ks_sock_w    = mm\(ks_foot_w \+ print_grow \+ ks_sock_fit \+ print_shrink\);/m,
+                          'ks_sock_w    = mm(ks_foot_w + print_grow + ks_sock_fit);'),
+    expect: 'the lug drops into its socket' },
+  { name: 'the lug screw pilot is driven up into the pivot pilot',
+    patch: s => s.replace('translate([0, 0, -ks_lug_pilot_top]) cylinder(d=ks_pilot, h=ks_lug_pilot_top + ks_sock_d + 1, $fn=24);',
+                          'translate([0, 0, -ks_lug_pilot_top - 1.0]) cylinder(d=ks_pilot, h=ks_lug_pilot_top + 1.0 + ks_sock_d + 1, $fn=24);'),
+    expect: 'the lug screw cannot reach the pivot screw' },
+  // Geometry short of its own constant: the model's bottoming-out assert reads
+  // ks_lug_pilot_top and still passes, so only the mesh sees this.
+  { name: 'the lug screw pilot is cut 2 mm short',
+    patch: s => s.replace('translate([0, 0, -ks_lug_pilot_top]) cylinder(d=ks_pilot, h=ks_lug_pilot_top + ks_sock_d + 1, $fn=24);',
+                          'translate([0, 0, -ks_lug_pilot_top + 2.0]) cylinder(d=ks_pilot, h=ks_lug_pilot_top - 2.0 + ks_sock_d + 1, $fn=24);'),
+    expect: 'an M2 x 8 lug screw does not bottom out' },
+  { name: 'the lug foot rises 1.5 mm out of its socket',
+    patch: s => s.replace('scale([1, ks_dir, 1]) translate([0, ks_sock_vc, 0]) hull(){',
+                          'scale([1, ks_dir, 1]) translate([0, ks_sock_vc, -1.5]) hull(){'),
+    expect: 'the stand swings clear of the hinge, 0..150 deg' },
   { name: 'the axle is dropped so the blade buries itself',
     patch: s => s.replace(/^ks_axle_z\s*=\s*-ks_bz;/m, 'ks_axle_z  = -ks_bz + 3.0;'),
     expect: 'the folded blade does not penetrate the cover' },

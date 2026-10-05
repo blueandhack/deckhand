@@ -7,7 +7,7 @@ it is proven. What changed is what board 2 actually changes.
 
 ```
 openscad -o stl/deckhand_b2_body.stl -D 'part="body"' deckhand_case_b2.scad
-# parts: body | cover | retainer | stand | buttons | btngauge | btncoupon | coupon | section | all
+# parts: body | cover | lugs | retainer | stand | buttons | btngauge | btncoupon | coupon | section | all
 ```
 
 ![assembled, with a real capture on the screen](../docs/device-hero.png)
@@ -458,6 +458,11 @@ the same reason.
 
 ### Printing it
 
+**SUPERSEDED 2026-10-04 by the bolt-on hinge** (next section): with `ks_mount = "bolton"`, the
+default, the cover prints **outer face down with no support**, and the tongues are its first
+four layers on the bed, the same way the coupon's are. The rest of this section applies to
+`ks_mount = "integrated"`, where it is still true as written.
+
 **The cover prints exactly as before** — the kickstand lugs on its outer face still force it
 onto support whichever way up it goes. The tongues just ride on that support. Three things:
 
@@ -519,6 +524,108 @@ Three are structural: the post is sized from `btn_meas_gap` and not the modelled
 `btn_flex_slot` carries `print_shrink` and goes through `mm()`. The four plateau-config faults that were
 already there had to select `btn_flex: 'false'`: `btn_flex` refusing a plateau stopped them
 building, which is the *"that trap cost four uncaught faults once"* note, a second time.
+
+## The hinge bolts on now — `ks_mount`
+
+Asked for 2026-10-04: *"I want to print the back case lay down on plate"*, with the hinge
+as *"another part later, with a thin stand"*. The kickstand lugs were the **only** feature on
+the cover's outer face, and they are what forced the whole cover onto support whichever way up
+it printed. So they come off it:
+
+| `ks_mount` | the cover | the hinge |
+|---|---|---|
+| **`"bolton"`** (default) | flat outer face, exports **outer face down, no support** | two small `part="lugs"`, each in a socket, one M2 each |
+| `"integrated"` | as before; the cover is **vertex-identical** to the previous export | part of the cover |
+| `"none"` | flat back, no sockets | no stand at all |
+
+```
+openscad -o stl/deckhand_b2_cover.stl -D 'part="cover"' deckhand_case_b2.scad   # flat, outer face down
+openscad -o stl/deckhand_b2_lugs.stl  -D 'part="lugs"'  deckhand_case_b2.scad   # x2, foot down
+openscad -o stl/deckhand_b2_stand.stl -D 'part="stand"' deckhand_case_b2.scad   # blade down, as before
+```
+
+### Above the surface, a bolt-on lug IS the integrated lug
+
+`ks_pedestal()` is **one module, used by both**. So above the cover's outer face the bolt-on
+lug is the same solid as the old lug, by construction. The stand's notches, its swing and every
+clearance it was fitted to are untouched, and the stand cannot tell which cover it is on.
+**Everything new is below the outer face, where the blade never goes:**
+
+- **The foot**, 7.0 × 9.0 × 4.0, sits in a **socket** through the 2 mm plate into a 4.5 mm
+  **pad** on the inner face. The cover now prints outer face down, so the pad grows straight up
+  off the plate with no support. The socket does the *locating*: the two lugs stay coaxial and
+  `ks_gap` apart because the one rigid part, the cover, puts them there. It also carries the
+  stand's load in its walls. The foot reaches 2 mm further toward the **mic edge** than the
+  pedestal, where nothing is. Toward the blade it cannot grow: the battery fence is 3.1 mm from
+  the axle, and the pad merges into the fence but stops at its inner face, so the cell still
+  seats.
+- **The fit**: `ks_sock_w = mm(ks_foot_w + print_grow + ks_sock_fit + print_shrink)`, written
+  the way `btn_guide_d` is. The hole loses `print_shrink`, the peg gains `print_grow`, and 0.2
+  printed is left over. That's **snug, not sliding**: a lug that rocks moves the pivot. The
+  screw then pulls the foot flat onto the socket floor, which removes the last of the tilt.
+- **The mouth has a 0.4 lead-in.** It is on the bed when the cover prints, where the first
+  layer squeezes openings shut. The foot's bottom edge has the same chamfer for its own first
+  layer.
+
+### Screws — what goes where, from what you have
+
+| where | screw | why |
+|---|---|---|
+| lug to cover, ×2 | **M2 × 8**, up from **inside** the cover | 2.5 floor, so 5.5 of thread in a 5.95 pilot (0.45 to spare) |
+| … or | M2 × 5 | holds with 2.5 of thread; the socket takes the load, the screw only holds it down |
+| stand pivot, ×2 | M2 × 8 socket cap, as before | unchanged |
+| case, ×4 | M3 × 5 self-tapping, as before | unchanged |
+
+**M2.5 is not used.** The lug screw's pilot is the same 2.1 thread-forming pilot as the pivot,
+and the two cross at the lug's centre. So the lug screw's pilot stops **0.5 short** of the pivot
+screw's (`ks_lug_pilot_top`), and that cap is what sets the floor: 8 − 2.5 = 5.5 of screw against
+4.0 + 1.95 of hole. Its head sits under the pad, and the model asserts it clears `comp_back` by
+1.5 mm, with a socket-cap head (2.0) as the worst case.
+
+**To fit:** drop each lug into its socket from the outside, then drive its screw up from inside
+the cover, **before** the cover goes on the device. Then fit the stand exactly as before.
+
+### The stand is thinner: 2.0, from 2.5
+
+*"A thin stand"* turned out to mean a thinner **blade**: `ks_leaf_th` 2.5 → **2.0**, so the
+folded blade stands 0.5 mm less off the back. The 7.0 barrel does not move; it is set by the M2
+head (see *The hinge is M2*). Bending stiffness goes with the cube, so the blade is about half
+as stiff (0.51×). It props a ~100 g device, which it can afford. Measured off the mesh, the blade
+sits at 2.00 everywhere along its length.
+
+### Printing the three parts
+
+- **Cover**: outer face down, **no support**. The four corner screw counterbores, both lug
+  sockets and both finger dishes are recesses in the bed face, each bridged over by at most
+  ~7.7 mm. The tongues are the first four layers.
+- **Lugs**: two, **foot down, no support**. The pivot pilot is a 2.1 horizontal hole, short
+  enough to bridge.
+- **Stand**: blade down, as before.
+
+### What the checker binds
+
+Four assertions, each with a fault its selftest injects and must catch by name:
+
+- **the stand swings clear of the hinge, 0..150°**: swept at 11 angles against the cover *as
+  assembled*, bolt-on lugs included. The existing folded-blade check was moved onto that same
+  assembly; against `cover()` alone it would have certified a stand against a hinge that is not
+  there. **Positive control**: `ks_open = −10`, into the cover, reads 1365.9 mm³. Both
+  `"integrated"` and `"bolton"` read 0.000 at every angle.
+- **the lug drops into its socket**: printed clearance +0.20 both ways.
+- **the lug screw cannot reach the pivot screw**: 0.55 mm of plastic between the two pilots,
+  measured with a rod up the lug's centre line (both pilots are internal, so no surface sample
+  sees them).
+- **an M2 × 8 lug screw does not bottom out**: the pilot measured on the lug mesh, and the
+  floor measured on the cover.
+
+`ks_sock_w`, `ks_sock_l` and `ks_lug_clear` joined the `mm()` and `print_shrink` lists. The four
+plateau faults now also select `ks_mount: "integrated"`, because `"bolton"` refuses a plateau
+cover by name. That is the same trap, a third time.
+
+**Not printed.** The fit, the socket's bridged ceiling and the pad's merge into the fence are
+model-and-render only. The button coupon is unaffected (same solid: same volume and facet
+count, only six vertices on flat faces triangulated differently, so its committed file was
+kept).
 
 ## Printed buttons instead of open holes — SUPERSEDED by `btn_flex`, kept for `btn_flex = false`
 
@@ -999,7 +1106,8 @@ its pivot near the edge it leans from"*). That is the price of the raised platea
 
 **The stand no longer sets the closed thickness the way it did.** See *The blade was a
 wedge* below: the hinge is M2 and the blade is flat, so the nose stands **7.0** proud and
-the blade **2.5**, against 8.2 and an average of 6.16 before.
+the blade **2.5**, against 8.2 and an average of 6.16 before. *(The blade is **2.0** since
+2026-10-04 — see "The hinge bolts on now".)*
 
 ## The blade was a wedge, and reading `ks_leaf_th` never showed it
 
@@ -1731,6 +1839,11 @@ second points the blade at the service edge. Flipping one alone aims the blade o
 case.
 
 ## What is NOT verified
+
+**The bolt-on hinge (`ks_mount = "bolton"`) and the 2.0 blade have not been printed.** The
+socket fit (0.2 printed, from the same `print_shrink` the buttons proved), the 7.7 mm bridged
+socket ceiling, and the lug screw's 0.55 mm web are model-and-mesh figures. Nothing here has
+loaded a lug.
 
 **The printed-in buttons (`btn_flex`): one coupon printed, at the WRONG length, and not yet
 pressed.** That coupon (7.4 mm posts) verified that the part prints and screws down, and that
