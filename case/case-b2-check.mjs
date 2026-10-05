@@ -114,6 +114,26 @@ function heightAt(tris, x, y) {
   }
   return best;
 }
+// Is there solid anywhere on the vertical line (x,y) between zlo and zhi? Every
+// crossing of the line with the surface, sorted, pairs into inside-intervals.
+function solidIn(tris, x, y, zlo, zhi) {
+  const zs = [];
+  for (const [a, b, c] of tris) {
+    const den = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1]);
+    if (Math.abs(den) < 1e-9) continue;
+    const w1 = ((b[1] - c[1]) * (x - c[0]) + (c[0] - b[0]) * (y - c[1])) / den;
+    const w2 = ((c[1] - a[1]) * (x - c[0]) + (a[0] - c[0]) * (y - c[1])) / den;
+    const w3 = 1 - w1 - w2;
+    if (w1 < -1e-6 || w2 < -1e-6 || w3 < -1e-6) continue;
+    zs.push(w1 * a[2] + w2 * b[2] + w3 * c[2]);
+  }
+  zs.sort((p, q) => p - q);
+  const u = [];
+  for (const z of zs) if (!u.length || z - u[u.length - 1] > 1e-6) u.push(z);
+  for (let i = 0; i + 1 < u.length; i += 2)
+    if (u[i + 1] > zlo + 1e-3 && u[i] < zhi - 1e-3) return true;
+  return false;
+}
 function stlTris(path) {
   const b = readFileSync(path);
   const n = b.readUInt32LE(80);
@@ -563,15 +583,16 @@ function run(scadPath, defines = {}) {
   const bf = scadEcho(scadPath, [
     'btn_flex ? 1 : 0', 'bcx', 'reset_dx', 'boot_dx', 'btn_y', 'btn_out',
     'btn_flex_len', 'btn_flex_tip', 'btn_flex_slot', 'btn_flex_w', 'btn_flex_t',
-    'btn_flex_stiff', 'btn_flex_ramp', 'btn_flex_lean', 'btn_meas_gap', 'btn_flex_rest',
-    'btn_flex_travel', 'cover_rise', 'cover_th'
+    'btn_flex_stiff', 'btn_flex_ramp', 'btn_flex_lean', 'btn_post_tip_v', 'btn_meas_gap', 'btn_flex_rest',
+    'btn_flex_travel', 'cover_rise', 'cover_th', 'btn_post_fwd', 'btn_post_back', 'btn_post_flare'
   ], defines);
   const FLEX = ['the post tip stops btn_flex_rest short of the measured switch',
                 'the post leans toward the service edge',
                 'the tongue is free on three sides',
                 "the tongue's root is still joined to the plate",
                 'the tongue is btn_flex_t thick where it bends',
-                'the tongue bends within PLA low-cycle strain'];
+                'the tongue bends within PLA low-cycle strain',
+                'the post has a buttress root, not a pin'];
   if (!bf['btn_flex ? 1 : 0']) {
     for (const n of FLEX) skip(n, 'btn_flex is off - the buttons are separate plungers');
   } else {
@@ -588,12 +609,12 @@ function run(scadPath, defines = {}) {
       // The tip: the highest point over the post, found by scanning along v so the
       // LEAN is measured too rather than assumed.
       let best = -Infinity, bestV = 0;
-      for (let v = -2; v <= 2; v += 0.02) {
+      for (let v = -3; v <= 3; v += 0.02) {
         const h = at(dx, 0, v);
         if (h > best) { best = h; bestV = v; }
       }
       worstTip = Math.max(worstTip, Math.abs(best - tipWant));
-      worstLean = Math.max(worstLean, Math.abs(bestV - bf.btn_flex_lean));
+      worstLean = Math.max(worstLean, Math.abs(bestV - bf.btn_post_tip_v));
       // The slot, sampled down both sides and across the free end.
       const slotPts = [];
       for (const sx of [-1, 1])
@@ -601,8 +622,14 @@ function run(scadPath, defines = {}) {
           slotPts.push([sx * (w / 2 + s / 2), v]);
       for (const u of [-w / 4, 0, w / 4]) slotPts.push([u, bf.btn_flex_tip + s / 2]);
       nSlot += slotPts.length;
+      // THROUGH THE PLATE ONLY. The post now leans out over the slot's far end -
+      // 4 mm and more below the plate, on the tongue's own side, never near the
+      // fixed plate - so a whole-line sample read it as "material in the slot".
+      // What frees the tongue is the slot through the plate, so that is what is
+      // sampled: any solid between the outer face and the inner face.
       for (const [u, v] of slotPts)
-        if (at(dx, u, v) > -Infinity) openBad.push(`(${u.toFixed(2)},${v.toFixed(2)})`);
+        if (solidIn(CT, bf.bcx + dx + u, bf.btn_y + bf.btn_out * v, bf.cover_rise, z0))
+          openBad.push(`(${u.toFixed(2)},${v.toFixed(2)})`);
       // The root: material straight across the line the slot ends on.
       for (const u of [-w / 2 + 0.3, 0, w / 2 - 0.3])
         if (!(at(dx, u, -L - s / 2) > bf.cover_rise + 0.1)) rootBad.push(u.toFixed(2));
@@ -614,7 +641,7 @@ function run(scadPath, defines = {}) {
       `tip at ${(tipWant).toFixed(2)} wanted (inner face ${z0} + measured ${bf.btn_meas_gap} - ` +
       `rest ${bf.btn_flex_rest}); worst miss ${worstTip.toFixed(3)} mm`);
     check(FLEX[1], worstLean < 0.15,
-      `tip found ${bf.btn_flex_lean} toward the edge wanted, worst miss ${worstLean.toFixed(2)} mm ` +
+      `tip found ${bf.btn_post_tip_v} toward the edge wanted (lean ${bf.btn_flex_lean} + measured shift), worst miss ${worstLean.toFixed(2)} mm ` +
       `(the press swings it back toward the root)`);
     check(FLEX[2], openBad.length === 0,
       openBad.length ? `material in the slot at ${openBad.join(' ')}` : `${nSlot} slot samples all open, through the plate`);
@@ -626,6 +653,25 @@ function run(scadPath, defines = {}) {
     // From the MEASURED thickness, so a recess that silently stops cutting fails here
     // even though btn_flex_t - and the model's own strain assert - still read fine.
     const strain = 3 * tMax * (bf.btn_flex_rest + bf.btn_flex_travel) / (2 * L * L);
+    // THE ROOT SECTION, measured on the mesh just above the flare: across the
+    // tongue and along it, on both posts. The floors are a REQUIREMENT, not a copy
+    // of the constants - "a little bit weak" was a 3.0 pin, and a post that goes
+    // back toward one must fail here however its constants are written.
+    {
+      const zr = z0 + bf.btn_post_flare + 0.2;
+      const vc = (bf.btn_post_fwd - bf.btn_post_back) / 2;
+      const span = (xs, lo, hi) => { const c = xs.filter(x => x > lo && x < hi);
+                                     return c.length >= 2 ? c[c.length - 1] - c[0] : 0; };
+      let minW = Infinity, minD = Infinity;
+      for (const dx of [bf.reset_dx, bf.boot_dx]) {
+        const x = bf.bcx + dx, y = bf.btn_y + bf.btn_out * vc;
+        minW = Math.min(minW, span(crossings(sectionSegs(CT, 1, y), zr), x - w / 2, x + w / 2));
+        minD = Math.min(minD, span(crossings(sectionSegs(CT, 0, x), zr), y - 3.5, y + 3.5));
+      }
+      check(FLEX[6], minW >= 4.0 && minD >= 3.6,
+        `root ${minW.toFixed(2)} across x ${minD.toFixed(2)} along at ${(zr - z0).toFixed(1)} above the tongue ` +
+        `(needs >= 4.0 x 3.6; the weak post was a 3.0 pin)`);
+    }
     check(FLEX[5], strain <= 0.012,
       `${(strain * 100).toFixed(2)}% at the root per press (rest ${bf.btn_flex_rest} + ` +
       `stroke ${bf.btn_flex_travel} over L ${L}); 1.2% is the ceiling`);
@@ -745,12 +791,12 @@ const FAULTS = [
                           'btn_post_len   = 11.5 - btn_flex_rest;'),
     expect: 'the post is sized from the MEASURED gap, not the modelled switch' },
   { name: 'the post is drawn 1 mm longer than btn_post_len',
-    patch: s => s.replace('translate([0, btn_flex_lean, z0 + btn_post_len - btn_post_tip_d/2])',
-                          'translate([0, btn_flex_lean, z0 + btn_post_len + 1.0 - btn_post_tip_d/2])'),
+    patch: s => s.replace('translate([0, btn_post_tip_v, z0 + btn_post_len - btn_post_tip_d/2])',
+                          'translate([0, btn_post_tip_v, z0 + btn_post_len + 1.0 - btn_post_tip_d/2])'),
     expect: 'the post tip stops btn_flex_rest short of the measured switch' },
   { name: 'the post leans the wrong way',
-    patch: s => s.replace('translate([0, btn_flex_lean, z0 + btn_post_len - btn_post_tip_d/2])',
-                          'translate([0, -btn_flex_lean, z0 + btn_post_len - btn_post_tip_d/2])'),
+    patch: s => s.replace('translate([0, btn_post_tip_v, z0 + btn_post_len - btn_post_tip_d/2])',
+                          'translate([0, -btn_post_tip_v, z0 + btn_post_len - btn_post_tip_d/2])'),
     expect: 'the post leans toward the service edge' },
   { name: 'btn_flex_slot loses its print_shrink term (prints 0.1 and fuses)',
     patch: s => s.replace(/^btn_flex_slot  = mm\(0\.6 \+ print_shrink\);/m, 'btn_flex_slot  = mm(0.6);'),
@@ -771,6 +817,14 @@ const FAULTS = [
   { name: 'the thin span barely cut at all',
     patch: s => s.replace('translate([-w/2 - 0.01, -L, z0 - d])', 'translate([-w/2 - 0.01, -L, z0 - d/4])'),
     expect: 'the tongue bends within PLA low-cycle strain' },
+  { name: "the post forgets the measured 1 mm shift and lands on the model's lean alone",
+    patch: s => s.replace('translate([0, btn_post_tip_v, z0 + btn_post_len - btn_post_tip_d/2])\n',
+                          'translate([0, btn_flex_lean, z0 + btn_post_len - btn_post_tip_d/2])\n'),
+    expect: 'the post leans toward the service edge' },
+  { name: 'the post goes back to the 3.0 pin that was too weak',
+    patch: s => s.replace(/^btn_post_w     = 4\.4;/m, 'btn_post_w     = 3.0;')
+                 .replace(/^btn_post_back  = 2\.5;/m, 'btn_post_back  = 1.5;'),
+    expect: 'the post has a buttress root, not a pin' },
   // The bolt-on lugs.
   { name: 'the lug socket loses its print_shrink term',
     patch: s => s.replace(/^ks_sock_w    = mm\(ks_foot_w \+ print_grow \+ ks_sock_fit \+ print_shrink\);/m,

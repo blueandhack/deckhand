@@ -796,15 +796,36 @@ btn_flex_w     = 6.0;     // tongue width; the post (3.0) and a wall either side
 // grille documents. Modelled 1.1, printed ~0.6. If the first layer still bridges
 // it, run a blade through once; nothing else depends on its width.
 btn_flex_slot  = mm(0.6 + print_shrink);
-// The post: a 3.0 column on a flared foot, ending in a rounded tip so it slides
-// across the actuator during the tilt rather than catching an edge of it.
-btn_post_d     = 3.0;
-btn_post_tip_d = 2.4;
-btn_post_foot  = 0.3;     // 45 deg flare where the post meets the tongue - and no more:
-                          // it sets the tongue's free end, which the lip boxes in
+// THE POST - "THE BUTTON LEGS ... A LITTLE BIT WEAK", reported 2026-10-04 off the
+// first 10.5 mm print. It was a 3.0 column tapering to the 2.4 tip, i.e. nearly
+// uniform, with its SMALLEST-for-its-load section at the root - and a tip-loaded
+// column's moment is largest exactly there, growing with its length, which had
+// just gone 7.4 -> 10.5. Printed upright, every layer line also crosses it there.
+//
+// So it is now a BUTTRESS: big at the root, tapering STRAIGHT to the same round
+// tip - the shape a tip-loaded beam wants, since its moment falls linearly to zero
+// at the load. The bottom end is as slim as it ever was, so nothing new can meet
+// the board's parts beside the switch. Root bending strength 3.7x the old one
+// along the tongue and 4.1x across it (section modulus 9.9 / 10.8 against 2.65
+// mm3, rasterised from the rounded section), before the flare adds any.
+//
+// WHICH WAYS IT CAN GROW IS SET BY THE TONGUE, NOT BY CHOICE:
+//   +v (toward the lip): NOT AT ALL. btn_post_fwd + btn_post_foot sets the
+//      tongue's free end, and the lip boxes that in (see btn_flex_tip).
+//   across (u): to the tongue's edge, less 0.3 - btn_post_w + 2 * btn_post_flare.
+//   -v (toward the root): onto the tongue's thick zone, which grows to match
+//      (btn_flex_stiff). That shortens the thin span 6.3 -> 5.1 and costs 0.11 N
+//      (1.98 -> 2.09 PLA) and 0.04% of root strain (0.86 -> 0.90%) - modelled,
+//      and inside the 1.2% the model asserts.
+btn_post_w     = 4.4;     // across the tongue, at the root
+btn_post_fwd   = 1.5;     // root, post centre toward the lip - boxed in, see above
+btn_post_back  = 2.5;     // root, post centre toward the tongue's root
+btn_post_flare = 0.5;     // 45 deg fillet onto the tongue, sides and back
+btn_post_foot  = 0.3;     // ...and toward the lip, where there is no more room
+btn_post_tip_d = 2.4;     // the round tip that slides across the actuator in the tilt
 // The tip's distance from the post centre to the tongue's thick/thin step: past
 // the flared foot, so the inner-face recess never bites into the post.
-btn_flex_stiff = mm(btn_post_d/2 + btn_post_foot + 0.4);
+btn_flex_stiff = mm(btn_post_back + btn_post_flare + 0.4);
 // A shallow dish on the outer face over the post, so a finger finds the tongue.
 // FLUSH, NOT PROUD, on purpose: the old plunger stood 1.5 mm out of the back, and a
 // device laid on its back would press RESET with its own weight. A dish cannot.
@@ -1751,7 +1772,7 @@ btn_lip_clear = usb_at_top ? (out_h - wall - lip_gy - lip_t) - btn_y
 btn_fence_near = usb_at_top ? batt_y0 + batt_h + batt_fence_gap + batt_fence_t
                             : batt_y0 - batt_fence_gap - batt_fence_t;
 // The tongue's free end, just past the post's flared foot.
-btn_flex_tip  = mm(btn_post_d/2 + btn_post_foot + 0.3);
+btn_flex_tip  = mm(btn_post_fwd + btn_post_foot + 0.3);
 // The 45 deg ramps that take the plate down to btn_flex_t and back. Same length as
 // they are deep, so neither end of the thin span is a sharp step for a crack to
 // start at - and the ROOT's ramp runs on into the plate past the slot's end.
@@ -1767,6 +1788,26 @@ btn_flex_len  = mm(abs(btn_y - btn_fence_near) - btn_flex_ramp - 0.5);
 // rather than at rest where nothing is happening. 0.85 mm, or 4.6 deg - a lean any
 // printer takes without support, whichever face is down.
 btn_flex_lean = mm(1.5 * (btn_flex_rest + btn_flex_travel/2) * btn_post_len / btn_flex_len);
+// ...AND THE MODEL'S LEAN WAS NOT ENOUGH, MEASURED BY HAND 2026-10-04: on the
+// printed coupon "when push it, it will move to inside", and the ask was to move
+// the leg ~1 mm toward the USB-C edge. So the tip goes btn_post_shift further out
+// on top of the modelled lean, and the two are kept APART: btn_flex_lean is beam
+// arithmetic, btn_post_shift is what a finger on the real part said it lacked.
+// Why the beam under-predicts is not known - the post bending under the press, the
+// tongue twisting, or btn_in (never measured to better than "~2 mm from the edge")
+// all push the same way - and this does not need to know to fix the landing.
+//
+// ONLY THE TIP MOVES. The root cannot go that way: btn_post_fwd sets the tongue's
+// free end, which the lip boxes in. So the post leans more - its outer face 8.4
+// deg off vertical instead of 4.6 - which any printer takes without support.
+btn_post_shift = 1.0;     // MEASURED correction, toward the USB-C (service) edge
+btn_post_tip_v = btn_flex_lean + btn_post_shift;   // the tip, from the switch centre
+// The tip leaning out must not reach the lip, which hangs lip_h off the inner
+// face at btn_lip_clear: the post's outer face is checked at the lip's bottom.
+assert(!btn_flex ||
+       btn_post_fwd + (btn_post_tip_v + btn_post_tip_d/2 - btn_post_fwd) * lip_h / btn_post_len
+         <= btn_lip_clear - 0.5,
+       "a button post leans far enough out to touch the cover lip - reduce btn_post_shift");
 btn_flex_strain = 3 * btn_flex_t * (btn_flex_rest + btn_flex_travel) / (2 * btn_flex_len * btn_flex_len);
 assert(!btn_flex || cover_rise == 0,
        str("btn_flex needs a FLAT plate at the buttons and cover_rise is ", cover_rise,
@@ -1774,6 +1815,8 @@ assert(!btn_flex || cover_rise == 0,
 assert(!btn_flex || btn_flex_tip + btn_flex_slot <= btn_lip_clear,
        str("a button tongue's slot runs under the cover lip: needs ", btn_flex_tip + btn_flex_slot,
            " from the post, the lip is at ", btn_lip_clear));
+assert(!btn_flex || btn_post_w/2 + btn_post_flare <= btn_flex_w/2 - 0.3,
+       "the button post's root is wider than its tongue - narrow btn_post_w or btn_post_flare");
 assert(!btn_flex || btn_flex_len >= 8.0,
        str("the button tongue is only ", btn_flex_len, " mm long - the battery fence has ",
            "crowded it, and a short tongue is a strained one (see btn_flex_t)"));
@@ -2428,15 +2471,23 @@ module btn_flex_cut(){
   R = (btn_dish_d * btn_dish_d / 4 + btn_dish_z * btn_dish_z) / (2 * btn_dish_z);
   translate([0, 0, cover_rise - (R - btn_dish_z)]) sphere(r = R, $fn = 96);
 }
-// The post: a flared foot on the tongue, a column that LEANS by btn_flex_lean
-// toward the service edge (the tilt, paid in advance), and a round tip.
+// The post: a flared foot on the tongue, then a buttress tapering straight from
+// its root section to the round tip, which sits btn_flex_lean toward the service
+// edge (the tilt, paid in advance). See btn_post_w for why this shape.
 module btn_post(){
   z0 = cover_rise + cover_th;
-  translate([0, 0, z0 - 0.01])
-    cylinder(d1 = btn_post_d + 2*btn_post_foot, d2 = btn_post_d, h = btn_post_foot + 0.01);
+  dv = btn_post_fwd + btn_post_back;            // root section, along the tongue
+  vc = (btn_post_fwd - btn_post_back) / 2;      // ...and its centre
+  r  = 1.2;
+  // the foot: 45 deg on the sides and back, only btn_post_foot toward the lip
   hull(){
-    translate([0, 0, z0 - 0.01]) cylinder(d = btn_post_d, h = 0.01);
-    translate([0, btn_flex_lean, z0 + btn_post_len - btn_post_tip_d/2])
+    translate([0, vc + (btn_post_foot - btn_post_flare)/2, z0 - 0.01]) linear_extrude(0.01)
+      rrect_c(btn_post_w + 2*btn_post_flare, dv + btn_post_flare + btn_post_foot, r + btn_post_flare);
+    translate([0, vc, z0 + btn_post_flare]) linear_extrude(0.01) rrect_c(btn_post_w, dv, r);
+  }
+  hull(){
+    translate([0, vc, z0 - 0.01]) linear_extrude(0.01) rrect_c(btn_post_w, dv, r);
+    translate([0, btn_post_tip_v, z0 + btn_post_len - btn_post_tip_d/2])
       sphere(d = btn_post_tip_d, $fn = 36);
   }
 }

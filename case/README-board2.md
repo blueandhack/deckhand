@@ -432,7 +432,7 @@ assert keeps its slot off the lip.
 | `btn_flex_w` | 6.0 | the post plus a wall either side |
 | `btn_flex_len` | 9.7 | derived: fence to post, less the root ramp and 0.5 |
 | `btn_flex_slot` | 1.1 modelled, **~0.6 printed** | `mm(0.6 + print_shrink)` — a slot is a long hole, and modelled at 0.6 it prints at 0.1 and fuses |
-| post | Ø3.0, Ø2.4 round tip, 0.3 flared foot | the round tip slides across the actuator through the tilt instead of catching an edge |
+| post | **buttress**: 4.4 × 4.0 root with a 0.5 flare, tapering straight to a Ø2.4 round tip | was a Ø3.0 pin, too weak at 10.5 long (see below); the round tip slides across the actuator through the tilt instead of catching an edge |
 | finger dish | Ø4.0 × 0.5 on the outer face | **flush, not proud**: the plunger stood 1.5 out, so a device laid on its back pressed RESET under its own weight |
 
 **Modelled, for the full press (rest 0.4 + the switch's ~0.25 stroke = 0.65 mm):**
@@ -473,6 +473,66 @@ onto support whichever way up it goes. The tongues just ride on that support. Th
 3. **Printed inner face down**, the post's round tip lands on a support column. Sand off the
    scar; the tip is the contact face.
 
+### The tip lands 1 mm further out, by hand — `btn_post_shift`
+
+Reported off the printed coupon: *"when push it, it will move to inside"* — the tilt this
+section's lean exists to cancel was **not** cancelled — with the ask to move the leg ~1 mm
+toward the USB-C edge. So the tip now sits `btn_flex_lean + btn_post_shift` = 0.85 + **1.0** =
+**1.85** mm out from the switch centre.
+
+**The two terms are kept apart on purpose.** `btn_flex_lean` is beam arithmetic, and
+`btn_post_shift` is what a finger on the real part said it lacked. Why the beam under-predicts
+is **not known**. Three things push the same way and would each do it: the post itself bending
+under the press, the tongue twisting, and `btn_in`, which has never been measured to better
+than "~2 mm from the edge". The fix does not need to know which.
+
+**Only the tip moves.** The root cannot: `btn_post_fwd` sets the tongue's free end, and the lip
+boxes that in. So the post leans more, its outer face 8.4° off vertical instead of 4.6°, which
+prints without support either way up. **It clears the cover lip by ~1.3 mm.** The model asserts
+it, measured at the lip's bottom edge, and an intersection of the post grown by 1.2 mm with the
+lip ring reads 0.000 mm³ (grown by 1.6 it reads 2.38, so the probe can see a hit). That matters
+more than it sounds: the post rides on the moving tongue and the lip is fixed, so touching
+would weld the button shut.
+
+**The checker learned something from it.** *"The tongue is free on three sides"* sampled the
+whole vertical line, and the leaning post, hanging 4 mm and more below the slot's far end,
+read as *"material in the slot"*. That was a false failure, not a defect. It now samples the
+plate only, which is what actually frees the tongue. The fault that cuts the slot part-way
+through the plate is still caught, and a new fault drops the 1 mm shift.
+
+### The legs were weak — the post is a buttress now
+
+Reported off the first 10.5 mm print: *"the button legs, they are a little bit weak."* The post
+was a Ø3.0 column tapering to the Ø2.4 tip, nearly uniform, so its smallest section *for its
+load* was at the root. A tip-loaded column's moment is largest exactly there, and it grows with
+length, which had just gone from 7.4 to 10.5. Printed upright, every layer line crosses it there
+too.
+
+**It is now a buttress**: a 4.4 × 4.0 root on a 0.5 45° flare, tapering **straight** to the same
+Ø2.4 round tip. That is the shape a tip-loaded beam wants, since its moment falls linearly to
+zero at the load. The bottom end is as slim as it ever was, so nothing new can meet the
+board's parts beside the switch.
+
+| | old pin | buttress |
+|---|---|---|
+| root section modulus, along / across the tongue | 2.65 / 2.65 mm³ | **9.85 / 10.78 mm³** (3.7× / 4.1×) |
+| tongue thin span | 6.3 | 5.1 (the thick zone grew to carry the root) |
+| press force, PLA, modelled | 1.98 N | 2.09 N |
+| root strain per press, modelled | 0.86% | 0.90% |
+
+Section moduli are rasterised from the rounded section; force and strain come from the same
+layered-beam model as above. **Which ways it could grow was set by the tongue, not chosen.**
+Toward the lip it could not grow at all: `btn_post_fwd` sets the tongue's free end, and the lip
+boxes that in. Across, it grows to the tongue's edge less 0.3, which is asserted. Toward the
+root, it moves onto the thick zone, which `btn_flex_stiff` grows to match.
+
+**Print it with at least 3 walls** (perimeters). The leg is nearly all wall at this size, and
+walls are what carry a column across its layer lines.
+
+`case-b2-check.mjs` measures the root on the mesh, 0.7 above the tongue, on both posts. It
+reads **4.25 × 3.88** against a floor of 4.0 × 3.6, and the floor is a requirement, not a copy
+of the constants. Its selftest fault puts the 3.0 pin back.
+
 ### Print the button coupon first — `part="btncoupon"`
 
 `stl/deckhand_b2_btn_coupon.stl`, 56 × 16 × 16 mm: the cover's **service end only** — both
@@ -508,7 +568,8 @@ under *The plunger's stem is long* below.
 
 ### What the checker binds
 
-`case-b2-check.mjs` gained nine assertions and eight injected faults, each fault caught by
+`case-b2-check.mjs` gained nine assertions and eight injected faults (ten and nine with the
+buttress check above), each fault caught by
 name. Six assertions are measured on the cover's own mesh, at points placed from echoed constants:
 
 - the post tip stops `btn_flex_rest` short of the **measured** switch (not of `btn_post_len`,
