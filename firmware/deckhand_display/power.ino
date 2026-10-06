@@ -1218,7 +1218,13 @@ void enterDeepSleep() {
   //    whole power-off. Driven, not isolated: isolate would drop the pull-up and
   //    leave it floating outright, which is worse. Deep sleep here ends in a
   //    RESET, so audio is re-initialised on the way back and nothing is stranded.
-  if (pwrOffMode & PWROFF_AMP_LOW) {
+  //    CORRECTED 2026-10-05: on battery LOW turns the amp ON (heard, twice). HIGH
+  //    is the off level, so HIGH takes precedence when both bits are set.
+  if (pwrOffMode & PWROFF_AMP_HIGH) {
+    pinMode(PIN_AMP_EN, OUTPUT);
+    digitalWrite(PIN_AMP_EN, HIGH);
+    gpio_hold_en((gpio_num_t) PIN_AMP_EN);
+  } else if (pwrOffMode & PWROFF_AMP_LOW) {
     pinMode(PIN_AMP_EN, OUTPUT);
     digitalWrite(PIN_AMP_EN, LOW);
     gpio_hold_en((gpio_num_t) PIN_AMP_EN);

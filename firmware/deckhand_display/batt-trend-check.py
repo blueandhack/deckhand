@@ -1155,6 +1155,29 @@ check("it names PIN_AMP_EN rather than a literal, so a re-pin follows",
       "PIN_AMP_EN" in _amp)
 check("PWROFFMODE reports it, or the leg cannot be attributed", "ampLow=%d" in MAIN)
 
+# ---- THE AMP ENABLE, CORRECTED: HIGH IS OFF ON BATTERY ----------------------
+# Heard twice with the cable out: TONETEST played trial A (pin LOW) and was
+# silent on trial B (pin HIGH). ampLow therefore held the amp ON through deep
+# sleep, and its leg measured worse than the control. ampHigh is the fix.
+check("the HIGH step exists as its own bit", "PWROFF_AMP_HIGH" in _val)
+check("...distinct from every other step, ampLow included", len(set(_val.values())) == len(_val))
+check("...and DEFAULT OFF like every step - silence is heard, the milliamps are not "
+      "measured yet", "PWROFF_AMP_HIGH" not in _dflt)
+_ah = re.search(r"if \(pwrOffMode & PWROFF_AMP_HIGH\) \{(.*?)\n  \}", POWER, re.S)
+_ah = _ah.group(1) if _ah else ""
+check("it drives the pin HIGH - the level that silenced the amp on battery - and HOLDS "
+      "it, never isolating it",
+      "digitalWrite(PIN_AMP_EN, HIGH)" in _ah and "gpio_hold_en" in _ah
+      and "rtc_gpio_isolate" not in _ah)
+# PRECEDENCE, because both bits on at once must mean "off": HIGH is tested first
+# and ampLow only in its else-arm. Reversed, setting both would hold the amp ON.
+_iH = POWER.find("if (pwrOffMode & PWROFF_AMP_HIGH)")
+_iL = POWER.find("else if (pwrOffMode & PWROFF_AMP_LOW)")
+check("HIGH WINS when both amp bits are set - ampLow lives only in its else-arm, so a "
+      "combined mode can never hold the amp on",
+      _iH >= 0 and _iL > _iH)
+check("PWROFFMODE reports ampHigh, or the leg cannot be attributed", "ampHigh=%d" in MAIN)
+
 # ---- THE POWER-OFF RECEIPT REACHES A HOST THAT IS NOT ON THE CABLE ---------
 # sendLineToHost() fans out to Serial AND BLE, but its BLE half is gated on
 # bleConnected - and at boot no central has connected yet. So the receipt for a

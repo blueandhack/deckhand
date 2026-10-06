@@ -324,6 +324,17 @@ const int BORDER_CTRL = 1;
 // shutdown IO4 is this board's SD_CMD. JP1 is the BATTERY header, also 2-pin -
 // the two are easy to confuse and only one of them makes a sound.
 //
+// CORRECTED 2026-10-05 - THE NOTE BELOW HOLDS ON USB POWER ONLY. On battery the
+// pin DOES gate the amp: TONETEST run over BLE with the cable out played trial A
+// (pin LOW, 1000 Hz) and was SILENT on trial B (pin HIGH, 400 Hz), heard and
+// confirmed twice. The rail-mismatch explanation below is right, and it is also
+// why the answer changes with the supply: on USB U6 sits on a real 5V that a 3.3V
+// high cannot reach; on battery its supply is lower and 3.3V does reach it. So on
+// battery: LOW = amp ON, HIGH = amp OFF, exactly board 1's scheme. The note is
+// kept as written because it was a true measurement of the condition it tested -
+// it just tested one supply, and every conclusion drawn from it about deep sleep
+// (which only ever happens on battery) was wrong. See PWROFF_AMP_HIGH.
+//
 // PIN_AMP_EN GATES NOTHING, and that is MEASURED, not inferred. It reaches U6's
 // SHUTDOWN pin (with R26, a 10K pull-up to VCC3V3), so both the demo project's
 // comment ("digitalWrite(PIN_AMP_EN, HIGH); // enable the amplifier") and the
@@ -349,8 +360,11 @@ const int BORDER_CTRL = 1;
 // inside the ramp. Any future short burst has to clear it.
 
 // The level that MEANS enabled, under the most likely datasheet reading
-// (SHUTDOWN active high). It changes nothing on this board revision - the pin
-// gates nothing - and is driven anyway so that a revision which fixes the
+// (SHUTDOWN active high). It changes nothing ON USB POWER - the pin gates nothing
+// there - but ON BATTERY it is the level that ENABLES the amp (see the 2026-10-05
+// correction above), so leaving it here between sounds keeps the amp powered for
+// every second the device runs on battery. Not changed yet: muting between sounds
+// costs the hundreds-of-ms C41 ramp on every beep. It is driven anyway so that a revision which fixes the
 // threshold, or a unit whose R26 is a different value, plays sound instead of
 // silence. Costs one digitalWrite; the alternative is a board that regresses to
 // this same afternoon's bug with no code change to blame.
