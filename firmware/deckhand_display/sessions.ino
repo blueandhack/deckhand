@@ -400,6 +400,26 @@ bool sessionsPressRect(int sx, int sy, int* r) {
   return true;
 }
 
+// Where session `idx` sits in the LIST right now, as a logical rect - the row a
+// detail card grows out of and shrinks back into. false when it is not on screen
+// (scrolled away, or gone), and the transition then uses the content's centre.
+// The detail card's skeleton is still the right thing to show: the card is up, for
+// a lean row whose FOCUS has not come back. Asked every tick by loaders.ino.
+bool detailSkelValid() {
+  return showingDetail && detailIndex >= 0 && detailIndex < sessionCount &&
+         sessions[detailIndex].lean && sessions[detailIndex].focusPending;
+}
+
+bool sessionRowRectFor(int idx, int* r) {
+  for (int pos = 0; pos < sessionCount; pos++) {
+    if (sessionAt(pos) != idx) continue;
+    if (!sessionRowVisible(pos)) return false;
+    r[0] = SESSION_ROW_X; r[1] = sessionRowYAt(pos); r[2] = SESSION_ROW_W; r[3] = sessionRowHAt(pos);
+    return true;
+  }
+  return false;
+}
+
 // Sessions LIST tab: does the press go to a handler that blocks until the lift?
 // The SAME entry condition dispatchTap() tests before sessionDragLoop().
 bool sessionsTapBlocks(int sy) {
@@ -3262,6 +3282,17 @@ void drawSessionDetail(int idx) {
     tft.setTextColor(COLOR_LABEL, COLOR_CARD);
     tft.drawString(s.focusPending ? "FETCHING DETAIL..." : "DETAIL UNAVAILABLE", LX, cy);
     cy += DETAIL_LBL_STEP;
+#if BOARD_HAS_ANIM
+    // WHILE FOCUS IS IN FLIGHT the two explanatory lines are a SKELETON instead -
+    // bars where the text will be, with the light passing over them (loaders.ino).
+    // "DETAIL UNAVAILABLE" keeps its words: that one is not a wait.
+    if (s.focusPending) {
+      skelArm(SKEL_DETAIL, true);
+      skelAdd(LX, cy + 4, maxW, DETAIL_TEXT_LINE_H - 8, COLOR_CARD);
+      skelAdd(LX, cy + DETAIL_TEXT_LINE_H + 4, maxW * 3 / 5, DETAIL_TEXT_LINE_H - 8, COLOR_CARD);
+      skelPaintNow();
+    } else
+#endif
     drawWrappedText(s.focusPending
                         ? "This row arrived without its detail. Asking the Mac for it."
                         : "The Mac no longer has this session in its list.",

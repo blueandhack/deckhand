@@ -1983,6 +1983,8 @@ extern uint32_t animFrames, animFlushTotalUs, animFlushWorstUs;
 extern uint16_t animTweens;
 extern uint16_t pressSlides, pressDrops;
 extern int pressX, pressY;
+extern uint32_t trFrames, trFlushTotalUs, trFlushWorstUs;
+extern uint16_t trCount, trSkipped;
 #endif
 extern int  composeChipPage;
 extern bool composeSent;
@@ -4438,6 +4440,12 @@ void switchTab(Tab newTab) {
   // so this is reachable without touching the device at all.
   pairPanelActive = false;
 #endif
+#if BOARD_HAS_ANIM
+  // THE CONTENT AREA SLIDES, toward the tab that was picked; the bar's underline
+  // moves at once. BEFORE anything below draws - transBegin() snapshots the glass.
+  transBegin(newTab > currentTab ? TR_SLIDE_FROM_RIGHT : TR_SLIDE_FROM_LEFT,
+             TAB_BAR_H, contentBottom(), nullptr, nullptr, TR_TAB_MS);
+#endif
 #if !BOARD_USES_TFT_ESPI
   // Timed because "switching tabs feels slow" was a real report and the flush is
   // only part of it - the render has to be measured separately or the wrong half
@@ -4512,6 +4520,17 @@ void switchTab(Tab newTab) {
 }
 
 void openSessionDetail(int idx) {
+#if BOARD_HAS_ANIM
+  // THE CARD GROWS OUT OF ITS ROW (or the content's centre, when the row is not on
+  // screen - a DETAIL command, a pinned focus). Snapshot first, so before any draw.
+  {
+    int from[4], to[4];
+    transContentRect(to);
+    if (showingDetail || currentTab != TAB_SESSIONS || !sessionRowRectFor(idx, from))
+      transCentreRect(from);
+    transBegin(TR_REVEAL_IN, TAB_BAR_H, contentBottom(), from, to, TR_REVEAL_MS);
+  }
+#endif
   showingDetail = true;
   detailIndex = idx;
   copyField(detailId, sizeof(detailId), sessions[idx].id); // anchor by id, not index
@@ -4541,6 +4560,18 @@ void openSessionDetail(int idx) {
 }
 
 void closeSessionDetail() {
+#if BOARD_HAS_ANIM
+  // ...and shrinks back into wherever that session's row is NOW. A caller that has
+  // already cleared the screen (closeCompose) gets no transition: snapshotOld()
+  // refuses a framebuffer that is not what is on the glass.
+  {
+    int from[4], to[4];
+    transContentRect(from);
+    if (detailIndex < 0 || detailIndex >= sessionCount || !sessionRowRectFor(detailIndex, to))
+      transCentreRect(to);
+    transBegin(TR_REVEAL_OUT, TAB_BAR_H, contentBottom(), from, to, TR_REVEAL_MS);
+  }
+#endif
   showingDetail = false;
   detailIndex = -1;
   detailId[0] = '\0';
@@ -6961,6 +6992,12 @@ static const UnavailableCommand UNAVAILABLE_COMMANDS[] = {
     "reaches every row this board has." },
 #endif
 #if !BOARD_HAS_ANIM
+  { "ANIMFREEZE",
+    "it holds board 2's screen transitions (a sliding tab, a card growing from its row, the "
+    "transcript's sheet) at a given progress so a SCREENSHOT can record a mid-motion frame. "
+    "This board is BOARD_HAS_ANIM 0: it draws straight to the glass through TFT_eSPI, with "
+    "no second framebuffer to hold the outgoing screen in and no flush to composite the two "
+    "at, so its screens change in one step and there is no motion to hold." },
   { "PRESSTEST",
     "it lights the press highlight board 2 composites at flush time (PanelShim::setOverlay) "
     "and holds it, so a SCREENSHOT can check the lit rect against the control. This board "
@@ -7773,6 +7810,12 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     Serial.printf("DETAIL: session %d (%s) %s\n", di, sessions[di].name,
                   sessions[di].askPid[0] ? "ask screen" : "detail card");
 #if BOARD_HAS_ANIM
+  } else if (buf.startsWith("ANIMFREEZE")) {
+    // Holds every screen transition at a progress percentage, so a SCREENSHOT
+    // (readRect composites it) can record a mid-motion frame. See anim.ino.
+    animFreezeCommand(buf.length() > 10 ? buf.substring(10) : String(""));
+    buf = "";
+    return;
   } else if (buf.startsWith("PRESSTEST")) {
     // Lights the press layer at a point so a capture can check the rect against
     // the control. Never dispatches. See pressTestCommand() in anim.ino.
@@ -9082,6 +9125,16 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
                   (unsigned long) (animFrames ? animFlushTotalUs / animFrames : 0),
                   (unsigned long) animFlushWorstUs, (unsigned) animTweens,
                   (unsigned) pressSlides, (unsigned) pressDrops);
+    // Screen transitions: a frame is a flush of the whole band (content area, or the
+    // full screen for the transcript sheet), so this IS the per-frame cost. skipped =
+    // a hook whose snapshot was refused (unflushed drawing) or that drew nothing.
+    Serial.printf("PERF trans   n=%u frames=%lu flush avg %luus worst %luus skipped=%u\n",
+                  (unsigned) trCount, (unsigned long) trFrames,
+                  (unsigned long) (trFrames ? trFlushTotalUs / trFrames : 0),
+                  (unsigned long) trFlushWorstUs, (unsigned) trSkipped);
+#if BOARD_HISTORY_SCROLL
+    scrollLoaderPerf();
+#endif
 #endif
     // The pulse reports `on` beside `n` for the same reason the crossfade reports
     // `started`: this animation SHIPS OFF, so n=0 is the expected reading and is
@@ -9710,6 +9763,7 @@ void loop() {
   tickSessionAnim();
 #if BOARD_HAS_ANIM
   animTick();
+  tickLoaders();
 #endif
 #endif
   // The SESSION DETAIL card's own band, which neither tick around it can reach:

@@ -583,7 +583,62 @@ int projRowAtY(int sy) {
 // absorption in deckhand_display.ino's handleLine() compares an incoming
 // `projsess` reply's own key against THIS value, so it has to be right the
 // instant the level opens, not only once the wire request actually goes out.
+#if BOARD_HAS_ANIM
+// Where project `pos` sits on level 0 right now, as a logical rect - the row level 1
+// grows out of and shrinks back into. false when it is scrolled away.
+bool projRowRect(int pos, int* r) {
+  if (pos < 0 || pos >= projectCount || !projRowVisible(pos)) return false;
+  r[0] = PROJ_ROW_X; r[1] = PROJ_ROW_Y0 + pos * PROJ_STEP - projScroll;
+  r[2] = PROJ_ROW_W; r[3] = PROJ_ROW_H;
+  return true;
+}
+#endif
+
+#if BOARD_HAS_ANIM
+// THE SKELETON'S OWNER HALF (loaders.ino holds the engine). Valid while that
+// level is still the pending state renderProjLevel0/1 would draw - asked every
+// tick, so the reply that replaces it can never be painted over.
+bool projSkelValid(int level) {
+  if (currentTab != TAB_PROJECTS || showingDetail || projLevel != level) return false;
+  if (level == 0) return projectsPending && (!projectsEverReceived || projectCount == 0);
+  return psessPending && (!psessEverReceived || psessCount == 0);
+}
+
+// Placeholder rows at the real rows' geometry: the card, and two bars where the
+// name and its meta will be (level 0), or the title and its meta line (level 1).
+void projSkelLayout(int level) {
+  const int lh = uiLineH(T_BODY);
+  if (level == 0) {
+    for (int i = 0; i < PROJ_ROWS; i++) {
+      const int y = PROJ_ROW_Y0 + i * PROJ_STEP;
+      if (y + PROJ_ROW_H > contentBottom()) break;
+      uiFillRound(PROJ_ROW_X, y, PROJ_ROW_W, PROJ_ROW_H, R_MD, COLOR_CARD, COLOR_BG);
+      const int by = y + (PROJ_ROW_H - lh) / 2 + 3;
+      skelAdd(PROJ_ROW_X + PROJ_PAD, by, (PROJ_ROW_W - 2 * PROJ_PAD) * (40 + (i * 7) % 25) / 100, lh - 6, COLOR_CARD);
+      skelAdd(PROJ_ROW_X + PROJ_ROW_W - PROJ_PAD - PROJ_ROW_W / 6, by, PROJ_ROW_W / 6, lh - 6, COLOR_CARD);
+    }
+    return;
+  }
+  for (int i = 0; i < PSESS_ROWS; i++) {
+    const int y = PSESS_ROW_Y0 + i * PSESS_STEP;
+    if (y + PSESS_ROW_H > contentBottom()) break;
+    uiFillRound(PSESS_ROW_X, y, PSESS_ROW_W, PSESS_ROW_H, R_MD, COLOR_CARD, COLOR_BG);
+    const int top = y + (PSESS_ROW_H - 2 * lh - PSESS_LINE_GAP) / 2;
+    skelAdd(PSESS_ROW_X + PSESS_PAD, top + 3, (PSESS_ROW_W - 2 * PSESS_PAD) * (55 + (i * 11) % 30) / 100, lh - 6, COLOR_CARD);
+    skelAdd(PSESS_ROW_X + PSESS_PAD, top + lh + PSESS_LINE_GAP + 3, (PSESS_ROW_W - 2 * PSESS_PAD) * 35 / 100, lh - 6, COLOR_CARD);
+  }
+}
+#endif
+
 void projOpenLevel1(int pos) {
+#if BOARD_HAS_ANIM
+  {   // level 1 grows out of the project's row - snapshot before anything draws
+    int from[4], to[4];
+    transContentRect(to);
+    if (currentTab != TAB_PROJECTS || projLevel != 0 || !projRowRect(pos, from)) transCentreRect(from);
+    transBegin(TR_REVEAL_IN, TAB_BAR_H, contentBottom(), from, to, TR_REVEAL_MS);
+  }
+#endif
   strncpy(projOpenKey, projects[pos].key, sizeof(projOpenKey) - 1);
   projOpenKey[sizeof(projOpenKey) - 1] = '\0';
   psessEverReceived = false;
@@ -605,6 +660,15 @@ void projOpenLevel1(int pos) {
 // tab and coming back is a different gesture with no such guarantee (the
 // list could genuinely be stale by then).
 void projBack() {
+#if BOARD_HAS_ANIM
+  {   // ...and shrinks back into that project's row, found by key (the list may have moved)
+    int from[4], to[4], pos = -1;
+    transContentRect(from);
+    for (int i = 0; i < projectCount; i++) if (strcmp(projects[i].key, projOpenKey) == 0) { pos = i; break; }
+    if (!projRowRect(pos, to)) transCentreRect(to);
+    transBegin(TR_REVEAL_OUT, TAB_BAR_H, contentBottom(), from, to, TR_REVEAL_MS);
+  }
+#endif
   projLevel = 0;
   renderProjectsTab();
 }
@@ -876,6 +940,9 @@ void renderProjLevel0() {
       projRowCountCache = state;
       projMsgCache[0] = '\0';
       projMsg2Cache[0] = '\0';
+#if BOARD_HAS_ANIM
+      if (state == PROJ_STATE_PENDING) skelArm(SKEL_PROJ0, false);   // loaders.ino lays it out
+#endif
     }
     // ASCII ONLY - three ASCII dots/hyphens, never U+2026 or an em dash: an
     // out-of-range codepoint draws NOTHING AND ADVANCES NOTHING on this
@@ -884,7 +951,9 @@ void renderProjLevel0() {
     // dead-end vocabulary (scrollNote's "-- could not reach the Mac --"),
     // reused rather than invented, so the device says the same thing about
     // the same failure everywhere it can happen.
-    const char* msg = state == PROJ_STATE_PENDING ? "Loading projects..."
+    // PENDING says nothing in words: the skeleton rows (loaders.ino) ARE the
+    // message, and they appear only once the wait outlasts LOADER_DELAY_MS.
+    const char* msg = state == PROJ_STATE_PENDING ? ""
                      : state == PROJ_STATE_FAILED  ? "-- could not reach the Mac --"
                                                     : "No projects found";
     const char* msg2 = state == PROJ_STATE_FAILED ? "tap to retry" : "";
@@ -965,11 +1034,14 @@ void renderPSessLevel() {
       psessRowCountCache = state;
       psessMsgCache[0] = '\0';
       psessMsg2Cache[0] = '\0';
+#if BOARD_HAS_ANIM
+      if (state == PROJ_STATE_PENDING) skelArm(SKEL_PROJ1, false);
+#endif
     }
     // ASCII ONLY (Spleen is 0x20..0x7E and an out-of-range codepoint draws
     // NOTHING and advances NOTHING), and 34 characters at 8px is 272 of this
     // panel's 320 - the widest of the four, and it fits.
-    const char* msg = state == PROJ_STATE_PENDING ? "Loading sessions..."
+    const char* msg = state == PROJ_STATE_PENDING ? ""   // the skeleton, as level 0
                      : state == PROJ_STATE_REFUSED ? "-- this Mac has no such project --"
                      : state == PROJ_STATE_FAILED  ? "-- could not reach the Mac --"
                                                     : "No sessions found";

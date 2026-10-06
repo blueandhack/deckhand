@@ -41,7 +41,7 @@ const FAULTS = [
    (t) => t.replace(/void animSetAlpha\(uint8_t a\) \{/, "void animSetAlpha(uint8_t a) { tft.fillRect(0, 0, 1, 1, 0);"),
    "anim.ino writes nothing into the framebuffer"],
   ["loop forgets animTick", "deckhand_display.ino",
-   (t) => t.replace(/#if BOARD_HAS_ANIM\s*\n\s*animTick\(\);\s*\n\s*#endif\s*\n/, ""),
+   (t) => t.replace(/(#if BOARD_HAS_ANIM\s*\n)\s*animTick\(\);\s*\n/, "$1"),
    "loop()'s OWN BODY calls animTick()"],
   ["lift trusts a stale surface", "anim.ino",
    (t) => t.replace(/if \(surfaceMoved \|\| !sameRect\)/, "if (false)"),
@@ -71,6 +71,43 @@ const FAULTS = [
   ["signature keys on detailIndex", "anim.ino",
    (t) => t.replace(/(uint32_t pressSurfaceSig\(\) \{\n\s*uint32_t s = 0;)/, "$1\n  s ^= (uint32_t) detailIndex;"),
    "pressSurfaceSig()'s OWN BODY leaves detailIndex out"],
+  // Piece 2: screen transitions and loaders.
+  ["flush forgets the transition", "panel_shim.cpp",
+   (t) => t.replace(/(void PanelShim::flush\(\)[\s\S]*?)compositeRow\(/, "$1compositeGone("),
+   "flush()'s OWN BODY composites a running transition"],
+  ["readRect forgets the transition", "panel_shim.cpp",
+   (t) => t.replace(/(void PanelShim::readRect\([\s\S]*?)compositeRow\(/, "$1compositeGone("),
+   "readRect()'s OWN BODY composites a running transition"],
+  ["flush ignores the hold", "panel_shim.cpp",
+   (t) => t.replace(/if \(_hold\) return;/, ";"),
+   "flush()'s OWN BODY pushes nothing while the hold is on"],
+  ["snapshot of a framebuffer that is not on the glass", "panel_shim.cpp",
+   (t) => t.replace(/if \(_dirtyX1 >= _dirtyX0\) return false;/, ";"),
+   "snapshotOld()'s OWN BODY refuses while the framebuffer holds unflushed drawing"],
+  ["a transition with nothing drawn still runs", "anim.ino",
+   (t) => t.replace(/if \(!tft\.drawnSinceSnapshot\(\)\)/, "if (false)"),
+   "transGo()'s OWN BODY cancels when nothing new was drawn"],
+  ["a press does not finish the transition", "anim.ino",
+   (t) => t.replace(/(void pressBegin\(int sx, int sy\) \{[\s\S]*?)transFinish\(\);/, "$1;"),
+   "pressBegin()'s OWN BODY finishes a running transition"],
+  ["an unguarded transition hook", "deckhand_display.ino",
+   (t) => t.replace(/#if BOARD_HAS_ANIM\n(\s*\/\/.*\n)*(\s*)transBegin\(newTab/, "$2transBegin(newTab"),
+   "every transBegin() call in a shared file is behind #if BOARD_HAS_ANIM"],
+  ["a pending transition is thrown away", "anim.ino",
+   (t) => t.replace(/if \(trPending\) \{\n(\s*)trKind = kind;/, "if (false) {\n$1trKind = kind;"),
+   "transBegin()'s OWN BODY keeps a PENDING snapshot"],
+  ["odd slide offsets", "panel_shim.cpp",
+   (t) => t.replace(/_trOff &= ~1;/, ";"),
+   "setTransition()'s OWN BODY keeps every copy word-aligned"],
+  ["a stall skips the motion", "anim.ino",
+   (t) => t.replace(/trElapsed \+= dt < TR_MAX_STEP_MS \? dt : TR_MAX_STEP_MS;/, "trElapsed += dt;"),
+   "transGo()'s frame loop both advance progress by CAPPED frame time"],
+  ["the frame loop swallows taps", "anim.ino",
+   (t) => t.replace(/if \(getTouchPoint\(tx, ty\)\) \{ transFinish\(\); return; \}/, ";"),
+   "transGo()'s frame loop ends at once on a finger"],
+  ["loop forgets the loaders", "deckhand_display.ino",
+   (t) => t.replace(/\n\s*tickLoaders\(\);/, ""),
+   "loop()'s OWN BODY ticks the loaders"],
 ];
 
 if (SOURCE_FAULT_INDEX >= 0) {
@@ -143,7 +180,7 @@ const strip = (s) => s.replace(/^[ \t]*\/\/.*$/gm, "");
 
   const MAIN = strip(readSource("deckhand_display.ino"));
   const loopB = fnBody(MAIN, "void loop()", "deckhand_display.ino");
-  chk(/#if BOARD_HAS_ANIM\s*\n\s*animTick\(\);\s*\n\s*#endif/.test(loopB),
+  chk(/#if BOARD_HAS_ANIM\s*\n\s*animTick\(\);\s*\n(\s*tickLoaders\(\);\s*\n)?\s*#endif/.test(loopB),
       "loop()'s OWN BODY calls animTick() under #if BOARD_HAS_ANIM - board 1 never sees the call");
 }
 
@@ -227,6 +264,62 @@ const strip = (s) => s.replace(/^[ \t]*\/\/.*$/gm, "");
   const sigB = fnBody(ANIM_S, "uint32_t pressSurfaceSig()", "anim.ino");
   chk(!/detailIndex/.test(sigB) && /showingDetail/.test(sigB),
       "pressSurfaceSig()'s OWN BODY leaves detailIndex out - renderSessionsTab() re-resolves it every tick, so keying on it dropped taps on the SAME ask; askPressRect's r[5] carries the ask's own identity");
+}
+
+// ---- piece 2: transitions composite at flush time, from a snapshot of the glass ----
+{
+  const SHIM = strip(readSource("panel_shim.cpp"));
+  const flushB = fnBody(SHIM, "void PanelShim::flush()", "panel_shim.cpp");
+  chk(/compositeRow\(/.test(flushB),
+      "flush()'s OWN BODY composites a running transition - the outgoing screen lives in _fbOld, never in the framebuffer");
+  chk(/if \(_hold\) return;/.test(flushB),
+      "flush()'s OWN BODY pushes nothing while the hold is on - several renderers flush mid-draw, and the new screen must not pop before the motion starts");
+  const rrB = fnBody(SHIM, "void PanelShim::readRect(", "panel_shim.cpp");
+  chk(/compositeRow\(/.test(rrB),
+      "readRect()'s OWN BODY composites a running transition, so SCREENSHOT (and ANIMFREEZE) show the frame on the glass");
+  const snapB = fnBody(SHIM, "bool PanelShim::snapshotOld()", "panel_shim.cpp");
+  chk(/if \(_dirtyX1 >= _dirtyX0\) return false;/.test(snapB),
+      "snapshotOld()'s OWN BODY refuses while the framebuffer holds unflushed drawing - the 'old' screen must be the one on the glass, or the transition animates from a half-drawn frame");
+
+  const ANIM_S = strip(readSource("anim.ino"));
+  const goB = fnBody(ANIM_S, "static void transGo()", "anim.ino");
+  chk(/if \(!tft\.drawnSinceSnapshot\(\)\)/.test(goB),
+      "transGo()'s OWN BODY cancels when nothing new was drawn - a hook whose handler returned early would otherwise slide a screen into itself");
+  const pbB = fnBody(ANIM_S, "void pressBegin(int sx, int sy)", "anim.ino");
+  chk(/transFinish\(\);/.test(pbB),
+      "pressBegin()'s OWN BODY finishes a running transition - a tap never waits on motion");
+
+  // Every hook in a SHARED file is behind the flag, so board 1 never sees it.
+  for (const file of ["deckhand_display.ino", "sessions.ino"]) {
+    const lines = strip(readSource(file)).split("\n");
+    const stack = [];
+    let bad = 0, n = 0;
+    for (const l of lines) {
+      const t = l.trim();
+      if (t.startsWith("#if")) stack.push(t);
+      else if (t.startsWith("#endif")) stack.pop();
+      else if (/\btransBegin\(/.test(t)) { n++; if (!stack.includes("#if BOARD_HAS_ANIM")) bad++; }
+    }
+    chk(bad === 0 && (file !== "deckhand_display.ino" || n >= 1),
+        `${file}: every transBegin() call in a shared file is behind #if BOARD_HAS_ANIM (${n} calls, ${bad} unguarded)`);
+  }
+  const tbB = fnBody(ANIM_S, "void transBegin(", "anim.ino");
+  chk(/if \(trPending\) \{\s*\n\s*trKind = kind;[\s\S]*?return;\s*\n\s*\}\s*\n\s*transFinish\(\);/.test(tbB),
+      "transBegin()'s OWN BODY keeps a PENDING snapshot and retargets it, BEFORE transFinish() - the host's double delivery otherwise cancelled every DETAIL transition (measured: skipped=1)");
+  const ttB = fnBody(ANIM_S, "static void transTick()", "anim.ino");
+  const tgB = fnBody(ANIM_S, "static void transGo()", "anim.ino");
+  const capped = /trElapsed \+= dt < TR_MAX_STEP_MS \? dt : TR_MAX_STEP_MS;/;
+  chk(capped.test(ttB) && capped.test(tgB) && !/millis\(\) - trT0/.test(ANIM_S),
+      "transTick()'s OWN BODY and transGo()'s frame loop both advance progress by CAPPED frame time, not wall-clock - a transcript open stalled the loop and the sheet showed 1 frame of 8");
+  chk(/while \(trRunning\) \{[\s\S]*?if \(getTouchPoint\(tx, ty\)\) \{ transFinish\(\); return; \}[\s\S]*?reapBleLinks\(true\);/.test(tgB),
+      "transGo()'s frame loop ends at once on a finger and reaps BLE every frame - it blocks for at most the transition, and must never swallow a tap");
+  const stB = fnBody(SHIM, "void PanelShim::setTransition(", "panel_shim.cpp");
+  chk(/_trOff &= ~1;/.test(stB) && /_trRX0 &= ~1;/.test(stB) && /_trRX1 \|= 1;/.test(stB),
+      "setTransition()'s OWN BODY keeps every copy word-aligned (even slide offsets, even reveal columns) - a misaligned PSRAM memcpy measured 55ms a frame against ~26");
+  const MAIN = strip(readSource("deckhand_display.ino"));
+  const loopB = fnBody(MAIN, "void loop()", "deckhand_display.ino");
+  chk(/#if BOARD_HAS_ANIM\s*\n\s*animTick\(\);\s*\n\s*tickLoaders\(\);\s*\n\s*#endif/.test(loopB),
+      "loop()'s OWN BODY ticks the loaders, beside animTick() under #if BOARD_HAS_ANIM");
 }
 
 faultChildEpilogue();

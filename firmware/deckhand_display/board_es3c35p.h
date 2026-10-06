@@ -1266,6 +1266,23 @@ const int SESSION_ROW_H_MAX = 100;
 // #define, never a const int - an #if on a const int is silently false, which has
 // shipped twice. See docs/reference/animation.md.
 #define BOARD_HAS_ANIM 1
+
+// SCREEN TRANSITIONS and LOADERS (anim.ino, loaders.ino). The motion starts at about
+// the moment the new screen used to appear, so every millisecond here is added on
+// top of today's latency - but a content-area frame is a ~26ms flush (PERF trans,
+// measured 2026-10-05), so 180ms bought only 3 frames and read as a stutter. These
+// buy 5-6; shorter is not "crisper" below that, it is choppier.
+const unsigned long TR_TAB_MS    = 240;   // tab switch: content area slides sideways
+const unsigned long TR_REVEAL_MS = 260;   // row <-> detail / project: a rect grows or shrinks
+const unsigned long TR_SHEET_MS  = 280;   // transcript: rises from the bottom, falls away
+// A loader appears only once a wait has outlasted this: most PROJECTS and FOCUS
+// replies land in ~200ms, and a skeleton that flashes up for one frame is noise.
+const unsigned long LOADER_DELAY_MS = 250;
+const unsigned long LOADER_FRAME_MS = 33;
+const int LOADER_BAR_W = 224;             // the conversation's progress bar
+const int LOADER_BAR_H = 6;
+const int LOADER_SEG_W = 56;              // its indeterminate segment, before the count is known
+const unsigned long LOADER_WAVE_MS = 1100;   // one pass of the skeleton's light
 // HOW MANY SessionInfo SLOTS EXIST, which is NOT MAX_SESSIONS and must not be
 // confused with it. MAX_SESSIONS stays 6 and is re-read as "how many sessions carry
 // a FULL ASK PAYLOAD on the wire"; it still sizes nothing here, but three checkers

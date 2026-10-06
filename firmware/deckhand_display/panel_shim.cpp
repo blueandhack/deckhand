@@ -107,6 +107,16 @@ void PanelShim::init() {
   }
   if (!_stripBuf) fatalHalt("strip scratch buffer allocation failed");
 
+  // SCREEN TRANSITIONS (anim.ino): the outgoing screen, PSRAM like the framebuffer
+  // it is copied from, and the one row a transition is composited into before the
+  // gather swaps it - internal RAM, read once per row. NOT fatal: without them
+  // every transition is skipped and the change lands instantly, which is the
+  // behaviour this board had before transitions existed.
+  _fbOld = (uint16_t*) heap_caps_malloc(fbBytes, MALLOC_CAP_SPIRAM);
+  _trRow = (uint16_t*) heap_caps_malloc(PANEL_PHYS_W * 2, MALLOC_CAP_INTERNAL);
+  Serial.printf("PANEL: transition buffer %u bytes in PSRAM: %s\n", (unsigned) fbBytes,
+                (_fbOld && _trRow) ? "OK" : "FAILED - transitions will be skipped");
+
   _board = new Board();
   if (!_board->init()) fatalHalt("Board::init() failed");
   if (!_board->begin()) fatalHalt("Board::begin() failed");
@@ -191,7 +201,128 @@ void PanelShim::markDirty(int px0, int py0, int px1, int py1) {
     // A hit always ends in animClear() anyway, so nothing is lost by doing it here.
     if (_ovA) { extendDirty(_ovX0, _ovY0, _ovX1, _ovY1); _ovA = 0; }
   }
+  _drawnSinceSnap = true;   // content changed: a pending transition has a new screen to show
   extendDirty(px0, py0, px1, py1);
+}
+
+// ---------- SCREEN TRANSITIONS ----------
+// PHYSICAL kinds: the logical TR_* kinds after rotation. Rotation 2 (the only
+// other one the screen-flip selects) is a pure 180-degree flip, so right<->left
+// and bottom<->top; rotations 1/3 would need columns rather than rows and are
+// refused (the transition is skipped) rather than half-supported.
+enum { P_NONE = 0, P_SLIDE_R, P_SLIDE_L, P_REVEAL_IN, P_REVEAL_OUT,
+       P_SHEET_BOTTOM, P_SHEET_TOP, P_FALL_DOWN, P_FALL_UP };
+
+bool PanelShim::snapshotOld() {
+  if (!_fb || !_fbOld || !_trRow) return false;
+  // THE OLD SCREEN MUST BE THE ONE ON THE GLASS. With unflushed drawing in the
+  // framebuffer it is not - a caller that cleared the screen before asking (a
+  // surface torn down first) would animate FROM that half-drawn frame. Refused,
+  // so the change lands instantly, which is honest.
+  if (_dirtyX1 >= _dirtyX0) return false;
+  if (_trKind) return false;     // anim.ino finishes a running one first
+  memcpy(_fbOld, _fb, (size_t) PANEL_PHYS_W * PANEL_PHYS_H * 2);
+  _drawnSinceSnap = false;
+  return true;
+}
+
+void PanelShim::setTransition(uint8_t kind, int y0, int y1, int off, const int* r) {
+  if (!_fbOld || !_trRow || (_rotation & 1) || y1 <= y0) { _trKind = P_NONE; return; }
+  const bool flip = _rotation == 2;
+  int p0, p1, dummy0, dummy1;
+  logicalToPhysRect(0, y0, width(), y1 - y0, dummy0, p0, dummy1, p1);
+  _trY0 = p0; _trY1 = p1;
+  _trOff = off;
+  switch (kind) {
+    case TR_SLIDE_FROM_RIGHT: _trKind = flip ? P_SLIDE_L : P_SLIDE_R; break;
+    case TR_SLIDE_FROM_LEFT:  _trKind = flip ? P_SLIDE_R : P_SLIDE_L; break;
+    case TR_SHEET_UP:         _trKind = flip ? P_SHEET_TOP : P_SHEET_BOTTOM; break;
+    case TR_SHEET_DOWN:       _trKind = flip ? P_FALL_UP : P_FALL_DOWN; break;
+    case TR_REVEAL_IN:
+    case TR_REVEAL_OUT: {
+      _trKind = kind == TR_REVEAL_IN ? P_REVEAL_IN : P_REVEAL_OUT;
+      int x = r[0], yy = r[1], w = r[2], h = r[3];
+      clipLogicalRect(x, yy, w, h);
+      if (w <= 0 || h <= 0) { _trRX1 = -1; _trRX0 = 0; break; }
+      logicalToPhysRect(x, yy, w, h, _trRX0, _trRY0, _trRX1, _trRY1);
+      // EVEN COLUMNS, for the slide's reason below: an interpolated edge lands on
+      // odd pixels, and a misaligned segment copy measured 55ms a frame vs ~26.
+      _trRX0 &= ~1;
+      _trRX1 |= 1;
+      if (_trRX1 >= PANEL_PHYS_W) _trRX1 = PANEL_PHYS_W - 1;
+      break;
+    }
+    default: _trKind = P_NONE; break;
+  }
+  const int span = kind == TR_SHEET_UP || kind == TR_SHEET_DOWN ? (_trY1 - _trY0 + 1) : PANEL_PHYS_W;
+  if (_trOff < 0) _trOff = 0;
+  if (_trOff > span) _trOff = span;
+  // A SLIDE'S OFFSET IS KEPT EVEN, and that is measured rather than cosmetic: an
+  // odd offset puts OLD + o two bytes off the word alignment of the row it is
+  // copied into, memcpy falls back to a byte loop over PSRAM, and a content-area
+  // frame went from ~26ms to 56ms on the glass (PERF trans, 2026-10-05).
+  if (_trKind == P_SLIDE_R || _trKind == P_SLIDE_L) _trOff &= ~1;
+}
+
+void PanelShim::clearTransition() {
+  if (!_trKind) return;
+  extendDirty(0, _trY0, PANEL_PHYS_W - 1, _trY1);   // the next flush shows the new screen alone
+  _trKind = P_NONE;
+}
+
+void PanelShim::markRegion(int y0, int y1) {
+  if (y1 <= y0) return;
+  int px0, py0, px1, py1;
+  logicalToPhysRect(0, y0, width(), y1 - y0, px0, py0, px1, py1);
+  extendDirty(0, py0, PANEL_PHYS_W - 1, py1);
+}
+
+// One PHYSICAL row of the running transition into `out` (native order, full
+// width): segments of the old and new screens, copied whole. Only called for
+// rows inside the band (trCovers).
+void PanelShim::compositeRow(int py, uint16_t* out) const {
+  const int W = PANEL_PHYS_W;
+  const uint16_t* NEW = _fb + (size_t) py * W;
+  const uint16_t* OLD = _fbOld + (size_t) py * W;
+  const int o = _trOff;
+  switch (_trKind) {
+    case P_SLIDE_R:              // new enters at the right edge
+      memcpy(out, OLD + o, (size_t) (W - o) * 2);
+      memcpy(out + W - o, NEW, (size_t) o * 2);
+      break;
+    case P_SLIDE_L:              // new enters at the left edge
+      memcpy(out, NEW + W - o, (size_t) o * 2);
+      memcpy(out + o, OLD, (size_t) (W - o) * 2);
+      break;
+    case P_REVEAL_IN:
+    case P_REVEAL_OUT: {
+      const uint16_t* outside = _trKind == P_REVEAL_IN ? OLD : NEW;
+      const uint16_t* inside  = _trKind == P_REVEAL_IN ? NEW : OLD;
+      memcpy(out, outside, (size_t) W * 2);
+      if (_trRX1 >= _trRX0 && py >= _trRY0 && py <= _trRY1)
+        memcpy(out + _trRX0, inside + _trRX0, (size_t) (_trRX1 - _trRX0 + 1) * 2);
+      break;
+    }
+    case P_SHEET_BOTTOM: {       // the new screen's TOP row sits at the sheet's edge
+      const int e = _trY1 + 1 - o;
+      memcpy(out, py >= e ? _fb + (size_t) (_trY0 + py - e) * W : OLD, (size_t) W * 2);
+      break;
+    }
+    case P_SHEET_TOP: {          // the same, mirrored: the edge descends from the top
+      const int e = _trY0 + o - 1;
+      memcpy(out, py <= e ? _fb + (size_t) (_trY1 - (e - py)) * W : OLD, (size_t) W * 2);
+      break;
+    }
+    case P_FALL_DOWN:            // the old screen slides down, the new one is uncovered above it
+      memcpy(out, py < _trY0 + o ? NEW : _fbOld + (size_t) (py - o) * W, (size_t) W * 2);
+      break;
+    case P_FALL_UP:
+      memcpy(out, py > _trY1 - o ? NEW : _fbOld + (size_t) (py + o) * W, (size_t) W * 2);
+      break;
+    default:
+      memcpy(out, NEW, (size_t) W * 2);
+      break;
+  }
 }
 
 void PanelShim::logicalToPhysRect(int x, int y, int w, int h,
@@ -434,6 +565,7 @@ void PanelShim::scrollRect(int x, int y, int w, int h, int dy) {
 void PanelShim::readRect(int x, int y, int w, int h, uint16_t* out) {
   if (!out) return;
   if (!_fb) { memset(out, 0, (size_t) w * h * 2); return; }
+  int trRowPy = -1;   // which physical row _trRow holds for THIS call
   for (int row = 0; row < h; row++) {
     for (int col = 0; col < w; col++) {
       int lx = x + col, ly = y + row;
@@ -441,7 +573,14 @@ void PanelShim::readRect(int x, int y, int w, int h, uint16_t* out) {
       if (lx >= 0 && ly >= 0 && lx < width() && ly < height()) {
         int px, py;
         mapPoint(lx, ly, px, py);
-        v = _fb[(size_t) py * PANEL_PHYS_W + px];
+        // A running transition too, through the SAME row compositor flush uses,
+        // so a capture (and ANIMFREEZE) records the frame on the glass.
+        if (trCovers(py)) {
+          if (py != trRowPy) { compositeRow(py, _trRow); trRowPy = py; }
+          v = _trRow[px];
+        } else {
+          v = _fb[(size_t) py * PANEL_PHYS_W + px];
+        }
         // The press layer too, so a capture shows what flush() pushed to the glass.
         if (overlayCovers(px, py)) v = blend565(v, _ovTint, _ovA);
       }
@@ -577,6 +716,10 @@ void PanelShim::perfReport() {
 void PanelShim::flush() {
   if (!_fb || !_lcd || !_stripBuf) return;
   if (_dirtyX1 < _dirtyX0) return;   // nothing dirty
+  // HELD while a transition's new screen is being drawn (anim.ino transBegin):
+  // several renderers flush mid-draw, and the new screen must not reach the glass
+  // before the motion that brings it in. The dirty rect is kept, not dropped.
+  if (_hold) return;
   // AFTER both early returns, deliberately - see lastFlushUs(). A flush that
   // pushed nothing must not overwrite the last real measurement with ~0us.
   const uint32_t flushT0 = micros();
@@ -601,7 +744,11 @@ void PanelShim::flush() {
     uint16_t* strip = (useB && _stripBuf2) ? _stripBuf2 : _stripBuf;
     const bool last = (y + FLUSH_STRIP_LINES) > y1;
     for (int r = 0; r < lines; r++) {
-      const uint16_t* src = _fb + (size_t) (y + r) * PANEL_PHYS_W + x0;
+      // A RUNNING TRANSITION is composited here, from the old screen (_fbOld) and
+      // the new one (_fb), into one internal-RAM row the gather below reads from.
+      const uint16_t* src;
+      if (trCovers(y + r)) { compositeRow(y + r, _trRow); src = _trRow + x0; }
+      else src = _fb + (size_t) (y + r) * PANEL_PHYS_W + x0;
       uint16_t* dst = strip + (size_t) r * w;
       // Byte-swap on the way out, not in storage. Keeping the framebuffer in
       // native order is what lets every drawing path - blending, readRect, the
