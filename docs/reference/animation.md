@@ -95,4 +95,4 @@ header; the USAGE cards. Taps on these still act on the lift.
 | press/release feel, both themes | **UNVERIFIED** | no person has looked |
 | tap-on-lift behaviours (Task 4 Step 7: tab, slide-off, drag clears tint, row opens, reply panel, keyboard unaffected, re-rank drop, panel-closed drop) | **UNVERIFIED** | not flashed; offline checkers only |
 | board 1 code unchanged | **MEASURED** 2026-10-05 | `.flash.text` 1,008,392 bytes before and after `PRESSTEST`'s refusal (`xtensa-esp32-elf-size -A`). The `dispatchTap` extraction left `handleTouch` at 0x2eb bytes at the same address. The only unmasked difference against a rebuild of the prior commit is one `bne a8, a10` re-encoded as `bne a10, a8` |
-| board 2 cost | **MEASURED** 2026-10-05 | flash 1,164,864 -> 1,171,184 (+6,320); RAM 66,156 -> 66,260 (+104) |
+| board 2 cost | **MEASURED** 2026-10-05 | flash 1,164,864 -> 1,171,200 (+6,336); RAM 66,156 -> 66,260 (+104) |

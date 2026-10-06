@@ -133,7 +133,9 @@ uint32_t pressSurfaceSig() {
 #if BOARD_HAS_PROJECTS
   s |= (uint32_t) (projLevel & 3) << 19;
 #endif
-  s |= (uint32_t) (detailIndex & 255) << 21;
+  // NOT detailIndex: renderSessionsTab() re-resolves it every tick, so a re-rank
+  // during a hold changed it while the SAME card stayed up and dropped the tap.
+  // A lit ask option carries the ask's own identity in askPressRect's r[5].
   return s;
 }
 
@@ -172,10 +174,15 @@ bool pressRectAt(int sx, int sy, int* r) {
 bool tapBlocksUntilLift(int sx, int sy) {
   (void) sx;
   if (composeActive || pairPanelActive || micProcessing || voiceCardActive ||
-      readerActive || showingDetail) return false;
+      readerActive) return false;
+  // histActive BEFORE showingDetail, in dispatchTap()'s own order: a transcript
+  // opened from a SESSIONS detail card leaves showingDetail SET (exitScrollback()
+  // returns to the card by it), and asking the card first made every drag on that
+  // transcript wait for the lift - where the drag loop finds no finger at all.
 #if BOARD_HISTORY_SCROLL
   if (histActive) return scrollTapBlocks(sy);
 #endif
+  if (histActive || showingDetail) return false;
   if (sy < TAB_BAR_H || sy >= contentBottom()) return false;
   if (currentTab == TAB_SESSIONS) return sessionsTapBlocks(sy);
 #if BOARD_HAS_PROJECTS

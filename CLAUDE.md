@@ -53,7 +53,7 @@ panel, which reads as a layout bug rather than a build mistake.
 | mic / beeper | both fitted and working | both work, via the ES8311 |
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64 |
-| size today | flash 1428464, RAM 72284 | flash 1171184, RAM 66260 |
+| size today | flash 1428464, RAM 72284 | flash 1171200, RAM 66260 |
 
 **FOUR of the six numbers this file quotes about the binaries are BOUND and two are not.**
 `node firmware/board-baseline.mjs --doc-check` asserts the two **hashes** and the two **sizes**
@@ -193,7 +193,7 @@ flashed. **Board 2 then rose 104 bytes on 2026-10-05** (66,156 -> 66,260, branch
 the press layer and tap-on-lift, `docs/reference/animation.md`), measured per commit. +32 is the
 flush-time overlay and the draw watch, new fields on `tft`. +56 is `anim.ino`'s tween and its
 `PERF anim` stats, including `animR[6]`. +8 is the press state and its counters (the rest of it
-packs into existing alignment). +8 is the lift path. Flash went 1,164,864 -> 1,171,184 (+6,320).
+packs into existing alignment). +8 is the lift path. Flash went 1,164,864 -> 1,171,200 (+6,336, the last 16 the final review's three fixes).
 **Board 1's RAM did not move (72,284), and neither did its code.** Its flash rose 368 bytes
 (1,428,096 -> 1,428,464), all of it `PRESSTEST`'s refusal string and table entry in
 `.flash.rodata`. `.flash.text` measured byte-identical at 1,008,392 with `xtensa-esp32-elf-size
@@ -262,7 +262,7 @@ arduino-cli compile --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app" \
 node firmware/board-baseline.mjs /tmp/b1/deckhand_display.ino.bin --check 1
 ```
 
-Today: `4f4b58e034251e86...`, size 1428464 (board 2: `08d40a7b777fe810...`, size 1171184).
+Today: `4f4b58e034251e86...`, size 1428464 (board 2: `6b483b07776c8f78...`, size 1171200).
 
 It compares **BYTES, not sizes**, and that matters: a default argument on a shared function
 once changed board 1's codegen with **no size change whatsoever** - invisible to a size

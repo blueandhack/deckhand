@@ -61,6 +61,16 @@ const FAULTS = [
   ["drag never clears the press", "sessions.ino",
    (t) => t.replace(/if \(dragged\) pressCancel\(\);/, ""),
    "sessionDragLoop's OWN BODY clears the press"],
+  // Final review fixes.
+  ["detail card refused before the transcript", "anim.ino",
+   (t) => t.replace(/(bool tapBlocksUntilLift\(int sx, int sy\) \{\n\s*\(void\) sx;)/, "$1\n  if (showingDetail) return false;"),
+   "tapBlocksUntilLift() asks histActive BEFORE showingDetail"],
+  ["a watch hit keeps the tint", "panel_shim.cpp",
+   (t) => t.replace(/(void PanelShim::markDirty\([\s\S]*?)_ovA = 0;/, "$1;"),
+   "markDirty()'s OWN BODY drops the press layer"],
+  ["signature keys on detailIndex", "anim.ino",
+   (t) => t.replace(/(uint32_t pressSurfaceSig\(\) \{\n\s*uint32_t s = 0;)/, "$1\n  s ^= (uint32_t) detailIndex;"),
+   "pressSurfaceSig()'s OWN BODY leaves detailIndex out"],
 ];
 
 if (SOURCE_FAULT_INDEX >= 0) {
@@ -190,6 +200,33 @@ const strip = (s) => s.replace(/^[ \t]*\/\/.*$/gm, "");
     chk(/if \(dragged\) pressCancel\(\);/.test(b) && /animTick\(\);/.test(b),
         `${name}'s OWN BODY clears the press once it is a drag, and keeps the fade-in ticking while it blocks`);
   }
+}
+
+// ---- final-review fixes: surface order, the ghost frame, the over-eager signature ----
+{
+  const ANIM_S = strip(readSource("anim.ino"));
+  const MAIN = strip(readSource("deckhand_display.ino"));
+  // A transcript opened from a SESSIONS detail card leaves showingDetail SET
+  // (exitScrollback() returns to the card by it), and dispatchTap() asks
+  // histActive first. Asking in the other order made every drag on that
+  // transcript wait for the lift - and a drag loop started after the lift sees
+  // no finger, so nothing scrolled.
+  const tbB = fnBody(ANIM_S, "bool tapBlocksUntilLift(", "anim.ino");
+  const dtB = fnBody(MAIN, "static void dispatchTap(int sx, int sy)", "deckhand_display.ino");
+  const tbH = tbB.indexOf("histActive"), tbD = tbB.indexOf("showingDetail");
+  const dtH = dtB.indexOf("if (histActive)"), dtD = dtB.indexOf("if (showingDetail)");
+  chk(dtH >= 0 && dtD >= 0 && dtH < dtD && tbH >= 0 && tbD >= 0 && tbH < tbD,
+      `tapBlocksUntilLift() asks histActive BEFORE showingDetail, in dispatchTap()'s own order (tapBlocks ${tbH}<${tbD}, dispatch ${dtH}<${dtD})`);
+  // The watch is only ever set right before an action, and a hit always ends in
+  // animClear(). Dropping the layer AT the hit means the repaint that tripped it
+  // is flushed untinted, even when the action flushes before returning.
+  const SHIM = strip(readSource("panel_shim.cpp"));
+  const mdB = fnBody(SHIM, "void PanelShim::markDirty(", "panel_shim.cpp");
+  chk(/_watchHit = true;[\s\S]*?_ovA = 0;/.test(mdB),
+      "markDirty()'s OWN BODY drops the press layer the moment the watch is hit - the repaint that tripped it reaches the glass untinted, not a frame later");
+  const sigB = fnBody(ANIM_S, "uint32_t pressSurfaceSig()", "anim.ino");
+  chk(!/detailIndex/.test(sigB) && /showingDetail/.test(sigB),
+      "pressSurfaceSig()'s OWN BODY leaves detailIndex out - renderSessionsTab() re-resolves it every tick, so keying on it dropped taps on the SAME ask; askPressRect's r[5] carries the ask's own identity");
 }
 
 faultChildEpilogue();

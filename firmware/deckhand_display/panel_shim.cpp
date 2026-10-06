@@ -183,8 +183,14 @@ void PanelShim::markDirty(int px0, int py0, int px1, int py1) {
   // per primitive, and the only way the press layer learns that the action it fired
   // repainted its own control - in which case the change is the feedback and the
   // release flash is skipped.
-  if (_wX1 >= _wX0 && px0 <= _wX1 && px1 >= _wX0 && py0 <= _wY1 && py1 >= _wY0)
+  if (_wX1 >= _wX0 && px0 <= _wX1 && px1 >= _wX0 && py0 <= _wY1 && py1 >= _wY0) {
     _watchHit = true;
+    // ...and the layer goes NOW, not when anim.ino gets control back: an action
+    // that flushes before returning (switchTab, projOpenLevel1) would otherwise
+    // push its new screen with the old control's tint still over it for a frame.
+    // A hit always ends in animClear() anyway, so nothing is lost by doing it here.
+    if (_ovA) { extendDirty(_ovX0, _ovY0, _ovX1, _ovY1); _ovA = 0; }
+  }
   extendDirty(px0, py0, px1, py1);
 }
 
