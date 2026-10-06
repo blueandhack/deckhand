@@ -2144,6 +2144,10 @@ bool sessionDragLoop(int sx0, int sy0) {
     moved += sy > lastY ? sy - lastY : lastY - sy;
     lastY = sy;
     if (moved > SESSION_DRAG_TAP_PX) dragged = true;
+    // The press layer goes BEFORE the first frame that moves the list - a tint
+    // over rows sliding under it would light whatever passes beneath the finger.
+    if (dragged) pressCancel();
+    animTick();   // the fade-in still runs while this loop owns the CPU
     if (onRail) {
       // ABSOLUTE SCRUB, and it is what keeps twenty rows to one gesture instead of
       // fifteen: dragging the BODY moves the list by the finger's own delta, so

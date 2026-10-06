@@ -1962,6 +1962,7 @@ extern uint8_t composeScreen;
 extern uint32_t animFrames, animFlushTotalUs, animFlushWorstUs;
 extern uint16_t animTweens;
 extern uint16_t pressSlides, pressDrops;
+extern int pressX, pressY;
 #endif
 extern int  composeChipPage;
 extern bool composeSent;
@@ -4581,6 +4582,9 @@ void handleTouch() {
   // - but "safe because the callee checks" is how the two ended up disagreeing.)
   if (touching && wasTouching) {
     if (composeOnKeys()) kbSlide(sx, sy);
+#if BOARD_HAS_ANIM
+    else pressMove(sx, sy);   // off the control cancels - the lift will act on nothing
+#endif
     return;
   }
   // Released: the keyboard's key band COMMITS here (kbRelease returns false when
@@ -4593,6 +4597,19 @@ void handleTouch() {
     // commit to this exact line as "the RELEASE path - the one the record FAB already
     // used".
     if (composeOnKeys() && kbRelease()) { lastActivityMillis = millis(); return; }
+#if BOARD_HAS_ANIM
+    // THE TAP ACTS HERE, ON THE LIFT, at the point the finger went DOWN - so the
+    // handlers below see exactly the coordinates they always did. pressLift()
+    // refuses a tap whose surface or control changed while it was held. The reply
+    // panel's composeTouch() is outside dispatchTap() (it is the compose branch's),
+    // so it is routed here by the same question every other seam asks.
+    if (pressLift()) {
+      if (composeOnPanel()) composeTouch(pressX, pressY);
+      else dispatchTap(pressX, pressY);
+      pressAfterDispatch();
+      lastActivityMillis = millis();
+    }
+#endif
     return;
   }
   if (!touching) return;
@@ -4662,12 +4679,34 @@ void handleTouch() {
     // further down, which this branch returns before reaching), so it does that
     // here too rather than inventing a third behaviour.
     if (micProcessing) { micProcessingDone(); lastActivityMillis = millis(); return; }
-    if (composeScreen == COMPOSE_SCREEN_PANEL) composeTouch(sx, sy);
+    if (composeScreen == COMPOSE_SCREEN_PANEL) {
+#if BOARD_HAS_ANIM
+      pressBegin(sx, sy);       // the reply panel acts on the LIFT - see the release branch
+#else
+      composeTouch(sx, sy);
+#endif
+    }
     else if (!kbArm(sx, sy)) kbTouch(sx, sy);
     lastActivityMillis = millis();
     return;
   }
 
+#if BOARD_HAS_ANIM
+  pressBegin(sx, sy);
+  if (!tapBlocksUntilLift(sx, sy)) return;   // acts on the lift, in the release branch above
+  pressConsume();                             // the handler below blocks until the lift and acts itself
+#endif
+  dispatchTap(sx, sy);
+#if BOARD_HAS_ANIM
+  pressAfterDispatch();
+#endif
+}
+
+// THE TAP CHAIN, everything below the compose surface, moved VERBATIM out of
+// handleTouch(): on board 2 it runs on the LIFT (at the press point), on board 1
+// on the press, exactly as before. Static and called once on board 1 so the
+// compiler can fold it back into handleTouch() there - --check 1 says whether it did.
+static void dispatchTap(int sx, int sy) {
 #if BOARD_HAS_WIRELESS_PAIR
   // The pairing panel is a full-screen surface, so it is tested here with the rest
   // of them and CONSUMES every tap: the tab bar under it is covered, and a tap that

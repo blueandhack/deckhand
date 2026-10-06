@@ -52,6 +52,15 @@ const FAULTS = [
   ["action row gap transcribed", "deckhand_display.ino",
    (t) => t.replace(/const int gap = UI_ACT_GAP,/, "const int gap = 8,"),
    "uiActionRow's OWN BODY takes its gap from UI_ACT_GAP"],
+  ["press path dispatches unconditionally", "deckhand_display.ino",
+   (t) => t.replace(/\n\s*if \(!tapBlocksUntilLift\(sx, sy\)\) return;[^\n]*/, ""),
+   "the press path reaches dispatchTap only when"],
+  ["lift dispatches without pressLift", "deckhand_display.ino",
+   (t) => t.replace(/if \(pressLift\(\)\) \{/, "if (true) {"),
+   "the lift path dispatches the ORIGINAL press point"],
+  ["drag never clears the press", "sessions.ino",
+   (t) => t.replace(/if \(dragged\) pressCancel\(\);/, ""),
+   "sessionDragLoop's OWN BODY clears the press"],
 ];
 
 if (SOURCE_FAULT_INDEX >= 0) {
@@ -153,6 +162,34 @@ const strip = (s) => s.replace(/^[ \t]*\/\/.*$/gm, "");
   const rowB = fnBody(MAIN, "int uiActionRow(", "deckhand_display.ino");
   chk(/const int gap = UI_ACT_GAP,/.test(rowB),
       "uiActionRow's OWN BODY takes its gap from UI_ACT_GAP - composePressRect subtracts the same constant, so the lit rect cannot drift off the drawn button");
+}
+
+// ---- (5) tap timing, (7) the bound keyboard lines, the drag loops' hooks ----
+{
+  const MAIN = strip(readSource("deckhand_display.ino"));
+  const htB = fnBody(MAIN, "void handleTouch()", "deckhand_display.ino");
+  const calls = (htB.match(/\bdispatchTap\(/g) || []).length;
+  chk(calls === 2,
+      `handleTouch()'s OWN BODY calls dispatchTap exactly twice - once on the lift, once for a handler that blocks until the lift (found ${calls})`);
+  chk(/if \(pressLift\(\)\) \{[\s\S]{0,240}?dispatchTap\(pressX, pressY\)/.test(htB),
+      "the lift path dispatches the ORIGINAL press point, and only behind pressLift()");
+  chk(/#if BOARD_HAS_ANIM\s*\n\s*pressBegin\(sx, sy\);\s*\n\s*if \(!tapBlocksUntilLift\(sx, sy\)\) return;[\s\S]{0,400}?#endif\s*\n\s*dispatchTap\(sx, sy\);/.test(htB),
+      "the press path reaches dispatchTap only when tapBlocksUntilLift() says the handler waits for the lift itself");
+  for (const [re, what] of [[/if \(composeOnKeys\(\) && kbRelease\(\)\)/, "the keystroke commit on the lift"],
+                            [/if \(!kbArm\(sx, sy\)\) kbTouch\(sx, sy\);/, "kbArm first, kbTouch for what it declines"],
+                            [/if \(composeOnKeys\(\)\) kbSlide\(sx, sy\);/, "the held path's kbSlide"]])
+    chk(re.test(htB), `handleTouch()'s OWN BODY still holds ${what} - settings-geom-check binds it there`);
+  const dtB = fnBody(MAIN, "static void dispatchTap(int sx, int sy)", "deckhand_display.ino");
+  chk(/if \(showingDetail\) \{/.test(dtB) && /handleSettingsTouch\(sx, sy\)/.test(dtB),
+      "dispatchTap()'s OWN BODY is the tap chain, detail card through SETTINGS");
+  for (const [file, sig] of [["sessions.ino", "bool sessionDragLoop("],
+                             ["projects.ino", "void handleProjectsTouch("],
+                             ["projects.ino", "void handlePSessTouch("]]) {
+    const b = fnBody(strip(readSource(file)), sig, file);
+    const name = sig.replace(/^\w+ /, "").replace("(", "");
+    chk(/if \(dragged\) pressCancel\(\);/.test(b) && /animTick\(\);/.test(b),
+        `${name}'s OWN BODY clears the press once it is a drag, and keeps the fade-in ticking while it blocks`);
+  }
 }
 
 faultChildEpilogue();

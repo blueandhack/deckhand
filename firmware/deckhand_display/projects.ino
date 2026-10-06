@@ -1116,6 +1116,8 @@ void handleProjectsTouch(int sx, int sy) {
       moved += ny > lastY ? ny - lastY : lastY - ny;
       lastY = ny;
       if (moved > PROJ_DRAG_TAP_PX) dragged = true;
+      if (dragged) pressCancel();   // sessionDragLoop()'s own rule
+      animTick();
       // Computed from the gesture's ORIGIN, not accumulated per frame -
       // sessionDragLoop()'s own reasoning: accumulating would drift, because
       // every frame's delta is re-snapped to a step and the roundings would
@@ -1172,6 +1174,8 @@ void handlePSessTouch(int sx, int sy) {
       moved += ny > lastY ? ny - lastY : lastY - ny;
       lastY = ny;
       if (moved > PSESS_DRAG_TAP_PX) dragged = true;
+      if (dragged) pressCancel();   // sessionDragLoop()'s own rule
+      animTick();
       psessScrollTo(scroll0 - (ny - sy));
       renderProjectsTab();
       delay(15);
