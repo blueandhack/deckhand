@@ -935,6 +935,10 @@ function armFor(src, b) {
   // hand those assertions a body that is neither board's, which is the failure the
   // #elif note records having actually happened.
   const SS = b === 2;
+  // BOARD_HAS_ANIM (anim.ino's press layer) is board 2 only too, and is resolved
+  // for the same reason: sessions.ino's press-rect resolvers sit behind it, and
+  // passing it through would hand the assertions a body that is neither board's.
+  const AN = b === 2;
   const out = [], stack = [];
   for (const line of src.split("\n")) {
     const t = line.trim();
@@ -944,6 +948,7 @@ function armFor(src, b) {
       else if (/^#if\s+BOARD_HAS_WIRELESS_PAIR$/.test(t)) stack.push(WP);
       else if (/^#if\s+!\s*BOARD_SESSIONS_SCROLL$/.test(t)) stack.push(!SS);
       else if (/^#if\s+BOARD_SESSIONS_SCROLL$/.test(t))  stack.push(SS);
+      else if (/^#if\s+BOARD_HAS_ANIM$/.test(t))         stack.push(AN);
       else throw new Error(`armFor(): unresolvable directive "${t}"`);
       continue;
     }
@@ -4921,12 +4926,14 @@ for (const b of [1, 2]) {
 // regex while this block swallowed the tap exactly as before.
 {
   const src = DISPLAY_INO.replace(/^[ \t]*\/\/.*$/gm, "");
-  const fi = src.indexOf("void handleTouch() {");
-  chk(fi >= 0, "handleTouch() is found in deckhand_display.ino");
+  // dispatchTap(), NOT handleTouch(): the tap chain moved out verbatim so board 2
+  // can run it on the LIFT (anim.ino's press layer), and this block went with it.
+  const fi = src.indexOf("static void dispatchTap(int sx, int sy) {");
+  chk(fi >= 0, "dispatchTap() - the tap chain, moved out of handleTouch() - is found in deckhand_display.ino");
   const fnEnd = fi >= 0 ? fi + src.slice(fi).indexOf("\n}\n") : -1;
   const fn = fi >= 0 ? src.slice(fi, fnEnd) : "";
   const bi = fn.indexOf("if (showingDetail) {");
-  chk(bi >= 0, "handleTouch() still has an `if (showingDetail)` block to bind to");
+  chk(bi >= 0, "dispatchTap() still has an `if (showingDetail)` block to bind to");
   let blk = "";
   if (bi >= 0) {
     let depth = 0;

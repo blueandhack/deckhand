@@ -1252,6 +1252,15 @@ bool handleScrollTouch(int sx, int sy) {
   return true;
 }
 
+#if BOARD_HAS_ANIM
+// Does a press here go to scrollDragLoop()? handleScrollTouch()'s own test for its
+// drag branch: the body, no fetch in flight, and not the dead end (whose tap is a
+// retry, not a drag, and so waits for the lift like any other tap).
+bool scrollTapBlocks(int sy) {
+  return sy >= SCROLL_TOP && sy < SCROLL_BOT && !scrollPending && !scrollDeadEnd();
+}
+#endif
+
 void exitScrollback() {
   scrollActive = false;
   // READ, THEN CLEARED, BEFORE scrollEnd() (which touches neither, but the

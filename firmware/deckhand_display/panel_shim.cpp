@@ -61,6 +61,8 @@ static inline uint16_t swap16(uint16_t v) {
   return (uint16_t) ((v >> 8) | (v << 8));
 }
 
+static inline uint16_t blend565(uint16_t a, uint16_t b, uint8_t t);   // defined below
+
 void PanelShim::init() {
   Serial.printf("PSRAM: size=%u bytes\n", (unsigned) ESP.getPsramSize());
 
@@ -165,7 +167,7 @@ void PanelShim::clipLogicalRect(int& x, int& y, int& w, int& h) const {
   if (y + h > lh) h = lh - y;
 }
 
-void PanelShim::markDirty(int px0, int py0, int px1, int py1) {
+void PanelShim::extendDirty(int px0, int py0, int px1, int py1) {
   if (_dirtyX1 < _dirtyX0) {           // was empty
     _dirtyX0 = px0; _dirtyY0 = py0; _dirtyX1 = px1; _dirtyY1 = py1;
   } else {
@@ -174,6 +176,70 @@ void PanelShim::markDirty(int px0, int py0, int px1, int py1) {
     if (px1 > _dirtyX1) _dirtyX1 = px1;
     if (py1 > _dirtyY1) _dirtyY1 = py1;
   }
+}
+
+void PanelShim::markDirty(int px0, int py0, int px1, int py1) {
+  // THE WATCH (anim.ino): did this draw land inside the watched rect? One compare
+  // per primitive, and the only way the press layer learns that the action it fired
+  // repainted its own control - in which case the change is the feedback and the
+  // release flash is skipped.
+  if (_wX1 >= _wX0 && px0 <= _wX1 && px1 >= _wX0 && py0 <= _wY1 && py1 >= _wY0) {
+    _watchHit = true;
+    // ...and the layer goes NOW, not when anim.ino gets control back: an action
+    // that flushes before returning (switchTab, projOpenLevel1) would otherwise
+    // push its new screen with the old control's tint still over it for a frame.
+    // A hit always ends in animClear() anyway, so nothing is lost by doing it here.
+    if (_ovA) { extendDirty(_ovX0, _ovY0, _ovX1, _ovY1); _ovA = 0; }
+  }
+  extendDirty(px0, py0, px1, py1);
+}
+
+void PanelShim::logicalToPhysRect(int x, int y, int w, int h,
+                                  int& px0, int& py0, int& px1, int& py1) const {
+  mapPoint(x, y, px0, py0);
+  mapPoint(x + w - 1, y + h - 1, px1, py1);
+  if (px0 > px1) { int t = px0; px0 = px1; px1 = t; }
+  if (py0 > py1) { int t = py0; py0 = py1; py1 = t; }
+}
+
+void PanelShim::setOverlay(int x, int y, int w, int h, int r, uint16_t tint, uint8_t alpha) {
+  // The OLD rect is pushed too, so moving or shrinking the layer leaves nothing behind.
+  if (_ovA) extendDirty(_ovX0, _ovY0, _ovX1, _ovY1);
+  clipLogicalRect(x, y, w, h);
+  if (alpha == 0 || w <= 0 || h <= 0) { _ovA = 0; return; }
+  logicalToPhysRect(x, y, w, h, _ovX0, _ovY0, _ovX1, _ovY1);
+  _ovR = r; _ovTint = tint; _ovA = alpha;
+  extendDirty(_ovX0, _ovY0, _ovX1, _ovY1);
+}
+
+void PanelShim::clearOverlay() {
+  if (!_ovA) return;
+  extendDirty(_ovX0, _ovY0, _ovX1, _ovY1);
+  _ovA = 0;
+}
+
+void PanelShim::watch(int x, int y, int w, int h) {
+  clipLogicalRect(x, y, w, h);
+  _watchHit = false;
+  if (w <= 0 || h <= 0) { _wX1 = -1; _wX0 = 0; return; }
+  logicalToPhysRect(x, y, w, h, _wX0, _wY0, _wX1, _wY1);
+}
+
+void PanelShim::unwatch() { _wX0 = 0; _wX1 = -1; _watchHit = false; }
+
+// Is physical (px,py) inside the overlay's ROUNDED rect? Corners are tested by pixel
+// CENTRE against the corner circle, in half-pixel units so it stays integer:
+// centre-to-centre distance is (dx + 0.5), squared and doubled -> (2dx+1)^2.
+bool PanelShim::overlayCovers(int px, int py) const {
+  if (!_ovA || px < _ovX0 || px > _ovX1 || py < _ovY0 || py > _ovY1) return false;
+  const int r = _ovR;
+  if (r <= 0) return true;
+  const int ix = px - _ovX0, iy = py - _ovY0;
+  const int w = _ovX1 - _ovX0 + 1, h = _ovY1 - _ovY0 + 1;
+  const int dx = ix < r ? r - 1 - ix : (ix >= w - r ? ix - (w - r) : -1);
+  const int dy = iy < r ? r - 1 - iy : (iy >= h - r ? iy - (h - r) : -1);
+  if (dx < 0 || dy < 0) return true;           // not inside a corner square
+  return (2 * dx + 1) * (2 * dx + 1) + (2 * dy + 1) * (2 * dy + 1) <= 4 * r * r;
 }
 
 void PanelShim::fillRect(int x, int y, int w, int h, uint16_t c) {
@@ -376,6 +442,8 @@ void PanelShim::readRect(int x, int y, int w, int h, uint16_t* out) {
         int px, py;
         mapPoint(lx, ly, px, py);
         v = _fb[(size_t) py * PANEL_PHYS_W + px];
+        // The press layer too, so a capture shows what flush() pushed to the glass.
+        if (overlayCovers(px, py)) v = blend565(v, _ovTint, _ovA);
       }
       out[(size_t) row * w + col] = swap16(v);
     }
@@ -560,6 +628,19 @@ void PanelShim::flush() {
           c = n32 << 1;
         }
         for (; c < w; c++) dst[c] = (uint16_t) ((src[c] >> 8) | (src[c] << 8));
+      }
+      // THE PRESS LAYER, blended on the way out (setOverlay). AFTER the gather, so it
+      // overwrites only the pixels it covers; from the NATIVE source pixel, then the
+      // same byte order the gather just used. The framebuffer is never touched.
+      const int py = y + r;
+      if (_ovA && py >= _ovY0 && py <= _ovY1) {
+        const int a = _ovX0 > x0 ? _ovX0 : x0;
+        const int b = _ovX1 < x1 ? _ovX1 : x1;
+        for (int px = a; px <= b; px++) {
+          if (!overlayCovers(px, py)) continue;
+          const uint16_t v = blend565(src[px - x0], _ovTint, _ovA);
+          dst[px - x0] = panelSwapBytes ? (uint16_t) ((v >> 8) | (v << 8)) : v;
+        }
       }
     }
     // timeout 0 hands the strip to the DMA and returns, so the NEXT gather runs

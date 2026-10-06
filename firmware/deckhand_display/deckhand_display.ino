@@ -1249,10 +1249,14 @@ void uiKeyCap(int x, int y, int w, int h, const char* label,
 // drawKbActions() owns SEND's column and writes its own wrapped message there;
 // without this it would have to paint over a SEND button that was drawn one
 // instruction earlier, which is a visible flash of a control that cannot work.
+//
+// The gap between buttons is NAMED (UI_ACT_GAP) because anim.ino's
+// composePressRect() subtracts it to light the DRAWN button, not its tested column.
+const int UI_ACT_GAP = 8;
 int uiActionRow(int y, int band, int drawn, int dy, const char* const* labels,
                 const uint16_t* tints, const uint8_t* fills, const uint8_t* fracs,
                 int n, int* outX, int* outW) {
-  const int gap = 8, lane = tft.width() - CARD_X * 2;
+  const int gap = UI_ACT_GAP, lane = tft.width() - CARD_X * 2;
   int total = 0;
   for (int i = 0; i < n; i++) total += fracs[i];
   const int avail = lane - gap * (n - 1);
@@ -1952,6 +1956,14 @@ char kbSessionId[16] = "";
 // compose.ino third, but handleTouch (in this file) dispatches on it. Functions
 // get a generated prototype from anywhere in the sketch; plain globals do not.
 extern uint8_t composeScreen;
+#if BOARD_HAS_ANIM
+// anim.ino is concatenated AFTER this file: its globals need declaring here.
+// Tasks 3 and 4 of the anim-core plan add to this block.
+extern uint32_t animFrames, animFlushTotalUs, animFlushWorstUs;
+extern uint16_t animTweens;
+extern uint16_t pressSlides, pressDrops;
+extern int pressX, pressY;
+#endif
 extern int  composeChipPage;
 extern bool composeSent;
 // The entry points this file uses, declared rather than left to the builder's
@@ -4570,6 +4582,9 @@ void handleTouch() {
   // - but "safe because the callee checks" is how the two ended up disagreeing.)
   if (touching && wasTouching) {
     if (composeOnKeys()) kbSlide(sx, sy);
+#if BOARD_HAS_ANIM
+    else pressMove(sx, sy);   // off the control cancels - the lift will act on nothing
+#endif
     return;
   }
   // Released: the keyboard's key band COMMITS here (kbRelease returns false when
@@ -4582,6 +4597,19 @@ void handleTouch() {
     // commit to this exact line as "the RELEASE path - the one the record FAB already
     // used".
     if (composeOnKeys() && kbRelease()) { lastActivityMillis = millis(); return; }
+#if BOARD_HAS_ANIM
+    // THE TAP ACTS HERE, ON THE LIFT, at the point the finger went DOWN - so the
+    // handlers below see exactly the coordinates they always did. pressLift()
+    // refuses a tap whose surface or control changed while it was held. The reply
+    // panel's composeTouch() is outside dispatchTap() (it is the compose branch's),
+    // so it is routed here by the same question every other seam asks.
+    if (pressLift()) {
+      if (composeOnPanel()) composeTouch(pressX, pressY);
+      else dispatchTap(pressX, pressY);
+      pressAfterDispatch();
+      lastActivityMillis = millis();
+    }
+#endif
     return;
   }
   if (!touching) return;
@@ -4651,12 +4679,34 @@ void handleTouch() {
     // further down, which this branch returns before reaching), so it does that
     // here too rather than inventing a third behaviour.
     if (micProcessing) { micProcessingDone(); lastActivityMillis = millis(); return; }
-    if (composeScreen == COMPOSE_SCREEN_PANEL) composeTouch(sx, sy);
+    if (composeScreen == COMPOSE_SCREEN_PANEL) {
+#if BOARD_HAS_ANIM
+      pressBegin(sx, sy);       // the reply panel acts on the LIFT - see the release branch
+#else
+      composeTouch(sx, sy);
+#endif
+    }
     else if (!kbArm(sx, sy)) kbTouch(sx, sy);
     lastActivityMillis = millis();
     return;
   }
 
+#if BOARD_HAS_ANIM
+  pressBegin(sx, sy);
+  if (!tapBlocksUntilLift(sx, sy)) return;   // acts on the lift, in the release branch above
+  pressConsume();                             // the handler below blocks until the lift and acts itself
+#endif
+  dispatchTap(sx, sy);
+#if BOARD_HAS_ANIM
+  pressAfterDispatch();
+#endif
+}
+
+// THE TAP CHAIN, everything below the compose surface, moved VERBATIM out of
+// handleTouch(): on board 2 it runs on the LIFT (at the press point), on board 1
+// on the press, exactly as before. Static and called once on board 1 so the
+// compiler can fold it back into handleTouch() there - --check 1 says whether it did.
+static void dispatchTap(int sx, int sy) {
 #if BOARD_HAS_WIRELESS_PAIR
   // The pairing panel is a full-screen surface, so it is tested here with the rest
   // of them and CONSUMES every tap: the tab bar under it is covered, and a tap that
@@ -6890,6 +6940,14 @@ static const UnavailableCommand UNAVAILABLE_COMMANDS[] = {
     "heap on a board with no PSRAM - see board_e32r28t.h's SESSION_SLOTS note. DETAIL <n> "
     "reaches every row this board has." },
 #endif
+#if !BOARD_HAS_ANIM
+  { "PRESSTEST",
+    "it lights the press highlight board 2 composites at flush time (PanelShim::setOverlay) "
+    "and holds it, so a SCREENSHOT can check the lit rect against the control. This board "
+    "is BOARD_HAS_ANIM 0: it draws straight to the glass through TFT_eSPI with no flush to "
+    "composite a layer into, and its taps still act on the press, so there is no held "
+    "state to light." },
+#endif
 #if !BOARD_HAS_PROJECTS
   { "PROJFETCH",
     "it fetches the PROJECTS tab's project list from ~/.claude/projects/. This board is "
@@ -7694,6 +7752,14 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
 #endif
     Serial.printf("DETAIL: session %d (%s) %s\n", di, sessions[di].name,
                   sessions[di].askPid[0] ? "ask screen" : "detail card");
+#if BOARD_HAS_ANIM
+  } else if (buf.startsWith("PRESSTEST")) {
+    // Lights the press layer at a point so a capture can check the rect against
+    // the control. Never dispatches. See pressTestCommand() in anim.ino.
+    pressTestCommand(buf.length() > 9 ? buf.substring(9) : String(""));
+    buf = "";   // see DETAIL's note: a handler that returns without this repeats forever
+    return;
+#endif
 #if BOARD_SESSIONS_SCROLL
   } else if (buf.startsWith("SESSIONSCROLL")) {
     // PARKS THE SCROLLING SESSION LIST AT A GIVEN STEP, so a capture can see a
@@ -8987,6 +9053,15 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     Serial.printf("PERF shimmer n=%u compose %luus worst %luus (flush rides the spinner's)\n",
                   (unsigned) shimFrameCount, (unsigned long) shimComposeUs,
                   (unsigned long) shimWorstUs);
+#if BOARD_HAS_ANIM
+    // The press layer (anim.ino): frames are flushes of the lit rect only, so the
+    // flush time IS the frame cost. Cumulative since boot, like the lines above.
+    Serial.printf("PERF anim    n=%lu flush avg %luus worst %luus tweens=%u slides=%u drops=%u\n",
+                  (unsigned long) animFrames,
+                  (unsigned long) (animFrames ? animFlushTotalUs / animFrames : 0),
+                  (unsigned long) animFlushWorstUs, (unsigned) animTweens,
+                  (unsigned) pressSlides, (unsigned) pressDrops);
+#endif
     // The pulse reports `on` beside `n` for the same reason the crossfade reports
     // `started`: this animation SHIPS OFF, so n=0 is the expected reading and is
     // not evidence of anything until the toggle says it was enabled.
@@ -9612,6 +9687,9 @@ void loop() {
   // than a runtime no-op so board 1 never sees the TEXT of a call it does not
   // have, the same rule the 26 tft.flush() sites follow.
   tickSessionAnim();
+#if BOARD_HAS_ANIM
+  animTick();
+#endif
 #endif
   // The SESSION DETAIL card's own band, which neither tick around it can reach:
   // both return on showingDetail, so its mark, its crossfade and its pulse were all

@@ -1246,6 +1246,12 @@ const int SESSION_ROW_H_MAX = 100;
 // BOARD_USAGE_V2 mid-redesign, where every guarded arm would have taken board 1's
 // branch on board 2). BOARD_SESSIONS_SCROLL guards real code in sessions.ino.
 #define BOARD_SESSIONS_SCROLL 1
+
+// THE PRESS LAYER AND THE ANIMATION CORE (anim.ino): a tint composited at flush
+// time, taps acting on the lift, and the easing every later animation uses. A
+// #define, never a const int - an #if on a const int is silently false, which has
+// shipped twice. See docs/reference/animation.md.
+#define BOARD_HAS_ANIM 1
 // HOW MANY SessionInfo SLOTS EXIST, which is NOT MAX_SESSIONS and must not be
 // confused with it. MAX_SESSIONS stays 6 and is re-read as "how many sessions carry
 // a FULL ASK PAYLOAD on the wire"; it still sizes nothing here, but three checkers

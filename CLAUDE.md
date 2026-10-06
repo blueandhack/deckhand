@@ -53,7 +53,7 @@ panel, which reads as a layout bug rather than a build mistake.
 | mic / beeper | both fitted and working | both work, via the ES8311 |
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64 |
-| size today | flash 1428096, RAM 72284 | flash 1164864, RAM 66156 |
+| size today | flash 1428464, RAM 72284 | flash 1171200, RAM 66260 |
 
 **FOUR of the six numbers this file quotes about the binaries are BOUND and two are not.**
 `node firmware/board-baseline.mjs --doc-check` asserts the two **hashes** and the two **sizes**
@@ -189,7 +189,17 @@ account's key when nothing is selected, so an untapped page no longer follows wh
 holds slot 0 when the two swap slots. Shared code, so board 1 moved again for the latch, on
 purpose; one `if` and a call, no new storage (`usageAcctSel` already existed). Sequential
 compiles, `--check` `CHANGED` (+16, core stamp not pooled) on both, `--update` on both, not
-flashed. `arduino-cli`'s
+flashed. **Board 2 then rose 104 bytes on 2026-10-05** (66,156 -> 66,260, branch `anim-core`:
+the press layer and tap-on-lift, `docs/reference/animation.md`), measured per commit. +32 is the
+flush-time overlay and the draw watch, new fields on `tft`. +56 is `anim.ino`'s tween and its
+`PERF anim` stats, including `animR[6]`. +8 is the press state and its counters (the rest of it
+packs into existing alignment). +8 is the lift path. Flash went 1,164,864 -> 1,171,200 (+6,336, the last 16 the final review's three fixes).
+**Board 1's RAM did not move (72,284), and neither did its code.** Its flash rose 368 bytes
+(1,428,096 -> 1,428,464), all of it `PRESSTEST`'s refusal string and table entry in
+`.flash.rodata`. `.flash.text` measured byte-identical at 1,008,392 with `xtensa-esp32-elf-size
+-A`. The `dispatchTap()` extraction then moved it by two bytes at the same size: one `bne a8,
+a10` re-encoded as `bne a10, a8`, the same test with its operands swapped. NEITHER board was
+flashed: no board was connected. `arduino-cli`'s
 "Sketch uses N" is a
 slightly smaller number than the `.bin` - the same image without its trailing padding - so do
 not expect the compile summary to print these.
@@ -252,7 +262,7 @@ arduino-cli compile --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app" \
 node firmware/board-baseline.mjs /tmp/b1/deckhand_display.ino.bin --check 1
 ```
 
-Today: `17e1e6161a4df27e...`, size 1428096 (board 2: `304b261e0e1edf46...`, size 1164864).
+Today: `4f4b58e034251e86...`, size 1428464 (board 2: `6b483b07776c8f78...`, size 1171200).
 
 It compares **BYTES, not sizes**, and that matters: a default argument on a shared function
 once changed board 1's codegen with **no size change whatsoever** - invisible to a size
@@ -405,6 +415,7 @@ one is neither handled nor refused.
 | `SDPROBE` | board 2: mount the microSD over SDMMC, report, unmount. Tries 4-bit then 1-bit and REPORTS WHICH WIDTH WON - "4-bit failed, 1-bit worked" is a wiring story and "both failed" is a card-or-slot story. `CARD_NONE` after a successful mount is a THIRD outcome (the slot is empty), not a failure. Measured 2026-09-20: `ok width=4 type=SDHC size=14911MB`. Leaves GPIO 2..7 as it found them, which nothing else in this firmware touches. Board 1 refuses it from `UNAVAILABLE_COMMANDS[]` - and that refusal is NOT "board 1 has no slot", it has one, wired for SPI rather than SDMMC |
 | `SDPERF` | board 2: times SD writes, reads and an APPEND, from a PSRAM source buffer because that is where `scrollText` lives - a DRAM-sourced write measures a path the real code never takes. Measured 2026-09-20: write 2048/49152/262144 B in 9/23/66ms, read in 2/9/40ms, append 2048 to a 262144 B file in 9ms, open+close 5ms. **The append costing the same as a small write, not the same as the 66ms rewrite, is what the offline-sessions hybrid write policy stands on.** Board 1 refuses it from `UNAVAILABLE_COMMANDS[]` |
 | `SESSIONSCROLL <n>` | board 2: park the SCROLLING session list at step `n` so a capture can see a position other than the top. The unit is STEPS, not pixels - the offset is only ever a multiple of `SESSION_SCROLL_STEP` - and it reports the rows now on screen. Refuses BY NAME on a non-numeric or out-of-range argument (quoting the range), on SESSIONS not being the live tab, on a full-screen surface, and on a list of six or fewer that is not scrolling at all. Board 1 refuses it from `UNAVAILABLE_COMMANDS[]` |
+| `PRESSTEST <x> <y>` / `PRESSTEST off` | board 2: light the press layer at a point and HOLD it, so a `SCREENSHOT` (whose `readRect` applies the layer) can check the lit rect against the control. NEVER dispatches - `PRESSTEST off` releases without acting, and the next real press clears it. Refuses BY NAME on no covered control at the point (quoting it), on a surface that still acts on the press (asleep, octopus, emoji grid, keyboard - naming it), and on a non-numeric or off-panel argument (quoting the range). A double-delivered copy reports `already lit` and changes nothing. Board 1 refuses it from `UNAVAILABLE_COMMANDS[]` (`BOARD_HAS_ANIM 0`). See `docs/reference/animation.md` |
 | `USAGEACCT <n>` | BOTH boards: show Claude ACCOUNT `n` (0-based, slot order - the order a tap on the cards pages through) on the USAGE tab, so a capture can see an account other than the first. **ABSOLUTE, never "next"**: the host's double delivery would make a relative step toggle there and back, and an absolute one is idempotent, so it is not deduped. Reports `USAGEACCT idx=<0-based> count=<n> key=<acct key> label=<header label> src=<link>`. Refuses BY NAME - naming WHICH one - on a surface over the cards (compose panel, full-text reader, history reader, icon grid, octopus, voice card, mic processing bar, transcript, pairing panel - wider than `TAB`'s set because it repaints the cards in place rather than through `switchTab()`), on USAGE not being the live tab, on no account having a reading yet, and on a non-numeric or out-of-range `n` (quoting `0..count-1`). Nothing on the glass says `N/M` on either board - `BOARD_USAGE_ACCT_INDEX` is `0` on both because the indicator does not fit beside the widest card label (`usage-geom-check.mjs` re-derives the overflow) - so the header's changing account label is the carrier. `MULTITEST` injects `"acct":"feedacct"`, so it always makes a second account |
 | `MSGPRI` / `MSGPRI now\|next\|later` | report or set how a message sent FROM this device lands in the Mac's session queue. NVS-backed, on the SETTINGS tab; the device announces it at boot and on `WHOAMI`, and the host asks for it when a HELLO names a link it has no priority for |
 | `WHOAMI` | re-emits the boot `HELLO <name> v2` line on demand, over USB. Both boards. The host sends it to an anonymous link before considering a reset - `HELLO` is a boot-only burst, so a host that attached to an already-running board otherwise had to REBOOT it to learn its name |
@@ -420,6 +431,7 @@ through the measuring command.
 | working on | read first |
 |---|---|
 | anything on board 2's panel, the shim, bring-up, touch, sleep | [`docs/reference/boards.md`](docs/reference/boards.md) |
+| animation, the press layer, tap-on-lift (board 2) | [`docs/reference/animation.md`](docs/reference/animation.md) |
 | a checker, a baseline, an instrument, `geom-sweep` | [`docs/reference/commands-and-checks.md`](docs/reference/commands-and-checks.md) |
 | the SETTINGS tab | [`docs/reference/settings-tab.md`](docs/reference/settings-tab.md) |
 | the USAGE tab, quota, burn estimators | [`docs/reference/usage-tab.md`](docs/reference/usage-tab.md) |
@@ -448,6 +460,7 @@ to the board header, are under [`docs/design/`](docs/design/).
 | `compose.ino` | the reply panel - the compose surface's other screen, over the keyboard's own draft |
 | `reader.ino` | board 1's paged history reader; board-2 arms delegate to `scrollback.ino` |
 | `scrollback.ino` | BOARD 2 ONLY, one `#if`: the PSRAM transcript, wrap, line index, renderer, drag |
+| `anim.ino` | BOARD 2 ONLY, one `#if`: easing, the press layer's tween, tap-on-lift (`pressRectAt`, `pressLift`), `PRESSTEST` |
 | `audio.ino` / `power.ino` / `keyboard.ino` / `pairing.ino` | mic and beeper; battery and sleep; the QWERTY; NVS keys and the answer HMAC |
 | `touch_cal.ino` / `touch_hal.ino` | board 1's affine calibration; the ONE touch entry point both boards use |
 | `board.h`, `board_e32r28t.h`, `board_es3c35p.h` | board selection and every layout constant |

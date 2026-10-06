@@ -109,6 +109,20 @@ public:
   void writecommand(uint8_t c);      // no-op on this panel; see the .cpp note
   void flush();                      // push the dirty rect(s) to the panel
 
+  // ---- The press layer (anim.ino) ----
+  // ONE overlay, composited at FLUSH time and never written into the framebuffer:
+  // flush() and readRect() blend `tint` at `alpha` (0..255) into every pixel inside
+  // the rounded rect. The framebuffer keeps true content underneath, so anything
+  // that redraws there while it is lit stays correct, and clearing it can never
+  // paint a stale image back - see docs/reference/animation.md. alpha 0 clears it.
+  void setOverlay(int x, int y, int w, int h, int r, uint16_t tint, uint8_t alpha);
+  void clearOverlay();
+  // "Did anything draw here?" Every primitive that marks a dirty rect tests it
+  // against the watched one. The overlay's own marks do not count: it is not content.
+  void watch(int x, int y, int w, int h);
+  void unwatch();
+  bool watchHit() const { return _watchHit; }
+
   // ---- Anti-aliased primitives (Task 4) ----
   // Coverage-based AA: for every pixel in the shape's bounding box, compute a
   // continuous distance to the shape's edge and blend the destination pixel
@@ -166,6 +180,10 @@ public:
 private:
   void mapPoint(int lx, int ly, int& px, int& py) const;
   void markDirty(int px0, int py0, int px1, int py1);
+  // markDirty minus the watch test - for marks that are not content (the overlay).
+  void extendDirty(int px0, int py0, int px1, int py1);
+  void logicalToPhysRect(int x, int y, int w, int h, int& px0, int& py0, int& px1, int& py1) const;
+  bool overlayCovers(int px, int py) const;
   void clipLogicalRect(int& x, int& y, int& w, int& h) const;
   // Shared by every "smooth" primitive: blends `fg` into the real pixel at
   // logical (x,y) by `coverage` (0..1), reading the destination back from
@@ -200,6 +218,13 @@ private:
   // dirty" - checked instead of a separate bool so there's one source of
   // truth for the rectangle's own emptiness.
   int _dirtyX0 = 0, _dirtyY0 = 0, _dirtyX1 = -1, _dirtyY1 = -1;
+  // The press layer, PHYSICAL coordinates. _ovA == 0 means "no overlay".
+  int _ovX0 = 0, _ovY0 = 0, _ovX1 = -1, _ovY1 = -1, _ovR = 0;
+  uint16_t _ovTint = 0;
+  uint8_t  _ovA = 0;
+  // The watch, PHYSICAL coordinates. _wX1 < _wX0 means "not watching".
+  int _wX0 = 0, _wY0 = 0, _wX1 = -1, _wY1 = -1;
+  bool _watchHit = false;
   uint32_t _lastFlushUs = 0;        // see lastFlushUs()
 
   esp_panel::board::Board*      _board = nullptr;

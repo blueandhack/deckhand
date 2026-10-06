@@ -452,8 +452,11 @@ function settingsTouchSrc() {
   const src = SETTINGS_INO.replace(/^[ \t]*\/\/.*$/gm, "");
   const i = src.indexOf("void handleSettingsTouch(");
   if (i < 0) throw new Error("handleSettingsTouch not found in settings.ino");
-  const j = src.indexOf("\nvoid ", i + 1);
-  const out = j < 0 ? src.slice(i) : src.slice(i, j);
+  // To the handler's OWN closing brace at column 0, not to the next "\nvoid ":
+  // anim.ino's settingsPressRect (a `bool`) follows it and repeats HOME's row
+  // test, so the looser slice let that copy satisfy assertions about the handler.
+  const j = src.indexOf("\n}\n", i + 1);
+  const out = j < 0 ? src.slice(i) : src.slice(i, j + 2);
   if (!out.trim()) throw new Error("handleSettingsTouch's body sliced to nothing");
   return out;
 }
@@ -486,10 +489,17 @@ const ACT_GAP = (() => {
   const src = fnSrc(SRC_MAIN, "int uiActionRow");
   if (!src.length) throw new Error("settings-geom-check: uiActionRow() not found in " +
     "deckhand_display.ino - the action row's columns come from there, so move this parse with it");
-  const m = src.match(/const int gap\s*=\s*(\d+)/);
+  // The gap is NAMED now (UI_ACT_GAP, which anim.ino's composePressRect subtracts
+  // too), so the body's own declaration says WHICH constant, and the value is read
+  // from that constant's one definition - still bound to uiActionRow's body.
+  const m = src.match(/const int gap\s*=\s*(\d+|UI_ACT_GAP)\b/);
   if (!m) throw new Error("settings-geom-check: uiActionRow()'s body no longer declares " +
-    "`const int gap = <n>` - the column mirror below would be measuring itself");
-  return +m[1];
+    "`const int gap = <n | UI_ACT_GAP>` - the column mirror below would be measuring itself");
+  if (m[1] !== "UI_ACT_GAP") return +m[1];
+  const d = SRC_MAIN.match(/^const int UI_ACT_GAP\s*=\s*(\d+);/m);
+  if (!d) throw new Error("settings-geom-check: uiActionRow() takes its gap from UI_ACT_GAP, " +
+    "but deckhand_display.ino no longer defines `const int UI_ACT_GAP = <n>;`");
+  return +d[1];
 })();
 
 // THE SEVERITY SPINE'S DRAW GEOMETRY, READ OUT OF drawSeverityAction() rather than

@@ -93,7 +93,14 @@ function fnBody(src, needle) {
 const FW_SRC = fs.readFileSync(DIR + "../../../firmware/deckhand_display/deckhand_display.ino", "utf8")
   .replace(/^[ \t]*\/\/.*$/gm, "");            // a commented-out gap is not a gap
 const ACT_ROW_SRC = fnBody(FW_SRC, "int uiActionRow(");
-const FW_ACT_GAP = (ACT_ROW_SRC.match(/const int gap\s*=\s*(\d+)/) || [])[1];
+// The body may name UI_ACT_GAP (anim.ino's composePressRect subtracts the same
+// constant); the value is then read from that constant's one definition.
+const FW_ACT_GAP = (() => {
+  const m = ACT_ROW_SRC.match(/const int gap\s*=\s*(\d+|UI_ACT_GAP)\b/);
+  if (!m) return undefined;
+  if (m[1] !== "UI_ACT_GAP") return m[1];
+  return (FW_SRC.match(/^const int UI_ACT_GAP\s*=\s*(\d+);/m) || [])[1];
+})();
 
 // The mock's OWN source, comments stripped, for the structural assertions that
 // have to look at how a value is COMPUTED rather than at what it computes to.

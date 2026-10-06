@@ -101,6 +101,10 @@
 // built on. See board_es3c35p.h's SESSION_SLOTS note and
 // docs/superpowers/specs/2026-09-14-board2-sessions-scroll-design.md.
 #define BOARD_SESSIONS_SCROLL 0
+
+// No press layer: this board draws straight to the glass through TFT_eSPI, so
+// there is no flush to composite a tint into, and taps keep acting on the press.
+#define BOARD_HAS_ANIM 0
 // One slot per row this board draws. SESSION_SLOTS is the ARRAY SIZE and
 // MAX_SESSIONS is the full-ask-payload WIRE CAP; on this board they are the same
 // number, and deckhand_display.ino carries a static_assert that SESSION_SLOTS is
