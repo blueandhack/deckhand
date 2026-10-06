@@ -43,6 +43,15 @@ const FAULTS = [
   ["loop forgets animTick", "deckhand_display.ino",
    (t) => t.replace(/#if BOARD_HAS_ANIM\s*\n\s*animTick\(\);\s*\n\s*#endif\s*\n/, ""),
    "loop()'s OWN BODY calls animTick()"],
+  ["lift trusts a stale surface", "anim.ino",
+   (t) => t.replace(/if \(surfaceMoved \|\| !sameRect\)/, "if (false)"),
+   "pressLift()'s OWN BODY re-checks"],
+  ["session rect guessed by division", "sessions.ino",
+   (t) => t.replace(/(bool sessionsPressRect\([\s\S]*?)sessionRowAtY\(sy\)/, "$1((sy - SESSION_ROW_Y0) / SESSION_SCROLL_STEP)"),
+   "sessionsPressRect's OWN BODY"],
+  ["action row gap transcribed", "deckhand_display.ino",
+   (t) => t.replace(/const int gap = UI_ACT_GAP,/, "const int gap = 8,"),
+   "uiActionRow's OWN BODY takes its gap from UI_ACT_GAP"],
 ];
 
 if (SOURCE_FAULT_INDEX >= 0) {
@@ -117,6 +126,33 @@ const strip = (s) => s.replace(/^[ \t]*\/\/.*$/gm, "");
   const loopB = fnBody(MAIN, "void loop()", "deckhand_display.ino");
   chk(/#if BOARD_HAS_ANIM\s*\n\s*animTick\(\);\s*\n\s*#endif/.test(loopB),
       "loop()'s OWN BODY calls animTick() under #if BOARD_HAS_ANIM - board 1 never sees the call");
+}
+
+// ---- (6) no stale taps; every lit rect comes from its handler's own geometry ----
+{
+  const ANIM_S = strip(readSource("anim.ino"));
+  const liftB = fnBody(ANIM_S, "bool pressLift()", "anim.ino");
+  chk(/const bool surfaceMoved = pressSurfaceSig\(\) != pressSig;/.test(liftB) &&
+      /pressRectAt\(pressX, pressY, r\)/.test(liftB) &&
+      /if \(surfaceMoved \|\| !sameRect\)/.test(liftB),
+      "pressLift()'s OWN BODY re-checks the surface and the control under the press point before acting - acting on lift must never act on a control nobody pressed");
+  const bind = [
+    ["sessions.ino", "bool sessionsPressRect(", [/sessionRowAtY\(sy\)/, /sessionRowYAt\(/, /sessionRowHAt\(/]],
+    ["sessions.ino", "bool askPressRect(", [/askOptionsTop\(detailIndex\)/, /ASK_OPT_H \+ ASK_OPT_GAP/]],
+    ["projects.ino", "bool projPressRect(", [/projRowAtY\(sy\)/, /psessRowAtY\(sy\)/]],
+    ["settings.ino", "bool settingsPressRect(", [/settingsHomeRowY\(i\)/, /CFM_YES_X/]],
+    ["compose.ino", "bool composePressRect(", [/composeActX\[i\]/, /UI_ACT_GAP/]],
+  ];
+  for (const [file, sig, res] of bind) {
+    const b = fnBody(strip(readSource(file)), sig, file);
+    const name = sig.slice(5, -1);
+    chk(res.every((re) => re.test(b)),
+        `${name}'s OWN BODY takes its rect from the same helpers its handler hit-tests with - the lit control is the one the tap reaches`);
+  }
+  const MAIN = strip(readSource("deckhand_display.ino"));
+  const rowB = fnBody(MAIN, "int uiActionRow(", "deckhand_display.ino");
+  chk(/const int gap = UI_ACT_GAP,/.test(rowB),
+      "uiActionRow's OWN BODY takes its gap from UI_ACT_GAP - composePressRect subtracts the same constant, so the lit rect cannot drift off the drawn button");
 }
 
 faultChildEpilogue();

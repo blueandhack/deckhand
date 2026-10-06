@@ -935,6 +935,10 @@ function armFor(src, b) {
   // hand those assertions a body that is neither board's, which is the failure the
   // #elif note records having actually happened.
   const SS = b === 2;
+  // BOARD_HAS_ANIM (anim.ino's press layer) is board 2 only too, and is resolved
+  // for the same reason: sessions.ino's press-rect resolvers sit behind it, and
+  // passing it through would hand the assertions a body that is neither board's.
+  const AN = b === 2;
   const out = [], stack = [];
   for (const line of src.split("\n")) {
     const t = line.trim();
@@ -944,6 +948,7 @@ function armFor(src, b) {
       else if (/^#if\s+BOARD_HAS_WIRELESS_PAIR$/.test(t)) stack.push(WP);
       else if (/^#if\s+!\s*BOARD_SESSIONS_SCROLL$/.test(t)) stack.push(!SS);
       else if (/^#if\s+BOARD_SESSIONS_SCROLL$/.test(t))  stack.push(SS);
+      else if (/^#if\s+BOARD_HAS_ANIM$/.test(t))         stack.push(AN);
       else throw new Error(`armFor(): unresolvable directive "${t}"`);
       continue;
     }

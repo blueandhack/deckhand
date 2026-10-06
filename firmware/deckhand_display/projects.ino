@@ -696,6 +696,38 @@ int psessRowAtY(int sy) {
   return pos;
 }
 
+#if BOARD_HAS_ANIM
+// The row under the press on either level, at the same y the row's draw uses.
+// The honesty row ("N more", pos == psessCount) opens nothing, so it does not light.
+bool projPressRect(int sx, int sy, int* r) {
+  (void) sx;
+  if (projLevel == 1) {
+    if (!psessEverReceived || psessCount == 0) return false;
+    const int pos = psessRowAtY(sy);
+    if (pos < 0 || pos >= psessCount) return false;
+    r[0] = PSESS_ROW_X; r[1] = PSESS_ROW_Y0 + pos * PSESS_STEP - psessScroll;
+    r[2] = PSESS_ROW_W; r[3] = PSESS_ROW_H; r[4] = R_MD;
+    r[5] = pressKey(psess[pos].id);
+    return true;
+  }
+  if (!projectsEverReceived || projectCount == 0) return false;
+  const int pos = projRowAtY(sy);
+  if (pos < 0) return false;
+  r[0] = PROJ_ROW_X; r[1] = PROJ_ROW_Y0 + pos * PROJ_STEP - projScroll;
+  r[2] = PROJ_ROW_W; r[3] = PROJ_ROW_H; r[4] = R_MD;
+  r[5] = pressKey(projects[pos].key);
+  return true;
+}
+
+// Does the press go to one of this tab's blocking drag loops? The SAME entry
+// conditions handleProjectsTouch()/handlePSessTouch() test before their loops.
+bool projTapBlocks(int sy) {
+  if (projLevel == 1)
+    return psessEverReceived && psessCount > 0 && sy >= PSESS_ROW_Y0 && psessScrollActive();
+  return projectsEverReceived && projectCount > 0 && sy >= PROJ_ROW_Y0 && projScrollActive();
+}
+#endif
+
 // ---------- Level 2's rail - drawProjRail()'s own shape, over psess*/PSESS_*.
 // FOUR terms this time (Y/H/COUNT/TOTAL), not three: psessTotal can exceed
 // psessCount (psessHasMore()'s own honesty row), so - sessionsTotal's own

@@ -1249,10 +1249,14 @@ void uiKeyCap(int x, int y, int w, int h, const char* label,
 // drawKbActions() owns SEND's column and writes its own wrapped message there;
 // without this it would have to paint over a SEND button that was drawn one
 // instruction earlier, which is a visible flash of a control that cannot work.
+//
+// The gap between buttons is NAMED (UI_ACT_GAP) because anim.ino's
+// composePressRect() subtracts it to light the DRAWN button, not its tested column.
+const int UI_ACT_GAP = 8;
 int uiActionRow(int y, int band, int drawn, int dy, const char* const* labels,
                 const uint16_t* tints, const uint8_t* fills, const uint8_t* fracs,
                 int n, int* outX, int* outW) {
-  const int gap = 8, lane = tft.width() - CARD_X * 2;
+  const int gap = UI_ACT_GAP, lane = tft.width() - CARD_X * 2;
   int total = 0;
   for (int i = 0; i < n; i++) total += fracs[i];
   const int avail = lane - gap * (n - 1);
@@ -1957,6 +1961,7 @@ extern uint8_t composeScreen;
 // Tasks 3 and 4 of the anim-core plan add to this block.
 extern uint32_t animFrames, animFlushTotalUs, animFlushWorstUs;
 extern uint16_t animTweens;
+extern uint16_t pressSlides, pressDrops;
 #endif
 extern int  composeChipPage;
 extern bool composeSent;
@@ -6896,6 +6901,14 @@ static const UnavailableCommand UNAVAILABLE_COMMANDS[] = {
     "heap on a board with no PSRAM - see board_e32r28t.h's SESSION_SLOTS note. DETAIL <n> "
     "reaches every row this board has." },
 #endif
+#if !BOARD_HAS_ANIM
+  { "PRESSTEST",
+    "it lights the press highlight board 2 composites at flush time (PanelShim::setOverlay) "
+    "and holds it, so a SCREENSHOT can check the lit rect against the control. This board "
+    "is BOARD_HAS_ANIM 0: it draws straight to the glass through TFT_eSPI with no flush to "
+    "composite a layer into, and its taps still act on the press, so there is no held "
+    "state to light." },
+#endif
 #if !BOARD_HAS_PROJECTS
   { "PROJFETCH",
     "it fetches the PROJECTS tab's project list from ~/.claude/projects/. This board is "
@@ -7700,6 +7713,14 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
 #endif
     Serial.printf("DETAIL: session %d (%s) %s\n", di, sessions[di].name,
                   sessions[di].askPid[0] ? "ask screen" : "detail card");
+#if BOARD_HAS_ANIM
+  } else if (buf.startsWith("PRESSTEST")) {
+    // Lights the press layer at a point so a capture can check the rect against
+    // the control. Never dispatches. See pressTestCommand() in anim.ino.
+    pressTestCommand(buf.length() > 9 ? buf.substring(9) : String(""));
+    buf = "";   // see DETAIL's note: a handler that returns without this repeats forever
+    return;
+#endif
 #if BOARD_SESSIONS_SCROLL
   } else if (buf.startsWith("SESSIONSCROLL")) {
     // PARKS THE SCROLLING SESSION LIST AT A GIVEN STEP, so a capture can see a
@@ -8996,10 +9017,11 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
 #if BOARD_HAS_ANIM
     // The press layer (anim.ino): frames are flushes of the lit rect only, so the
     // flush time IS the frame cost. Cumulative since boot, like the lines above.
-    Serial.printf("PERF anim    n=%lu flush avg %luus worst %luus tweens=%u\n",
+    Serial.printf("PERF anim    n=%lu flush avg %luus worst %luus tweens=%u slides=%u drops=%u\n",
                   (unsigned long) animFrames,
                   (unsigned long) (animFrames ? animFlushTotalUs / animFrames : 0),
-                  (unsigned long) animFlushWorstUs, (unsigned) animTweens);
+                  (unsigned long) animFlushWorstUs, (unsigned) animTweens,
+                  (unsigned) pressSlides, (unsigned) pressDrops);
 #endif
     // The pulse reports `on` beside `n` for the same reason the crossfade reports
     // `started`: this animation SHIPS OFF, so n=0 is the expected reading and is

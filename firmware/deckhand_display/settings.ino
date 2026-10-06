@@ -1856,6 +1856,35 @@ void handleSettingsTouch(int sx, int sy) {
   // modal rather than changing anything on the page). Its arm is above, behind
   // BOARD_TOUCH_NEEDS_CAL, so board 2 still claims no taps there at all.
 }
+
+#if BOARD_HAS_ANIM
+// HOME's group rows and the confirm dialog's YES/NO - handleSettingsTouch()'s own
+// (BELOW it on purpose: settings-geom-check's source faults rewrite the FIRST
+// copy of HOME's row test in this file, and that copy must be the handler's.)
+// tests, in its own order (the confirm is modal, so it is asked first). Steppers,
+// toggles and segments are not lit in piece 1 (docs/reference/animation.md).
+bool settingsPressRect(int sx, int sy, int* r) {
+  r[5] = 0;
+  if (pendingConfirm != CFM_NONE) {
+    if (sy < CFM_BTN_Y || sy >= CFM_BTN_Y + H_BTN) return false;
+    int x;
+    if (sx >= CFM_YES_X && sx < CFM_YES_X + CFM_BTN_W) x = CFM_YES_X;
+    else if (sx >= CFM_NO_X && sx < CFM_NO_X + CFM_BTN_W) x = CFM_NO_X;
+    else return false;
+    r[0] = x; r[1] = CFM_BTN_Y; r[2] = CFM_BTN_W; r[3] = H_BTN; r[4] = R_MD;
+    return true;
+  }
+  if (settingsPage != SET_HOME) return false;
+  for (int i = 0; i < SET_GROUP_COUNT; i++) {
+    const int y = settingsHomeRowY(i);
+    if (sy >= y && sy < y + HOME_ROW_H) {
+      r[0] = CARD_X; r[1] = y; r[2] = CARD_W; r[3] = HOME_ROW_H; r[4] = R_MD; r[5] = i;
+      return true;
+    }
+  }
+  return false;
+}
+#endif
 void drawSettingsTab() {
   settingsPage = SET_HOME;   // always enter at HOME, never a group you last left
   resetSettingsCaches();

@@ -751,6 +751,27 @@ int composeColAt(int sx) {
   if (c > COMPOSE_COLS - 1) c = COMPOSE_COLS - 1;   // the remainder is the last column's
   return c;
 }
+#if BOARD_HAS_ANIM
+// The reply panel's action band: composeTouch()'s own column test, lighting the
+// DRAWN button (uiActionRow draws it UI_ACT_GAP narrower than its tested column,
+// except the last one, and KB_ACT_DY down inside the band).
+bool composePressRect(int sx, int sy, int* r) {
+  if (kbPeekPage >= 0) return false;          // every tap is the pager while peeking
+  if (sy < KB_ACT_Y || sy >= KB_ACT_Y + KB_ACT_H) return false;
+  for (int i = 0; i < COMPOSE_ACT_MAX; i++) {
+    if (composeActW[i] <= 0) continue;
+    if (sx < composeActX[i] || sx >= composeActX[i] + composeActW[i]) continue;
+    bool last = true;
+    for (int j = i + 1; j < COMPOSE_ACT_MAX; j++) if (composeActW[j] > 0) last = false;
+    r[0] = composeActX[i]; r[1] = KB_ACT_Y + KB_ACT_DY;
+    r[2] = composeActW[i] - (last ? 0 : UI_ACT_GAP); r[3] = KB_ACT_DRAWN; r[4] = R_MD;
+    r[5] = i;
+    return true;
+  }
+  return false;
+}
+#endif
+
 bool composeTouch(int sx, int sy) {
   const int idx = kbSessionIdx;
   // THE ACTION BAND AND THE PEEK ARE TESTED BEFORE idx, AND THAT IS A FIX, NOT A

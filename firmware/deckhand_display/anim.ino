@@ -101,6 +101,222 @@ void animTick() {
   }
 }
 
+// ---------- THE PRESS ----------
+const uint8_t PRESS_ALPHA = 51;              // 20% toward COLOR_ACCENT
+const unsigned long PRESS_IN_MS = 40, PRESS_OUT_MS = 120;
+const int PRESS_SLOP_PX = 12;
+
+// 0 = idle; 1 = HELD (a finger is down and the tap waits for its lift);
+// 2 = CONSUMED (a blocking handler took the press and acts on its own).
+uint8_t pressState = 0;
+int pressX = 0, pressY = 0;
+uint32_t pressSig = 0;
+uint16_t pressSlides = 0, pressDrops = 0;
+
+// Which handler a tap at this instant would reach, packed. Any change between
+// press and lift means the lift would land somewhere the press did not.
+// composeOnPanel(), not composeScreen: handleTouch() is the only router allowed
+// to read the screen directly (settings-geom-check binds that).
+uint32_t pressSurfaceSig() {
+  uint32_t s = 0;
+  s |= (uint32_t) composeActive;
+  s |= (uint32_t) composeOnPanel() << 1;
+  s |= (uint32_t) pairPanelActive << 2;
+  s |= (uint32_t) micProcessing << 3;
+  s |= (uint32_t) voiceCardActive << 4;
+  s |= (uint32_t) readerActive << 5;
+  s |= (uint32_t) histActive << 6;
+  s |= (uint32_t) showingDetail << 7;
+  s |= (uint32_t) ((int) currentTab & 7) << 8;
+  s |= (uint32_t) (settingsPage & 15) << 11;
+  s |= (uint32_t) ((int) pendingConfirm & 15) << 15;
+#if BOARD_HAS_PROJECTS
+  s |= (uint32_t) (projLevel & 3) << 19;
+#endif
+  s |= (uint32_t) (detailIndex & 255) << 21;
+  return s;
+}
+
+bool tabPressRect(int sx, int* r) {
+  const int tabW = tabsW() / TAB_COUNT;
+  const int i = constrain(sx / tabW, 0, TAB_COUNT - 1);
+  r[0] = i * tabW; r[1] = 0; r[2] = tabW; r[3] = TAB_BAR_H; r[4] = 0; r[5] = i;
+  return true;
+}
+
+// The control under (sx, sy), in dispatchTap()'s own surface order. false = no
+// covered control: the tap still acts on the lift, it just does not light.
+bool pressRectAt(int sx, int sy, int* r) {
+  bool lit;
+  if (composeActive) lit = composeOnPanel() && !micProcessing && composePressRect(sx, sy, r);
+  else if (pairPanelActive || micProcessing || voiceCardActive || readerActive || histActive) lit = false;
+  else if (sy < TAB_BAR_H) return tabPressRect(sx, r);
+  else if (showingDetail) lit = askPressRect(sx, sy, r);
+  else if (sy >= contentBottom()) lit = false;
+  else if (currentTab == TAB_SESSIONS) lit = sessionsPressRect(sx, sy, r);
+#if BOARD_HAS_PROJECTS
+  else if (currentTab == TAB_PROJECTS) lit = projPressRect(sx, sy, r);
+#endif
+  else if (currentTab == TAB_SETTINGS) lit = settingsPressRect(sx, sy, r);
+  else lit = false;                // USAGE: the whole card area pages accounts
+  if (!lit) return false;
+  // A content rect never tints the chrome: clamp to the content area.
+  if (r[1] < TAB_BAR_H) { r[3] -= TAB_BAR_H - r[1]; r[1] = TAB_BAR_H; }
+  if (r[1] + r[3] > contentBottom()) r[3] = contentBottom() - r[1];
+  return r[3] > 0;
+}
+
+// Does the press go to a handler that BLOCKS until the lift (a drag loop) and so
+// must be dispatched on the press? Each half lives beside its handler and mirrors
+// that handler's own entry condition.
+bool tapBlocksUntilLift(int sx, int sy) {
+  (void) sx;
+  if (composeActive || pairPanelActive || micProcessing || voiceCardActive ||
+      readerActive || showingDetail) return false;
+#if BOARD_HISTORY_SCROLL
+  if (histActive) return scrollTapBlocks(sy);
+#endif
+  if (sy < TAB_BAR_H || sy >= contentBottom()) return false;
+  if (currentTab == TAB_SESSIONS) return sessionsTapBlocks(sy);
+#if BOARD_HAS_PROJECTS
+  if (currentTab == TAB_PROJECTS) return projTapBlocks(sy);
+#endif
+  return false;
+}
+
+// The finger landed: remember where, and light the control if one is there.
+void pressBegin(int sx, int sy) {
+  if (animLit) animClear();          // the last tap's release flash, still running
+  pressX = sx; pressY = sy;
+  pressState = 1;
+  pressSig = pressSurfaceSig();
+  int r[6];
+  if (!pressRectAt(sx, sy, r)) return;
+  animLight(r);
+  animTween(PRESS_ALPHA, PRESS_IN_MS);
+}
+
+static bool pressInside(int sx, int sy) {
+  if (!animLit) {
+    const int dx = sx - pressX, dy = sy - pressY;
+    return dx * dx + dy * dy <= PRESS_SLOP_PX * PRESS_SLOP_PX;
+  }
+  return sx >= animR[0] - PRESS_SLOP_PX && sx < animR[0] + animR[2] + PRESS_SLOP_PX &&
+         sy >= animR[1] - PRESS_SLOP_PX && sy < animR[1] + animR[3] + PRESS_SLOP_PX;
+}
+
+// A held finger moved. Off the control (plus slop) cancels: the light fades and
+// the lift will act on nothing.
+void pressMove(int sx, int sy) {
+  if (pressState != 1 || pressInside(sx, sy)) return;
+  pressState = 0;
+  pressSlides++;
+  if (animLit) animTween(0, PRESS_OUT_MS);
+}
+
+// The finger lifted. true = act on (pressX, pressY) now. Re-checks that the same
+// handler and the same control are still under the press point: acting on the lift
+// opened a window the press-commit model never had, and a list that re-ranked or a
+// panel that closed in it must DROP the tap, never redirect it.
+bool pressLift() {
+  if (pressState != 1) { pressState = 0; return false; }
+  pressState = 0;
+  int r[6];
+  const bool lit = pressRectAt(pressX, pressY, r);
+  const bool sameRect = lit == animLit && (!lit || memcmp(r, animR, sizeof(animR)) == 0);
+  const bool surfaceMoved = pressSurfaceSig() != pressSig;
+  if (surfaceMoved || !sameRect) {
+    pressDrops++;
+    Serial.printf("PRESS: dropped the tap at %d,%d - %s changed while the finger was down, "
+                  "so the lift would have landed on a control nobody pressed\n",
+                  pressX, pressY, surfaceMoved ? "the screen" : "the control under it");
+    if (animLit) animTween(0, PRESS_OUT_MS);
+    return false;
+  }
+  if (animLit) tft.watch(animR[0], animR[1], animR[2], animR[3]);
+  return true;
+}
+
+// The press went to a handler that blocks until the lift and acts itself. The lift
+// branch must not act a second time.
+void pressConsume() {
+  pressState = 2;
+  if (animLit) tft.watch(animR[0], animR[1], animR[2], animR[3]);
+}
+
+// After the action ran, from either path. If it repainted its own control (a toggle
+// flipped, a screen opened) that change is the feedback and the layer goes at once:
+// a tint fading over a different screen would be a ghost. Otherwise, the release flash.
+void pressAfterDispatch() {
+  const bool redrawn = tft.watchHit();
+  tft.unwatch();
+  if (!animLit) return;
+  if (redrawn) { animClear(); return; }
+  animTween(0, PRESS_OUT_MS);
+}
+
+// A blocking list decided DRAG, or PRESSTEST off: drop the layer now, before
+// anything moves under it.
+void pressCancel() {
+  pressState = 0;
+  tft.unwatch();
+  if (animLit) { animClear(); tft.flush(); }
+}
+
+// ---------- PRESSTEST ----------
+// Lights the press layer at a point and HOLDS it, so a SCREENSHOT can confirm the
+// rect sits on the control (readRect applies the layer). Never dispatches: pressState
+// stays 0, so a real lift cannot act on it, and the next real press clears it.
+void pressTestCommand(String arg) {
+  arg.trim();
+  if (arg == "off") {
+    if (!animLit) { Serial.println("PRESSTEST off: nothing is lit, so there is nothing to release"); return; }
+    pressCancel();
+    Serial.println("PRESSTEST off: released WITHOUT acting - nothing was dispatched");
+    return;
+  }
+  const char* onPress = isAsleep        ? "the screen is asleep - a tap there only wakes it"
+                      : octoActive      ? "the octopus is up - any tap dismisses it, on the press"
+                      : emojiTestActive ? "the icon grid is up - any tap dismisses it, on the press"
+                      : composeOnKeys() ? "the keyboard is up - its key band arms on the press and commits on its own lift"
+                      : nullptr;
+  if (onPress) { Serial.printf("PRESSTEST refused: %s, so there is no held state to light\n", onPress); return; }
+  const int sp = arg.indexOf(' ');
+  bool numeric = sp > 0 && sp < (int) arg.length() - 1;
+  for (unsigned int i = 0; numeric && i < arg.length(); i++)
+    if ((int) i != sp && (arg[i] < '0' || arg[i] > '9')) numeric = false;
+  if (!numeric) {
+    Serial.printf("PRESSTEST refused: \"%s\" is not \"<x> <y>\" (x 0..%d, y 0..%d) or \"off\"\n",
+                  arg.c_str(), tft.width() - 1, tft.height() - 1);
+    return;
+  }
+  const int x = arg.substring(0, sp).toInt(), y = arg.substring(sp + 1).toInt();
+  if (x >= tft.width() || y >= tft.height()) {
+    Serial.printf("PRESSTEST refused: %d,%d is off the panel (x 0..%d, y 0..%d)\n",
+                  x, y, tft.width() - 1, tft.height() - 1);
+    return;
+  }
+  int r[6];
+  if (!pressRectAt(x, y, r)) {
+    Serial.printf("PRESSTEST refused: nothing lights at %d,%d - no covered control is there "
+                  "(docs/reference/animation.md lists what piece 1 covers)\n", x, y);
+    return;
+  }
+  // The host delivers every command over BOTH transports. Lighting is idempotent,
+  // but say so rather than re-flushing, so the log shows the second copy arrived.
+  if (animLit && !animRunning && animAlpha == PRESS_ALPHA && memcmp(r, animR, sizeof(animR)) == 0) {
+    Serial.printf("PRESSTEST: already lit at %d,%d %dx%d - the second copy of a double-delivered command, nothing to do\n",
+                  r[0], r[1], r[2], r[3]);
+    return;
+  }
+  pressCancel();
+  animLight(r);
+  animSetAlpha(PRESS_ALPHA);
+  tft.flush();
+  Serial.printf("PRESSTEST: lit %d,%d %dx%d r=%d at alpha %d for the point %d,%d - SCREENSHOT shows it; PRESSTEST off releases without acting\n",
+                r[0], r[1], r[2], r[3], r[4], PRESS_ALPHA, x, y);
+}
+
 #else
 // Board 1: no layer to light. Stubs so the board-2 drag loops carry no #if of
 // their own if a future board ever has a scrolling list without this flag.

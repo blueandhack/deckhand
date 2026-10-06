@@ -374,6 +374,40 @@ int sessionRowAtY(int sy) {
   }
   return -1;
 }
+#if BOARD_HAS_ANIM
+// A 32-bit key for "which thing is this row", so the press layer can tell a
+// re-ranked list from an unchanged one: a row's RECT can survive a re-rank while
+// the session in it does not. djb2 - collisions only ever DROP a tap, never misfire.
+int pressKey(const char* s) {
+  uint32_t h = 5381;
+  while (*s) h = h * 33 + (uint8_t) *s++;
+  return (int) h;
+}
+
+// The row the press landed on, from sessionRowAtY() and the SAME two helpers the
+// draw uses - so the lit rect is the row the tap opens. Never on the scroll rail:
+// sessionDragLoop() treats a press there as a scrub, never a row tap.
+bool sessionsPressRect(int sx, int sy, int* r) {
+  if (sessionCount <= 0 || sy < SESSION_ROW_Y0) return false;
+#if BOARD_SESSIONS_SCROLL
+  if (sessionsScrollActive() && sx >= SESSION_RAIL_X - SESSION_RAIL_W) return false;
+#endif
+  const int pos = sessionRowAtY(sy);
+  if (pos < 0) return false;
+  r[0] = SESSION_ROW_X; r[1] = sessionRowYAt(pos);
+  r[2] = SESSION_ROW_W; r[3] = sessionRowHAt(pos); r[4] = R_MD;
+  r[5] = pressKey(sessions[sessionAt(pos)].id);
+  return true;
+}
+
+// Sessions LIST tab: does the press go to a handler that blocks until the lift?
+// The SAME entry condition dispatchTap() tests before sessionDragLoop().
+bool sessionsTapBlocks(int sy) {
+  // No #if of its own: sessionsScrollActive() is already false on a board without
+  // the scrolling list, and an #else here would be dead on every board.
+  return sessionCount > 0 && sy >= SESSION_ROW_Y0 && sessionsScrollActive();
+}
+#endif
 // rightX is the card's OUTER right edge (its one caller passes
 // SESSION_ROW_X + SESSION_ROW_W, the honest thing for it to pass) - so the whole
 // shape is inset by BORDER_CARD here, moving it off the card's own border and
@@ -2967,6 +3001,26 @@ bool handleAskTouch(int sx, int sy) {
   // deliberately inert - no hidden actions near the decision buttons.
   return true;
 }
+#if BOARD_HAS_ANIM
+// An answerable option row on the ask screen - handleAskTouch()'s own division,
+// so a press in the gap under option k lights k, which is what the tap sends.
+// The SPEAK/REPLY row is tested first there and is not lit here.
+bool askPressRect(int sx, int sy, int* r) {
+  (void) sx;
+  if (detailIndex < 0 || detailIndex >= sessionCount) return false;
+  const SessionInfo& s = sessions[detailIndex];
+  if (!s.askPid[0] || !s.askAnswerable) return false;
+  if (askInputRows(detailIndex) && sy >= contentBottom() - ASK_OPT_H) return false;
+  const int optTop = askOptionsTop(detailIndex);
+  if (sy < optTop) return false;
+  const int k = (sy - optTop) / (ASK_OPT_H + ASK_OPT_GAP);
+  if (k < 0 || k >= s.askOptCount) return false;
+  r[0] = CARD_X; r[1] = optTop + k * (ASK_OPT_H + ASK_OPT_GAP);
+  r[2] = CARD_W; r[3] = ASK_OPT_H; r[4] = 8;          // drawSessionDetail's own radius
+  r[5] = pressKey(s.askPid) + k;
+  return true;
+}
+#endif
 // Label used inside the status pill on the detail screen.
 // pillLabel() and drawColValue() USED TO BE HERE and are gone with the card that
 // called them - the detail screen's status pill and its two label+value column
