@@ -1952,6 +1952,12 @@ char kbSessionId[16] = "";
 // compose.ino third, but handleTouch (in this file) dispatches on it. Functions
 // get a generated prototype from anywhere in the sketch; plain globals do not.
 extern uint8_t composeScreen;
+#if BOARD_HAS_ANIM
+// anim.ino is concatenated AFTER this file: its globals need declaring here.
+// Tasks 3 and 4 of the anim-core plan add to this block.
+extern uint32_t animFrames, animFlushTotalUs, animFlushWorstUs;
+extern uint16_t animTweens;
+#endif
 extern int  composeChipPage;
 extern bool composeSent;
 // The entry points this file uses, declared rather than left to the builder's
@@ -8987,6 +8993,14 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     Serial.printf("PERF shimmer n=%u compose %luus worst %luus (flush rides the spinner's)\n",
                   (unsigned) shimFrameCount, (unsigned long) shimComposeUs,
                   (unsigned long) shimWorstUs);
+#if BOARD_HAS_ANIM
+    // The press layer (anim.ino): frames are flushes of the lit rect only, so the
+    // flush time IS the frame cost. Cumulative since boot, like the lines above.
+    Serial.printf("PERF anim    n=%lu flush avg %luus worst %luus tweens=%u\n",
+                  (unsigned long) animFrames,
+                  (unsigned long) (animFrames ? animFlushTotalUs / animFrames : 0),
+                  (unsigned long) animFlushWorstUs, (unsigned) animTweens);
+#endif
     // The pulse reports `on` beside `n` for the same reason the crossfade reports
     // `started`: this animation SHIPS OFF, so n=0 is the expected reading and is
     // not evidence of anything until the toggle says it was enabled.
@@ -9612,6 +9626,9 @@ void loop() {
   // than a runtime no-op so board 1 never sees the TEXT of a call it does not
   // have, the same rule the 26 tft.flush() sites follow.
   tickSessionAnim();
+#if BOARD_HAS_ANIM
+  animTick();
+#endif
 #endif
   // The SESSION DETAIL card's own band, which neither tick around it can reach:
   // both return on showingDetail, so its mark, its crossfade and its pulse were all

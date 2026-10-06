@@ -25,6 +25,24 @@ const FAULTS = [
   ["setOverlay trips the watch", "panel_shim.cpp",
    (t) => t.replace(/(void PanelShim::setOverlay\([\s\S]*?)extendDirty\(/, "$1markDirty("),
    "setOverlay's OWN BODY marks through extendDirty"],
+  ["cubic table steps back", "anim.ino",
+   (t) => t.replace(/(EASE_OUT_CUBIC\[33\]\s*=\s*\{\s*0,\s*)93,/, "$1999,"),
+   "EASE_OUT_CUBIC never decreases"],
+  ["back table has no overshoot", "anim.ino",
+   // EVERY entry clamped, not just the peak: the entries beside it (1105, 1104)
+   // are an overshoot too, and a fault that leaves them proves nothing.
+   (t) => t.replace(/(EASE_OUT_BACK\[33\]\s*=\s*\{)([^}]*)\}/,
+                    (m, head, body) => head + body.replace(/\d+/g, (v) => String(Math.min(+v, 1024))) + "}"),
+   "EASE_OUT_BACK overshoots by ~8%"],
+  ["flag is a const int", "board_es3c35p.h",
+   (t) => t.replace(/#define BOARD_HAS_ANIM\s+1/, "const int BOARD_HAS_ANIM = 1;"),
+   "board 2: BOARD_HAS_ANIM is a #define"],
+  ["anim.ino draws into the framebuffer", "anim.ino",
+   (t) => t.replace(/void animSetAlpha\(uint8_t a\) \{/, "void animSetAlpha(uint8_t a) { tft.fillRect(0, 0, 1, 1, 0);"),
+   "anim.ino writes nothing into the framebuffer"],
+  ["loop forgets animTick", "deckhand_display.ino",
+   (t) => t.replace(/#if BOARD_HAS_ANIM\s*\n\s*animTick\(\);\s*\n\s*#endif\s*\n/, ""),
+   "loop()'s OWN BODY calls animTick()"],
 ];
 
 if (SOURCE_FAULT_INDEX >= 0) {
@@ -60,6 +78,45 @@ const strip = (s) => s.replace(/^[ \t]*\/\/.*$/gm, "");
     chk(/extendDirty\(/.test(b) && !/markDirty\(/.test(b),
         `${name}'s OWN BODY marks through extendDirty, not markDirty - the overlay is not content and must not trip the watch`);
   }
+}
+
+// ---- (1) easing, (2) flag form, (3) anim.ino draws nothing, loop() ticks it ----
+{
+  const ANIM_S = strip(readSource("anim.ino"));
+  const table = (name) => {
+    const m = ANIM_S.match(new RegExp(`${name}\\[33\\]\\s*=\\s*\\{([^}]*)\\}`));
+    return m ? m[1].split(",").map((v) => v.trim()).filter((v) => v !== "").map(Number) : [];
+  };
+  const cub = table("EASE_OUT_CUBIC"), back = table("EASE_OUT_BACK");
+  chk(cub.length === 33 && back.length === 33,
+      `both easing tables have 33 entries (cubic ${cub.length}, back ${back.length})`);
+  chk(cub[0] === 0 && cub[32] === 1024,
+      `EASE_OUT_CUBIC starts at 0 and ends at 1024 (${cub[0]}..${cub[32]})`);
+  chk(cub.length === 33 && cub.every((v, i) => i === 0 || v >= cub[i - 1]),
+      "EASE_OUT_CUBIC never decreases - an ease-out that steps backwards is a visible stutter");
+  const peak = back.length ? Math.max(...back) : 0;
+  chk(back[0] === 0 && back[32] === 1024,
+      `EASE_OUT_BACK starts at 0 and settles at 1024 (${back[0]}..${back[32]})`);
+  chk(peak >= 1070 && peak <= 1130,
+      `EASE_OUT_BACK overshoots by ~8%: peak ${peak} in [1070, 1130]`);
+
+  for (const [b, file, want] of [["board 1", "board_e32r28t.h", "0"], ["board 2", "board_es3c35p.h", "1"]]) {
+    const h = strip(readSource(file));
+    const m = h.match(/^\s*#define\s+BOARD_HAS_ANIM\s+(\d+)/m);
+    chk(!!m, `${b}: BOARD_HAS_ANIM is a #define - an #if on a const int is silently false`);
+    chk(!/const\s+int\s+BOARD_HAS_ANIM/.test(h), `${b}: BOARD_HAS_ANIM is never a const int`);
+    chk(m && m[1] === want, `${b}: BOARD_HAS_ANIM is ${want} - the press layer is board 2's alone (spec, Scope)`);
+  }
+
+  const DRAW = /\btft\.(fillRect|fillScreen|pushImage|drawPixel|drawString|drawFastHLine|drawFastVLine|drawRect|fillSmooth\w*|drawSmooth\w*|fillTriangle|scrollRect)\(|\bui[A-Z]\w*\(/g;
+  const draws = [...ANIM_S.matchAll(DRAW)].map((m) => m[0]);
+  chk(draws.length === 0,
+      `anim.ino writes nothing into the framebuffer - the press layer is composited at flush time (found: ${draws.join(" ") || "none"})`);
+
+  const MAIN = strip(readSource("deckhand_display.ino"));
+  const loopB = fnBody(MAIN, "void loop()", "deckhand_display.ino");
+  chk(/#if BOARD_HAS_ANIM\s*\n\s*animTick\(\);\s*\n\s*#endif/.test(loopB),
+      "loop()'s OWN BODY calls animTick() under #if BOARD_HAS_ANIM - board 1 never sees the call");
 }
 
 faultChildEpilogue();
