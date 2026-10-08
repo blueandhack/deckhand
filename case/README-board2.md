@@ -563,8 +563,9 @@ one exported before this change. Checked by sorted-vertex hash, since the cover'
 byte-reproducible (see below). **A plateau cover must use the plunger**: `btn_flex` refuses
 `cover_rise > 0` by name, because the buttons would then sit on the taper. `part="buttons"`
 refuses by name while `btn_flex` is on, rather than exporting plungers for a cover with no guide
-hole. `stl/deckhand_b2_buttons.stl` is left as it was, for that path, with the defect noted
-under *The plunger's stem is long* below.
+hole. `stl/deckhand_b2_buttons.stl` was kept for that path until 2026-10-08, then removed from
+`stl/` as stale: rebuild it with the `part="buttons"` command below (after setting
+`btn_flex = false`), and mind the defect noted under *The plunger's stem is long* below.
 
 ### What the checker binds
 
@@ -1865,6 +1866,8 @@ downstream number (`cavity_d`, `z_floor`, `total_th`, the plunger stem) re-deriv
 the case returns to 24.4 mm.
 
 `use_retainer = true` still brings the original corral back if you'd rather print it.
+Its STL is no longer shipped in `stl/` (removed 2026-10-08 as stale); export it with
+`openscad -o stl/deckhand_b2_retainer.stl -D 'part="retainer"' deckhand_case_b2.scad`.
 
 ## Two things the measurements forced
 
