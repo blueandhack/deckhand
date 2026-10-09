@@ -838,6 +838,27 @@ bool saveLightIdle = false;
 // DEFAULT 0 with the rest, because "the amp is off" is heard, not measured: how
 // many milliamps it was costing is what the next leg answers.
 #define PWROFF_AMP_HIGH     0x200 // drive the amp enable HIGH (= OFF on battery) and hold it
+// THE CODEC'S REAL POWER-DOWN, which CODEC_DOWN never was. CODEC_DOWN writes one
+// register - 0x00 = 0x1F, the digital reset bits - and that is the LAST of the
+// fifteen writes Espressif's own es8311_suspend() makes (esp-adf,
+// components/esp_codec_dev/device/es8311/es8311.c). Everything before it is the
+// part that actually powers things down, and none of it was ever done: the live
+// register dump (TONETEST) reads 0x0D = 0x01 - ANALOG ON - and 0x01 = 0x3F - EVERY
+// CLOCK ON - and both stayed that way through every power-off this board has had,
+// with the codec's VDD on a rail nothing here can switch. Suspend ends with 0x0D =
+// 0xFC (all analog off) and 0x01 = 0x00 (all clocks off).
+//
+// SAFE ON THE WAY BACK, checked rather than assumed: every register it clears is
+// rewritten at boot - 0x0D/0x0E/0x12 by es8311_init, 0x01 by es8311_clock_config,
+// 0x02 by sample_frequency_config, 0x14/0x17 by microphone_config, 0x32 by every
+// volume set - and the two nobody rewrites (0x15, 0x45) already read 0x00 live,
+// which is what suspend writes.
+//
+// The readback of 0x0D and 0x01 is stored and reported in the receipt, so whether
+// the writes TOOK is something the next wake says rather than something believed.
+// DEFAULT 0 with the rest: it is Espressif's sequence, but how many milliamps the
+// analog section was costing is a measurement nobody has made.
+#define PWROFF_CODEC_SUSPEND 0x400 // es8311_suspend(): analog, ADC, DAC and clocks off
 // DEFAULT 0x7, AND THE DEFAULT MOVED BECAUSE THE ANSWER WAS SEEN. It shipped as
 // 0 while every step was a guess - a saving defaulting ON silently optimises the
 // "before" leg of every future A/B, which poisons a measurement rather than
@@ -2157,6 +2178,25 @@ unsigned long lastRxUSBMillis = 0;
 bool usbLinkActive() {
   return lastRxUSBMillis > 0 && (millis() - lastRxUSBMillis) < 10000;
 }
+
+#if !BOARD_USES_TFT_ESPI
+// THE BLE COUNTERPART OF usbLinkActive(): has the HOST SPOKEN over BLE within
+// 10s - not "is a central connected". bleConnected flips in onConnect, at the
+// RADIO-LINK level, seconds before the Mac has discovered the service and
+// subscribed to TX notifications; a notify in that window is refused outright
+// (NimBLE's ERROR_NO_SUBSCRIBER - see the BLE2902 note in setupBle). The Mac only
+// starts writing payloads AFTER its subscribe completes (host/index.mjs publishes
+// bleCharacteristic last), so a byte received from it is proof it is listening.
+// MEASURED: a power-off receipt fired on bleConnected after a wake, landed in
+// that window with Serial not yet open either, cleared its once-only flag, and
+// was lost - recoverable only because PWROFFMODE re-emits it from RAM.
+bool bleHostHeard() {
+  for (int i = 0; i < MAX_LINKS; i++)
+    if (bleLinks[i].used && !bleLinks[i].releasePending && bleLinks[i].lastRxMillis &&
+        millis() - bleLinks[i].lastRxMillis < 10000) return true;
+  return false;
+}
+#endif
 
 // ---------- Battery ----------
 // Charging and battery/USB power switching are pure hardware on this board
@@ -8921,7 +8961,7 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     char line[200];
     snprintf(line, sizeof(line),
              "PWROFFMODE 0x%lX (panelSleep=%d icReset=%d codecDown=%d qspiIsolate=%d "
-             "ledLow=%d rtcOff=%d usbIso=%d sdIso=%d ampLow=%d ampHigh=%d) - 0 is the original teardown, the baseline",
+             "ledLow=%d rtcOff=%d usbIso=%d sdIso=%d ampLow=%d ampHigh=%d codecSusp=%d) - 0 is the original teardown, the baseline",
              (unsigned long) pwrOffMode,
              (pwrOffMode & PWROFF_PANEL_SLEEP) ? 1 : 0,
              (pwrOffMode & PWROFF_IC_RESET) ? 1 : 0,
@@ -8932,7 +8972,8 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
              (pwrOffMode & PWROFF_USB_ISOLATE) ? 1 : 0,
              (pwrOffMode & PWROFF_SD_ISOLATE) ? 1 : 0,
              (pwrOffMode & PWROFF_AMP_LOW) ? 1 : 0,
-             (pwrOffMode & PWROFF_AMP_HIGH) ? 1 : 0);
+             (pwrOffMode & PWROFF_AMP_HIGH) ? 1 : 0,
+             (pwrOffMode & PWROFF_CODEC_SUSPEND) ? 1 : 0);
     sendLineToHost(line);
     sendLineToHost(pwrOffReport);
   } else if (buf == "SAVINGS") {
@@ -9956,8 +9997,10 @@ void loop() {
   // removing the NVS key, just moved to where delivery actually happens.
   // usbLinkActive() is "the host spoke over USB within 10s" rather than "a cable
   // is in", which is the honest test: a cable with nothing listening is exactly
-  // the case that lost the three-day record.
-  if (pwrOffReportPending && pwrOffReport[0] && (bleConnected || usbLinkActive())) {
+  // the case that lost the three-day record. bleHostHeard() is the SAME test for
+  // BLE, and it replaced bleConnected for the same reason: connected is not
+  // listening, and a once-only line sent into that gap is gone - see bleHostHeard.
+  if (pwrOffReportPending && pwrOffReport[0] && (bleHostHeard() || usbLinkActive())) {
     pwrOffReportPending = false;
     sendLineToHost(pwrOffReport);
   }

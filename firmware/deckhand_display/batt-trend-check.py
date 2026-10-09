@@ -1178,6 +1178,41 @@ check("HIGH WINS when both amp bits are set - ampLow lives only in its else-arm,
       _iH >= 0 and _iL > _iH)
 check("PWROFFMODE reports ampHigh, or the leg cannot be attributed", "ampHigh=%d" in MAIN)
 
+# ---- THE CODEC'S REAL POWER-DOWN (es8311_suspend) --------------------------
+# CODEC_DOWN only ever wrote 0x00 = 0x1F, the LAST of Espressif's fifteen
+# suspend writes; the live dump showed 0x0D = 0x01 (analog ON) and 0x01 = 0x3F
+# (clocks ON) surviving every power-off. The sequence is PARSED out of power.ino.
+check("the codec-suspend step exists as its own bit", "PWROFF_CODEC_SUSPEND" in _val)
+check("...distinct from every other step", len(set(_val.values())) == len(_val))
+check("...and DEFAULT OFF until a leg measures it", "PWROFF_CODEC_SUSPEND" not in _dflt)
+_cs = re.search(r"esSuspend\[\]\[2\] = \{(.*?)\};", POWER, re.S)
+_seq = [(int(a,16), int(b,16)) for a, b in re.findall(r"\{0x([0-9A-Fa-f]+), 0x([0-9A-Fa-f]+)\}",
+                                                       _cs.group(1))] if _cs else []
+check("the suspend sequence is present and Espressif's full length (15 writes) - a "
+      "truncated copy is the single-reset-write mistake again", len(_seq) == 15)
+_last = {}
+for r, v in _seq: _last[r] = v
+check("...and it LEAVES analog power (0x0D) at 0xFC, all analog off - the one value the "
+      "live 0x01 dump proves was never reached", _last.get(0x0D) == 0xFC)
+check("...and the clock manager (0x01) at 0x00, every clock off", _last.get(0x01) == 0x00)
+check("...with the converters off: ADC/PGA 0x0E=0xFF, DAC 0x12=0x02",
+      _last.get(0x0E) == 0xFF and _last.get(0x12) == 0x02)
+# ORDER inside the teardown: the suspend must run BEFORE the bare reset, or the
+# reset lands first and the suspend's own reset pair then repeats it for nothing.
+check("the suspend runs BEFORE CODEC_DOWN's bare reset write",
+      0 <= POWER.find("if (pwrOffMode & PWROFF_CODEC_SUSPEND)") < POWER.find("if (pwrOffMode & PWROFF_CODEC_DOWN)"))
+# EVIDENCE, NOT BELIEF: the readback is recorded, pre-set to "not run" before
+# anything else so a skipped step can never report a stale value, and printed.
+_rec = POWER[POWER.find('prefs.putUChar("poPs", 2)'):POWER.find("if (pwrOffMode & PWROFF_PANEL_SLEEP)")]
+check("poCd is reset to 'did not run' at record-first, so a skipped suspend cannot report "
+      "a stale readback from an earlier power-off", 'prefs.putUShort("poCd", 0xFFFF)' in _rec)
+_csb = POWER[POWER.find("if (pwrOffMode & PWROFF_CODEC_SUSPEND)"):POWER.find("if (pwrOffMode & PWROFF_CODEC_DOWN)")]
+check("the step READS BACK 0x0D and stores it, rather than assuming its writes took",
+      "i2c_master_write_read_device" in _csb and 'prefs.putUShort("poCd"' in _csb)
+check("the receipt reports the readback as codec=",
+      "codec=%s" in POWER and 'prefs.getUShort("poCd"' in POWER)
+check("PWROFFMODE reports codecSusp", "codecSusp=%d" in MAIN)
+
 # ---- THE POWER-OFF RECEIPT REACHES A HOST THAT IS NOT ON THE CABLE ---------
 # sendLineToHost() fans out to Serial AND BLE, but its BLE half is gated on
 # bleConnected - and at boot no central has connected yet. So the receipt for a
@@ -1193,11 +1228,20 @@ check("setup ARMS the power-off receipt rather than sending it into a transport 
 check("...and setup does NOT also send it - emitting at boot AND on connect would "
       "deliver it twice over USB, which is the double delivery this repo keeps paying for",
       "sendLineToHost(pwrOffReport)" not in _setup)
-check("loop() emits it once a host is REACHABLE, and the gate names BLE explicitly - "
-      "without that term a cable-out power-off still reports to nobody, which is the "
-      "entire defect",
+check("loop() emits it once a host is LISTENING on either transport - BLE named "
+      "explicitly, or a cable-out power-off reports to nobody",
       re.search(r"if \(pwrOffReportPending && pwrOffReport\[0\] && "
-                r"\(bleConnected \|\| usbLinkActive\(\)\)\)", _loop) is not None)
+                r"\(bleHostHeard\(\) \|\| usbLinkActive\(\)\)\)", _loop) is not None)
+# CONNECTED IS NOT LISTENING. bleConnected flips at the radio-link level, seconds
+# before the Mac subscribes; a once-only receipt sent there was measured LOST.
+check("...and the BLE half is 'the host has SPOKEN', never bleConnected - a receipt "
+      "fired at link-up lands before the Mac subscribes and is gone",
+      "bleConnected" not in _loop[_loop.find("if (pwrOffReportPending"):
+                                   _loop.find("if (pwrOffReportPending") + 120])
+_bhh = _body(MAIN, "bool bleHostHeard()")
+check("bleHostHeard() tests a RECEIVE timestamp per live link, not .used alone - a slot "
+      "that is merely connected must not count",
+      "lastRxMillis" in _bhh and "releasePending" in _bhh and "< 10000" in _bhh)
 # ONCE-ONLY, and the order is what guarantees it: a link that comes and goes must
 # not re-report an old power-off as a fresh one.
 _iClear = _loop.find("pwrOffReportPending = false;")

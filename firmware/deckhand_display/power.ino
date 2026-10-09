@@ -263,12 +263,19 @@ void loadPwrOffRecord() {
   }
   const uint32_t mode = prefs.getUInt("poMode", 0);
   const uint8_t  ps   = prefs.getUChar("poPs", 2);   // 2 = step not run
+  // The codec suspend's own readback: what 0x0D and 0x01 held AFTER the writes,
+  // which is the only evidence they took. 0x0D:FC/01:00 is fully suspended.
+  const uint16_t cd   = prefs.getUShort("poCd", 0xFFFF);
+  char codec[20];
+  if (cd == 0xFFFF)      snprintf(codec, sizeof(codec), "skipped");
+  else if (cd == 0xFFFE) snprintf(codec, sizeof(codec), "UNREAD");
+  else snprintf(codec, sizeof(codec), "0D:%02X/01:%02X", cd >> 8, cd & 0xFF);
   for (int i = 0; i < 12; i++) sampleBattery();       // settle before comparing
   snprintf(pwrOffReport, sizeof(pwrOffReport),
-           "PWROFF record: off at %umV mode=0x%lX sleepPanel=%s; awake at %dmV "
+           "PWROFF record: off at %umV mode=0x%lX sleepPanel=%s codec=%s; awake at %dmV "
            "(%+d mV). Elapsed is the Mac's to supply - a reset takes RTC with it.",
            (unsigned) mv, (unsigned long) mode,
-           ps == 2 ? "skipped" : (ps ? "ok" : "FAILED"),
+           ps == 2 ? "skipped" : (ps ? "ok" : "FAILED"), codec,
            batteryMv, batteryMv - (int) mv);
   prefs.remove("poMv");
 }
@@ -1120,6 +1127,7 @@ void enterDeepSleep() {
   prefs.putUShort("poMv", (uint16_t) (batteryMv > 0 ? batteryMv : 0));
   prefs.putUInt("poMode", pwrOffMode);
   prefs.putUChar("poPs", 2);   // 2 = the panel step did not run
+  prefs.putUShort("poCd", 0xFFFF);   // 0xFFFF = codec suspend did not run
 
   // 1. SLEEP THE PANEL - and KEEP THE RETURN. sleepPanel() has five paths that
   //    return false, and the first version of this discarded the result, so a
@@ -1127,6 +1135,33 @@ void enterDeepSleep() {
   //    did nothing. That is the same class as esp_pm_configure()'s stub.
   if (pwrOffMode & PWROFF_PANEL_SLEEP)
     prefs.putUChar("poPs", tft.sleepPanel(true) ? 1 : 0);
+
+  // 2a. SUSPEND THE CODEC - Espressif's es8311_suspend(), verbatim and in order
+  //     (esp-adf components/esp_codec_dev/device/es8311/es8311.c). The single
+  //     reset write below is only its LAST step; these are the ones that turn the
+  //     analog section, the converters and the clock tree off. See
+  //     PWROFF_CODEC_SUSPEND for why each is safe to undo at boot.
+  //     Then READ BACK 0x0D and 0x01 and keep them: a write that did not take is
+  //     the same failure class as a sleepPanel() that returned false, and the
+  //     receipt is where it shows.
+  if (pwrOffMode & PWROFF_CODEC_SUSPEND) {
+    static const uint8_t esSuspend[][2] = {
+      {0x32, 0x00}, {0x17, 0x00}, {0x0E, 0xFF}, {0x12, 0x02}, {0x14, 0x00},
+      {0x0D, 0xFA}, {0x15, 0x00}, {0x02, 0x10}, {0x00, 0x00}, {0x00, 0x1F},
+      {0x01, 0x30}, {0x01, 0x00}, {0x45, 0x00}, {0x0D, 0xFC}, {0x02, 0x00},
+    };
+    for (unsigned i = 0; i < sizeof(esSuspend) / sizeof(esSuspend[0]); i++)
+      i2c_master_write_to_device(I2C_NUM_0, ES8311_ADDRESS_0, esSuspend[i], 2,
+                                 pdMS_TO_TICKS(50));
+    uint8_t r0D = 0xFF, r01 = 0xFF;
+    const uint8_t a0D = 0x0D, a01 = 0x01;
+    const bool okA = i2c_master_write_read_device(I2C_NUM_0, ES8311_ADDRESS_0, &a0D, 1,
+                                                  &r0D, 1, pdMS_TO_TICKS(50)) == ESP_OK;
+    const bool okB = i2c_master_write_read_device(I2C_NUM_0, ES8311_ADDRESS_0, &a01, 1,
+                                                  &r01, 1, pdMS_TO_TICKS(50)) == ESP_OK;
+    // 0xFFFE = ran but could not read back; anything else is the two bytes read.
+    prefs.putUShort("poCd", (okA && okB) ? (uint16_t) ((r0D << 8) | r01) : 0xFFFE);
+  }
 
   // 2. POWER DOWN THE CODEC. Register 0x00 is the ES8311's reset, and the
   //    datasheet is explicit that reset draws far less than any running mode.
