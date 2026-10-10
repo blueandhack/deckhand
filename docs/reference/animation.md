@@ -96,3 +96,94 @@ header; the USAGE cards. Taps on these still act on the lift.
 | tap-on-lift behaviours (Task 4 Step 7: tab, slide-off, drag clears tint, row opens, reply panel, keyboard unaffected, re-rank drop, panel-closed drop) | **UNVERIFIED** | not flashed; offline checkers only |
 | board 1 code unchanged | **MEASURED** 2026-10-05 | `.flash.text` 1,008,392 bytes before and after `PRESSTEST`'s refusal (`xtensa-esp32-elf-size -A`). The `dispatchTap` extraction left `handleTouch` at 0x2eb bytes at the same address. The only unmasked difference against a rebuild of the prior commit is one `bne a8, a10` re-encoded as `bne a10, a8` |
 | board 2 cost | **MEASURED** 2026-10-05 | flash 1,164,864 -> 1,171,200 (+6,336); RAM 66,156 -> 66,260 (+104) |
+
+---
+
+# Piece 2: screen transitions and loaders (branch `anim-transitions`, 2026-10-05)
+
+Built without a written spec, on the user's instruction ("don't ask me now, just do it and flash
+it"). The design came from the brainstorm: spatial motion, a bar plus a skeleton for loaders.
+
+## Screen transitions: the same rule, one level up
+
+**The outgoing screen is copied into a second PSRAM framebuffer (`_fbOld`, 307,200 bytes,
+allocated at boot) before the new screen is drawn.** The framebuffer then takes the new screen
+exactly as it always would, and `flush()`/`readRect()` composite the two by progress. Nothing
+animated lives in the framebuffer, so a payload that redraws mid-motion is simply part of what
+slides in.
+
+| moment | motion | duration |
+|---|---|---|
+| tab switch | the content area slides toward the tab picked; the tab bar updates at once | `TR_TAB_MS` 240 |
+| session detail, PROJECTS level 1 | a rect grows out of the tapped row to the content area; on close it shrinks back into wherever that row is NOW (the centre when it is off screen) | `TR_REVEAL_MS` 260 |
+| transcript | rises like a sheet over the whole screen; falls away on close | `TR_SHEET_MS` 280 |
+
+**The order of operations is the contract.** `transBegin()` runs at the hook BEFORE anything
+draws. It snapshots the glass and HOLDS `flush()`, because several renderers flush mid-draw. The
+next `animTick()` releases the hold and runs the frames.
+
+Five rules, each one measured on the glass:
+
+1. **A snapshot of a framebuffer that is not on the glass is refused.** `closeCompose()` clears
+   the screen before `closeSessionDetail()` runs, so that close has no transition. That is honest:
+   animating from a half-drawn frame would not be.
+2. **A second hook while one is pending keeps the snapshot and retargets it.** The host delivers
+   `DETAIL` twice. Before this rule, the second copy cancelled the first copy's transition and
+   then had its own snapshot refused (`PERF trans skipped=1`, and the card just appeared).
+3. **Offsets and reveal columns are kept even.** An odd slide offset makes the PSRAM `memcpy`
+   misaligned, and a content-area frame measured **56ms against ~26ms**.
+4. **Transitions boost the CPU.** The board idles at 80 MHz and only a finger boosts it. At
+   80 MHz a frame measured **57ms**, against **22-25ms** at 240.
+5. **The frames run in one short loop inside `transGo()`**, at most the duration long. Any touch
+   ends it at once (the tap is then handled as usual), and BLE is reaped every frame. Progress is
+   capped frame time (`TR_MAX_STEP_MS` 48), not wall-clock. Left to `loop()`, a transcript's
+   sheet competed with its own fetch: `pumpStream()` drains a whole chunk per pass (JSON parse,
+   re-wrap, full redraw), and the sheet showed **1 frame of 8**, then crawled.
+
+**Measured, board 2, 2026-10-05**, with `PERF trans` deltas per step (`TAB 1`, `TAB 0`, `TAB 1`,
+`DETAIL 0`, `SCROLLOPEN`, `SCROLLCLOSE`, `TAB 2`, `TAB 1`): every transition got **10-11
+frames**, at an average of **21.4-23.1ms** a frame. The worst frame was 41ms: a full-screen
+sheet frame. Nothing was skipped.
+
+Mid-motion geometry, seen in `ANIMFREEZE 50` / `45` captures:
+- **the tab slide:** USAGE half out to the left, SESSIONS half in from the right, the bar already
+  underlining SESSIONS, the footer untouched
+- **the sheet:** the transcript header rising from the bottom over the detail card
+- **the reveal:** also captured, but with a single session its row is nearly the whole content
+  area, so the 50% frame looks almost finished
+
+**UNVERIFIED:** how any of it FEELS by finger. Every trigger here came from the Mac.
+
+## Loaders
+
+- **The conversation:** a bar across the transcript body plus `fetching n/N`, replacing
+  `-- fetching n/N --`. **It steps per chunk; it does not glide**, and that is measured, not a
+  shortfall to fix here. During a fetch the loop gets a turn about every ~0.7s (`PERF loader`:
+  `ticks` barely move while chunks land), so a bar that eased toward its target lagged a chunk
+  behind. It now SNAPS to the true fraction on every chunk's repaint. Before the first chunk
+  says how many there are, a segment sweeps instead. **Seen on the glass:** the track and the
+  count. The fill was proven by the `PERF loader` counters (`grows`), not seen in a capture,
+  because every capture landed at a chunk boundary or mid-sheet.
+- **Skeletons:** placeholder rows at the real geometry (PROJECTS level 0 and level 1), and two
+  bars in a lean detail card while its `FOCUS` is in flight. A light sweeps across them
+  diagonally (`LOADER_WAVE_MS` 1100), and each bar is repainted only when its level changes.
+  Ownership is asked on EVERY tick (`projSkelValid` / `detailSkelValid`), so a reply that replaced
+  the skeleton is never painted over. **UNVERIFIED on the glass:** the PROJECTS replies landed
+  inside `LOADER_DELAY_MS` (250ms) every time, so the skeleton correctly never appeared, and no
+  lean row came up during testing.
+- Every loader is silent for its first `LOADER_DELAY_MS`.
+
+## Instruments
+
+- **`ANIMFREEZE <0..100>` / `ANIMFREEZE off`:** holds transitions at that progress for a
+  `SCREENSHOT`.
+- **`PERF trans`:** transitions, frames, flush avg/worst, skipped.
+- **`PERF loader`:** the conversation loader's ticks, grows, paints, shown and target.
+- **`TRANS skipped kind=N: <cause>`:** every skip names its cause on serial: asleep, unflushed
+  drawing, or nothing drawn.
+
+## Known gaps
+
+- `closeCompose()` back to the detail card or list has no transition (rule 1 above).
+- The frame loop blocks `loop()` for up to 280ms, the way the drag lists do. A finger ends it at
+  once, but host lines arriving in that window wait until it finishes.

@@ -76,6 +76,16 @@ typedef struct {                 // per font
 // TFT_* name survives is those globals' initialisers, which have to be a
 // constant expression. Adding the rest of TFT_eSPI's ~30 colour names would
 // invite a second palette to grow beside the themed one.
+// Screen transition kinds (PanelShim::setTransition), LOGICAL: "from the right"
+// means the reader's right, whichever way up the panel is mounted.
+#define TR_NONE             0
+#define TR_SLIDE_FROM_RIGHT 1   // new enters from the right, old leaves left
+#define TR_SLIDE_FROM_LEFT  2
+#define TR_REVEAL_IN        3   // new shows inside a rect that grows
+#define TR_REVEAL_OUT       4   // old shows inside a rect that shrinks
+#define TR_SHEET_UP         5   // new rises from the bottom over old
+#define TR_SHEET_DOWN       6   // old falls away downward, uncovering new
+
 #define TFT_BLACK 0x0000
 #define TFT_WHITE 0xFFFF
 
@@ -122,6 +132,21 @@ public:
   void watch(int x, int y, int w, int h);
   void unwatch();
   bool watchHit() const { return _watchHit; }
+
+  // ---- Screen transitions (anim.ino) ----
+  // The OUTGOING screen is copied into a second PSRAM buffer (_fbOld); the
+  // framebuffer then takes the INCOMING one exactly as it always would, and
+  // flush()/readRect() composite the two by progress. Like the press layer,
+  // nothing animated ever lives in the framebuffer, so a redraw during the
+  // motion is simply part of the new screen. Kinds are LOGICAL - setTransition
+  // mirrors them for rotation 2 (the screen flip).
+  bool snapshotOld();                 // false: no buffer, or the framebuffer is not what is on the glass
+  void holdFlush(bool hold) { _hold = hold; }
+  bool drawnSinceSnapshot() const { return _drawnSinceSnap; }
+  // band = logical rows [y0, y1); off = pixels moved; r = reveal rect {x, y, w, h}
+  void setTransition(uint8_t kind, int y0, int y1, int off, const int* r);
+  void clearTransition();
+  void markRegion(int y0, int y1);    // dirty a full-width logical band for the next flush
 
   // ---- Anti-aliased primitives (Task 4) ----
   // Coverage-based AA: for every pixel in the shape's bounding box, compute a
@@ -184,6 +209,9 @@ private:
   void extendDirty(int px0, int py0, int px1, int py1);
   void logicalToPhysRect(int x, int y, int w, int h, int& px0, int& py0, int& px1, int& py1) const;
   bool overlayCovers(int px, int py) const;
+  // One composited PHYSICAL row of a running transition, native order, full width.
+  void compositeRow(int py, uint16_t* out) const;
+  bool trCovers(int py) const { return _trKind && py >= _trY0 && py <= _trY1; }
   void clipLogicalRect(int& x, int& y, int& w, int& h) const;
   // Shared by every "smooth" primitive: blends `fg` into the real pixel at
   // logical (x,y) by `coverage` (0..1), reading the destination back from
@@ -225,6 +253,14 @@ private:
   // The watch, PHYSICAL coordinates. _wX1 < _wX0 means "not watching".
   int _wX0 = 0, _wY0 = 0, _wX1 = -1, _wY1 = -1;
   bool _watchHit = false;
+  // The transition: the outgoing screen, the row it is composited into, and the
+  // PHYSICAL kind/band/offset/rect. _trKind == 0 means "none running".
+  uint16_t* _fbOld = nullptr;
+  uint16_t* _trRow = nullptr;
+  bool _hold = false, _drawnSinceSnap = false;
+  uint8_t _trKind = 0;
+  int _trY0 = 0, _trY1 = -1, _trOff = 0;
+  int _trRX0 = 0, _trRY0 = 0, _trRX1 = -1, _trRY1 = -1;
   uint32_t _lastFlushUs = 0;        // see lastFlushUs()
 
   esp_panel::board::Board*      _board = nullptr;

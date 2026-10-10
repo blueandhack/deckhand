@@ -595,6 +595,107 @@ uint32_t scrollMaxY() {
   return total > view ? total - view : 0;
 }
 
+// ---------- THE CONVERSATION LOADER ----------
+// A bar across the body's middle while a fetch is in flight: the chunk count
+// (scrollChunksIn/Of, known on both transports) is the target, and the fill
+// GLIDES there - a quarter of the remaining gap per frame, so each chunk eases in.
+// Before the first chunk says how many there are, a segment sweeps instead. Silent
+// for its first LOADER_DELAY_MS, like every loader. Change-only: a frame paints the
+// few pixels that moved, never the whole bar.
+int sbShownPx = 0, sbSegX = 0, sbSegDir = 1;
+bool sbPainted = false;
+char sbCountCache[24] = "";
+unsigned long lastSbMs = 0;
+// PERF loader: how often the tick ran, grew the fill, and repainted it whole -
+// "the bar did not move" has three different causes and these tell them apart.
+uint32_t sbTicks = 0, sbGrows = 0, sbPaints = 0;
+int sbLastTarget = -2;
+
+void scrollLoaderPerf() {
+  Serial.printf("PERF loader  ticks=%lu grows=%lu paints=%lu shown=%d target=%d\n",
+                (unsigned long) sbTicks, (unsigned long) sbGrows, (unsigned long) sbPaints,
+                sbShownPx, sbLastTarget);
+}
+
+static int sbBarX() { return (tft.width() - LOADER_BAR_W) / 2; }
+static int sbBarY() { return (SCROLL_TOP + SCROLL_BOT) / 2 - LOADER_BAR_H / 2; }
+static int sbTargetPx() {
+  if (scrollChunksOf <= 0) return -1;
+  const int in = scrollChunksIn > scrollChunksOf ? scrollChunksOf : scrollChunksIn;
+  return (int) ((long) LOADER_BAR_W * in / scrollChunksOf);
+}
+
+static void sbPaintCount() {
+  char b[24];
+  if (scrollChunksOf > 0) snprintf(b, sizeof(b), "fetching %d/%d      ", scrollChunksIn, scrollChunksOf);
+  else snprintf(b, sizeof(b), "fetching...         ");
+  drawIfChanged(sbCountCache, sizeof(sbCountCache), b, sbBarX(), sbBarY() + LOADER_BAR_H + 10,
+                1, 1, COLOR_LABEL, COLOR_BG, TL_DATUM);
+}
+
+static void sbPaintAll() {
+  const int x = sbBarX(), y = sbBarY();
+  const uint16_t track = blend565(COLOR_BG, COLOR_LABEL, 70);
+  tft.fillRect(x, y, LOADER_BAR_W, LOADER_BAR_H, track);
+  const int target = sbTargetPx();
+  if (target >= 0) {
+    // SNAPPED TO THE TRUE FRACTION on every chunk's repaint. The glide in the tick
+    // only has time to run when the loop does, and during a fetch it mostly does
+    // not: pumpStream drains a whole chunk per pass (MEASURED, PERF loader: one
+    // tick in ~0.7s). A bar that lags a chunk behind is a bar that lies.
+    sbShownPx = target;
+    if (sbShownPx > 0) tft.fillRect(x, y, sbShownPx, LOADER_BAR_H, COLOR_ACCENT);
+  } else {
+    tft.fillRect(x + sbSegX, y, LOADER_SEG_W, LOADER_BAR_H, COLOR_ACCENT);
+  }
+  sbCountCache[0] = '\0';
+  sbPaintCount();
+  sbPainted = true;
+  sbPaints++;
+}
+
+// The body was just cleared (scrollDrawBody's pending branch): paint the loader
+// as it stands, or nothing yet if the wait is still young - the tick paints it.
+void scrollLoaderPaint() {
+  sbPainted = false;
+  if (millis() - scrollFetchStart < LOADER_DELAY_MS) return;
+  sbPaintAll();
+}
+
+void scrollLoaderTick() {
+  if (!scrollActive || !scrollPending || composeActive || pairPanelActive) {
+    sbShownPx = 0; sbSegX = 0; sbSegDir = 1; sbPainted = false;
+    return;
+  }
+  const unsigned long now = millis();
+  if (now - scrollFetchStart < LOADER_DELAY_MS) return;
+  if (now - lastSbMs < LOADER_FRAME_MS) return;
+  lastSbMs = now;
+  sbTicks++;
+  if (!sbPainted) { sbPaintAll(); return; }
+  const int x = sbBarX(), y = sbBarY();
+  const int target = sbTargetPx();
+  sbLastTarget = target;
+  if (target >= 0) {
+    if (sbShownPx < target) {
+      int step = (target - sbShownPx) / 4;
+      if (step < 1) step = 1;
+      tft.fillRect(x + sbShownPx, y, step, LOADER_BAR_H, COLOR_ACCENT);
+      sbShownPx += step;
+      sbGrows++;
+    }
+  } else {
+    const uint16_t track = blend565(COLOR_BG, COLOR_LABEL, 70);
+    int nx = sbSegX + sbSegDir * 6;
+    if (nx < 0) { nx = 0; sbSegDir = 1; }
+    if (nx > LOADER_BAR_W - LOADER_SEG_W) { nx = LOADER_BAR_W - LOADER_SEG_W; sbSegDir = -1; }
+    tft.fillRect(x + sbSegX, y, LOADER_SEG_W, LOADER_BAR_H, track);
+    tft.fillRect(x + nx, y, LOADER_SEG_W, LOADER_BAR_H, COLOR_ACCENT);
+    sbSegX = nx;
+  }
+  sbPaintCount();
+}
+
 // One dim centred line, for every state that is not a transcript. Each names its
 // own cause: from the Mac "there is no more history" and "I cannot fetch the rest
 // here" look identical, which is the class POWERPROBE's refusal exists for.
@@ -681,9 +782,11 @@ void scrollDrawBody() {
   // with acks, scrollChunksIn/Of are known on the radio too, and a wait with a
   // number on it is a different wait.
   if (scrollPending) {
-    char b[40];
-    snprintf(b, sizeof(b), "-- fetching %d/%d --", scrollChunksIn, scrollChunksOf);
-    scrollNote(b, (SCROLL_TOP + SCROLL_BOT) / 2 - CODE_LINE_H / 2);
+    // A PROGRESS BAR now, not "-- fetching n/N --": it glides to each new chunk
+    // count rather than jumping, and keeps the count beside it, since a wait with
+    // a number on it is a different wait. The body was just cleared, so this
+    // repaints it whole; scrollLoaderTick() moves it between chunks.
+    scrollLoaderPaint();
     return;
   }
   if (scrollDeadEnd()) {
@@ -1262,6 +1365,10 @@ bool scrollTapBlocks(int sy) {
 #endif
 
 void exitScrollback() {
+#if BOARD_HAS_ANIM
+  // THE TRANSCRIPT FALLS AWAY, uncovering whatever it was opened over.
+  transBegin(TR_SHEET_DOWN, 0, tft.height(), nullptr, nullptr, TR_SHEET_MS);
+#endif
   scrollActive = false;
   // READ, THEN CLEARED, BEFORE scrollEnd() (which touches neither, but the
   // order is stated because scrollEnd() DOES clear scrollLoadedId, and a
@@ -1304,6 +1411,10 @@ void exitScrollback() {
 // drag/tap machinery lives in scrollDragLoop()/handleScrollTouch(), not here.
 void openScrollback(int idx) {
   if (idx < 0 || idx >= sessionCount) return;
+#if BOARD_HAS_ANIM
+  // THE TRANSCRIPT RISES like a sheet over the screen it was opened from.
+  transBegin(TR_SHEET_UP, 0, tft.height(), nullptr, nullptr, TR_SHEET_MS);
+#endif
   // DEFENSIVE, belt and braces (projFetchFailed()'s own reasoning: it costs
   // nothing): exitScrollback() always clears this on the way out, but a path
   // that opens straight through here (SCROLLPERF, SCROLLOPEN) rather than via
@@ -1395,6 +1506,9 @@ void scrollOpenById(const char* id12, const char* title) {
     sendLineToHost(m);   // not Serial.printf alone - a BLE-only double-tap needs this too
     return;
   }
+#if BOARD_HAS_ANIM
+  transBegin(TR_SHEET_UP, 0, tft.height(), nullptr, nullptr, TR_SHEET_MS);   // openScrollback()'s own
+#endif
   scrollFromProjects = true;
   strncpy(scrollProjTitle, title, sizeof(scrollProjTitle) - 1);
   scrollProjTitle[sizeof(scrollProjTitle) - 1] = '\0';

@@ -79,7 +79,189 @@ void animClear() {
 // One frame per ANIM_FRAME_MS, ONLY while the tween runs - at rest this is one
 // comparison, the session crossfade's own contract. A frame is setOverlay plus a
 // flush of the lit rect: no compose, the framebuffer is untouched.
+// ---------- SCREEN TRANSITIONS ----------
+// The OUTGOING screen is snapshotted into PanelShim's second buffer BEFORE the new
+// one is drawn (transBegin, called at the hook), flushing is HELD while it draws,
+// and the next animTick() - the first thing after the handler returns - releases
+// the hold and runs the motion: flush() composites old and new by progress. The
+// framebuffer always holds the true new screen, so anything that redraws during
+// the motion is simply part of what slides in. See docs/reference/animation.md.
+// Durations are TR_TAB_MS / TR_REVEAL_MS / TR_SHEET_MS in board_es3c35p.h: the hooks
+// that pass them live in deckhand_display.ino, which is concatenated BEFORE this file.
+uint8_t trKind = TR_NONE;
+bool trPending = false, trRunning = false;
+int trY0 = 0, trY1 = 0, trLastP = -1;
+int trFrom[4] = {0, 0, 0, 0}, trTo[4] = {0, 0, 0, 0};   // reveal rects, logical x,y,w,h
+unsigned long trElapsed = 0, trDur = 0, lastTrFrameMs = 0;
+// PROGRESS IS FRAME TIME, CAPPED, NOT WALL-CLOCK. Opening a transcript wraps
+// thousands of lines and absorbs the catch-up reply right after the first frame,
+// stalling the loop past the whole 280ms - and wall-clock progress then jumped
+// straight to the end: MEASURED, the sheet showed 1 frame of 8. A stall now slows
+// the motion instead of deleting it.
+const unsigned long TR_MAX_STEP_MS = 48;
+int trFreezePct = -1;                                   // ANIMFREEZE: hold at this %, -1 = run
+uint32_t trFrames = 0, trFlushTotalUs = 0, trFlushWorstUs = 0;
+uint16_t trCount = 0, trSkipped = 0;
+
+// Jumps any pending or running transition to its end: the glass shows the new
+// screen alone. A press, a new transition and ANIMFREEZE off all land here, so
+// nothing ever waits on motion.
+void transFinish() {
+  if (trPending) { trPending = false; tft.holdFlush(false); }
+  if (!trRunning) { trKind = TR_NONE; return; }
+  trRunning = false;
+  trKind = TR_NONE;
+  trLastP = -1;
+  tft.clearTransition();
+  tft.flush();
+}
+
+// AT THE HOOK, BEFORE the new screen is drawn. from/to are reveal rects (logical
+// x,y,w,h) - ignored by the slides and sheets. A refused snapshot (no buffer, or
+// the framebuffer is not what is on the glass) just lets the change land at once.
+void transBegin(uint8_t kind, int y0, int y1, const int* from, const int* to, unsigned long dur) {
+  // ALREADY PENDING: a second hook in the same loop iteration - the host's double
+  // delivery of DETAIL, or one surface handing to the next. Nothing has reached the
+  // glass since the snapshot (the flush is held), so the snapshot is still the
+  // screen being left: keep it and retarget. Finishing it instead would release the
+  // hold over a half-drawn frame and refuse the new snapshot - measured on the glass
+  // as a DETAIL that never animated (PERF trans skipped=1).
+  if (trPending) {
+    trKind = kind; trY0 = y0; trY1 = y1; trDur = dur;
+    if (from) memcpy(trFrom, from, sizeof(trFrom));
+    if (to) memcpy(trTo, to, sizeof(trTo));
+    return;
+  }
+  transFinish();
+  // A SKIP NAMES ITS CAUSE: from the Mac, "it skipped" and "it ran" look identical
+  // otherwise, and that ambiguity cost a debugging pass on the glass already.
+  if (isAsleep) { trSkipped++; Serial.printf("TRANS skipped kind=%u: the screen is asleep\n", kind); return; }
+  if (!tft.snapshotOld()) {
+    trSkipped++;
+    Serial.printf("TRANS skipped kind=%u: no snapshot - the framebuffer holds unflushed drawing, "
+                  "so it is not what is on the glass\n", kind);
+    return;
+  }
+  // AT FULL CLOCK. The board idles at 80 MHz and a finger boosts it to 240 for
+  // 1.5s - but a transition can start with no finger at all (a TAB or DETAIL from
+  // the Mac, a payload), and at 80 MHz a content-area frame MEASURED 57ms against
+  // ~26: half the frames, visibly choppier. The boost outlives the motion.
+  cpuBoost();
+  tft.holdFlush(true);
+  trKind = kind; trY0 = y0; trY1 = y1; trDur = dur;
+  if (from) memcpy(trFrom, from, sizeof(trFrom));
+  if (to) memcpy(trTo, to, sizeof(trTo));
+  trPending = true;
+}
+
+// The content area (between the tab bar and the footer), and a small rect at its
+// centre - where a reveal starts or ends when the row it belongs to is not on screen.
+void transContentRect(int* r) {
+  r[0] = 0; r[1] = TAB_BAR_H; r[2] = tft.width(); r[3] = contentBottom() - TAB_BAR_H;
+}
+void transCentreRect(int* r) {
+  const int w = tft.width() / 4, h = (contentBottom() - TAB_BAR_H) / 8;
+  r[0] = (tft.width() - w) / 2; r[1] = TAB_BAR_H + (contentBottom() - TAB_BAR_H - h) / 2;
+  r[2] = w; r[3] = h;
+}
+
+static void transFrame(unsigned long now) {
+  (void) now;
+  int p = trFreezePct >= 0 ? trFreezePct * 1024 / 100 : animEase(ANIM_EASE_CUBIC, trElapsed, trDur);
+  if (p < 0) p = 0;
+  if (p > 1024) p = 1024;
+  if (p == trLastP) return;          // a frozen frame is pushed once, not every tick
+  trLastP = p;
+  int off = 0, r[4] = {0, 0, 0, 0};
+  if (trKind == TR_SLIDE_FROM_RIGHT || trKind == TR_SLIDE_FROM_LEFT) off = tft.width() * p / 1024;
+  else if (trKind == TR_SHEET_UP || trKind == TR_SHEET_DOWN) off = (trY1 - trY0) * p / 1024;
+  else for (int i = 0; i < 4; i++) r[i] = trFrom[i] + (trTo[i] - trFrom[i]) * p / 1024;
+  tft.setTransition(trKind, trY0, trY1, off, r);
+  tft.markRegion(trY0, trY1);
+  const uint32_t t0 = micros();
+  tft.flush();
+  const uint32_t us = micros() - t0;
+  trFrames++;
+  trFlushTotalUs += us;
+  if (us > trFlushWorstUs) trFlushWorstUs = us;
+}
+
+static void transGo() {
+  trPending = false;
+  tft.holdFlush(false);
+  // NOTHING NEW WAS DRAWN: the hook's handler returned early (a same-tab tap, a
+  // refusal). Running anyway would slide the screen into a copy of itself.
+  if (!tft.drawnSinceSnapshot()) {
+    Serial.printf("TRANS skipped kind=%u: nothing new was drawn after the hook\n", trKind);
+    trKind = TR_NONE; trSkipped++; return;
+  }
+  trRunning = true;
+  // ONE FRAME IN ALREADY: progress 0 is the old screen exactly, so pushing it
+  // would spend a whole frame (a content-area flush) on no motion at all.
+  trElapsed = ANIM_FRAME_MS;
+  lastTrFrameMs = millis();
+  trLastP = -1;
+  trCount++;
+  transFrame(lastTrFrameMs);
+  if (trFreezePct >= 0) return;      // ANIMFREEZE: the loop's transTick() holds it
+  // THE MOTION RUNS HERE, IN ONE SHORT LOOP (<= the transition's duration), the way
+  // the drag lists already block - and that is measured, not a preference. Left to
+  // loop(), a transcript's sheet competed with its own fetch: pumpStream drains a
+  // whole chunk (JSON, re-wrap, full redraw) per pass, the loop got a turn every
+  // ~200ms, and the 280ms sheet crawled up over a second in a few jumps.
+  // A FINGER ENDS IT AT ONCE - the tap is then handled as usual on the next pass,
+  // so nothing is lost - and BLE is reaped every frame, as the drag loops do.
+  while (trRunning) {
+    int tx, ty;
+    if (getTouchPoint(tx, ty)) { transFinish(); return; }
+    reapBleLinks(true);
+    const unsigned long now = millis();
+    const unsigned long dt = now - lastTrFrameMs;
+    lastTrFrameMs = now;
+    trElapsed += dt < TR_MAX_STEP_MS ? dt : TR_MAX_STEP_MS;
+    if (trElapsed >= trDur) { transFinish(); return; }
+    transFrame(now);
+  }
+}
+
+static void transTick() {
+  if (trPending) { transGo(); return; }
+  if (!trRunning) return;
+  const unsigned long now = millis();
+  const unsigned long dt = now - lastTrFrameMs;
+  if (dt < ANIM_FRAME_MS) return;
+  lastTrFrameMs = now;
+  trElapsed += dt < TR_MAX_STEP_MS ? dt : TR_MAX_STEP_MS;
+  if (trFreezePct < 0 && trElapsed >= trDur) { transFinish(); return; }
+  transFrame(now);
+}
+
+// ANIMFREEZE <0..100> holds every transition at that progress until ANIMFREEZE
+// off, so a SCREENSHOT (readRect composites it) can record a mid-motion frame.
+void animFreezeCommand(String arg) {
+  arg.trim();
+  if (arg == "off") {
+    trFreezePct = -1;
+    const bool was = trRunning;
+    transFinish();
+    Serial.printf("ANIMFREEZE off: transitions run again%s\n", was ? " - the held one jumped to its end" : "");
+    return;
+  }
+  bool numeric = arg.length() > 0 && arg.length() <= 3;
+  for (unsigned int i = 0; numeric && i < arg.length(); i++) if (arg[i] < '0' || arg[i] > '9') numeric = false;
+  const int pct = numeric ? arg.toInt() : -1;
+  if (pct < 0 || pct > 100) {
+    Serial.printf("ANIMFREEZE refused: \"%s\" is not a progress percentage (0..100) or \"off\"\n", arg.c_str());
+    return;
+  }
+  trFreezePct = pct;
+  trLastP = -1;
+  Serial.printf("ANIMFREEZE: transitions now hold at %d%% - %s\n", pct,
+                trRunning ? "the running one is held there now" : "the next one (TAB, a row tap, a transcript) will stop there");
+}
+
 void animTick() {
+  transTick();
   if (!animRunning) return;
   const unsigned long now = millis();
   if (lastAnimFrameMs != 0 && now - lastAnimFrameMs < ANIM_FRAME_MS) return;
@@ -193,6 +375,7 @@ bool tapBlocksUntilLift(int sx, int sy) {
 
 // The finger landed: remember where, and light the control if one is there.
 void pressBegin(int sx, int sy) {
+  transFinish();                     // a tap never waits on motion
   if (animLit) animClear();          // the last tap's release flash, still running
   pressX = sx; pressY = sy;
   pressState = 1;
