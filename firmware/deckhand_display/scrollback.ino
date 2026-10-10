@@ -52,6 +52,11 @@ bool scrollFromProjects = false;
 // own warning: a headless run would become a SECOND, concurrent author of
 // it). The safe direction for a flag nobody remembered to set.
 bool scrollProjLive = true;
+// The transcript's own Mac for scrollOpenById() (a hostLinks index; 255 = not
+// known). SET BY THE CALLER immediately before the call, the convention
+// scrollProjLive already uses - that signature has no room for it. One-shot:
+// scrollOpenById() resets it, so a later caller that names nothing broadcasts.
+uint8_t scrollProjHost = 255;
 // The header's title when scrollFromProjects is true - sessions[detailIndex].name
 // has no meaning for an id sessions[] does not hold. Sized to PSessInfo.title's
 // own shape (host caps at 40, +NUL, +3 spare) - the same margin every other
@@ -1516,7 +1521,15 @@ void scrollOpenById(const char* id12, const char* title) {
   histActive = true;             // openScrollback()'s own note on why this joins too
   scrollY = 0;
   scrollFetchWhy = "projopen";   // a PROJECTS level-2 row tap, or PSESSOPEN
-  scrollFetch(id12, 0, true);    // broadcast - see this function's own header note
+  // ADDRESSED when the caller named the project's Mac. The header note above
+  // broadcast because "there is no hostSlot on file" for a PROJECTS-opened id -
+  // there is now: the project row records its Mac. Broadcast, two Macs both ran
+  // the fetch; the fallback below is the old behaviour, kept for an unknown Mac.
+  if (scrollProjHost < MAX_LINKS && hostLinks[scrollProjHost].used)
+    scrollFetch(id12, scrollProjHost, false);
+  else
+    scrollFetch(id12, 0, true);    // broadcast - see this function's own header note
+  scrollProjHost = 255;
   // LAND AT THE NEWEST EVEN WHEN THE FETCH DID NOT RUN - openScrollback()'s
   // own reasoning, verbatim: scrollFetch() answers locally when the
   // transcript is already held in PSRAM, and that path has no completion

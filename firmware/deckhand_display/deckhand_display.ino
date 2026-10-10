@@ -264,6 +264,14 @@ struct BleLink {
   // other, but do not assume the same guarantee if a second field is ever
   // added alongside it.
   volatile bool releasePending = false;
+#if BOARD_HAS_PROJECTS
+  // WHICH MAC is on this central, learned from the hostId every Mac stamps on its
+  // own 5s tick. The device already knew this for USB (usbHostId) and never for
+  // BLE, so a reply that carries no hostId - a PROJECTS `projs` reply, a PROJSESS
+  // reply - could not be attributed to a Mac once two were connected. Cleared
+  // when the slot is reaped, so a recycled slot never inherits the last Mac.
+  char hostId[12] = "";
+#endif
 };
 BleLink bleLinks[MAX_LINKS];
 bool bleConnected = false;         // still a bool: == (bleLinkCount() > 0)
@@ -1059,6 +1067,13 @@ int emojiIdForLink(int link) {
 // itself - see audio.ino), so this pair is exercised by nothing right now.
 // Kept rather than torn out, for the same reason primaryLink() itself is.
 char usbHostId[12] = "";
+#if BOARD_HAS_PROJECTS
+// The BLE slot whose bytes are being parsed RIGHT NOW, or -1. Set only around the
+// real drain's feedChar loop - NOT bleFrameSlot, which stays stale after the drain
+// returns, so a MULTITEST injection (which never touches BLE) would otherwise be
+// attributed to whichever central spoke last.
+int8_t curRxBleSlot = -1;
+#endif
 bool curLineFromUsb = false;
 
 // CARD_X/W/H, CARD1_Y/CARD2_Y, CODEX_Y/CODEX_H and PAD/BAR_H/RADIUS moved to
@@ -1655,6 +1670,10 @@ struct ProjInfo {
                   // mtime, or -1 when that moment was not today - the same
                   // unit and the same "-1 means not today" rule every other
                   // on-device clock field uses.
+  uint8_t hostSlot; // WHICH MAC this project lives on - a hostLinks index, or 255
+                    // when the reply could not be attributed. Each Mac's reply
+                    // replaces only its own rows; before this the second reply
+                    // overwrote the first and only one Mac's projects ever showed.
 };
 extern ProjInfo projects[PROJ_SLOTS];
 extern int projectCount;
@@ -2114,6 +2133,8 @@ extern int      scrollNewBelow;
 extern char scrollLoadedId[16];
 extern bool scrollFromProjects;
 extern bool scrollProjLive;
+extern uint8_t scrollProjHost;
+extern uint8_t projOpenHost;
 // This task's own addition to the same forward-declared set, for the same
 // reason: the hist parser's chunk arm below reads scrollLoadedId (already
 // forward-declared above) and this file's SCROLLFETCH handler writes
@@ -5296,6 +5317,10 @@ void handleLine(const String& line) {
     // or a synthetic hostId could steal ownership of the one real transport
     // that exists and starve a legitimate audio dictation of its target.
     if (curLineFromUsb) strlcpy(usbHostId, hid, sizeof(usbHostId));
+#if BOARD_HAS_PROJECTS
+    else if (curRxBleSlot >= 0 && curRxBleSlot < MAX_LINKS)
+      strlcpy(bleLinks[curRxBleSlot].hostId, hid, sizeof(bleLinks[curRxBleSlot].hostId));
+#endif
   }
   // Which LINK is this? Separate from activeHost (a pairing slot): a Mac can
   // be talking to us without being paired, and a paired Mac can be absent.
@@ -5386,7 +5411,12 @@ void handleLine(const String& line) {
     projectsEverReceived = true;
     projectsLastLoadMs = millis();
     JsonArray items = projs["items"].as<JsonArray>();
-    int n = 0, overflow = 0, toolong = 0;
+    // THIS MAC'S ROWS ONLY. Both Macs answer a PROJECTS broadcast; writing from
+    // projects[0] every time made the second answer erase the first. Now a reply
+    // replaces only its own Mac's rows, inside a fair share of PROJ_SLOTS.
+    const uint8_t host = replyHostSlot();
+    int room = projMakeRoomFor(host, items.isNull() ? 0 : (int) items.size());
+    int n = projectCount, overflow = 0, toolong = 0;
     if (!items.isNull()) {
       for (JsonObject it : items) {
         // PROJ_SLOTS IS THIS DEVICE'S OWN CEILING, not a mirror of a host-side
@@ -5394,7 +5424,7 @@ void handleLine(const String& line) {
         // uncapped. An item past the ceiling is COUNTED rather than silently
         // walked off the end of the array, the same "say what did not fit"
         // rule SESSIONS' hiddenCount follows.
-        if (n >= PROJ_SLOTS) { overflow++; continue; }
+        if (n >= PROJ_SLOTS || room <= 0) { overflow++; continue; }
         ProjInfo& p = projects[n];
         // A KEY THAT WOULD TRUNCATE IS REFUSED BY NAME, NOT STORED SHORT.
         // copyField() truncates silently, and a truncated key is worse than a
@@ -5416,10 +5446,16 @@ void handleLine(const String& line) {
         copyField(p.name, sizeof(p.name), it["n"] | "");
         p.count = it["c"] | 0;
         p.tod = it["t"] | -1L;
+        p.hostSlot = host;
         n++;
+        room--;
       }
     }
     projectCount = n;
+    projSortRows();   // most-active first - the host's own rule - across both Macs
+    Serial.printf("PROJECTS: %d from %s, %d listed across %d Mac(s)\n",
+                  projHeldBy(host), (host < MAX_LINKS && *linkTag(host)) ? linkTag(host) : "an unknown Mac",
+                  projectCount, projHostsListed());
     // Unreached today - PROJ_SLOTS(24) is over the 16 measured
     // (docs/superpowers/specs/2026-09-20-sessions-manager-design.md) - but
     // named rather than assumed impossible, per this codebase's "every
@@ -5442,6 +5478,14 @@ void handleLine(const String& line) {
   // states above.
   JsonObject projsess = doc["projsess"];
   if (!projsess.isNull()) {
+    // FROM THE OPENED PROJECT'S OWN MAC ONLY. The request is now addressed, but a
+    // stray answer from the other Mac - "this Mac has no such project", or a
+    // same-named folder's sessions - must never overwrite the real one.
+    if (projOpenHost < MAX_LINKS && replyHostSlot() != projOpenHost) {
+      Serial.printf("PSESSFETCH: ignored a reply from another Mac - \"%s\" lives on %s\n",
+                    projOpenKey, *linkTag(projOpenHost) ? linkTag(projOpenHost) : "the other Mac");
+      return;
+    }
     const char* k = projsess["k"] | "";
     // THE ECHOED KEY MUST MATCH projOpenKey, OR THIS REPLY IS STALE AND IS
     // DISCARDED RATHER THAN DRAWN - AND THAT DISCARD MUST TOUCH NO STATE AT
@@ -6618,6 +6662,9 @@ void reapBleLinks(bool mayAdvertise) {
     bleLinks[i].buf = "";
     bleLinks[i].releasePending = false;
     bleLinks[i].used = false;
+#if BOARD_HAS_PROJECTS
+    bleLinks[i].hostId[0] = '\0';
+#endif
     if (bleFrameSlot == i) bleFrameSlot = -1;
     freedAny = true;
   }
@@ -6662,8 +6709,14 @@ void drainBleRx() {
     if (bleFrameSlot < 0) continue;   // a refused/reaped central: consume and discard
     bleLinks[bleFrameSlot].lastRxMillis = millis();
     lastRxBLEMillis = millis();
+#if BOARD_HAS_PROJECTS
+    curRxBleSlot = (int8_t) bleFrameSlot;
+#endif
     for (size_t i = 0; i < got; i++)
       feedChar(chunk[i], bleLinks[bleFrameSlot].buf, &bleLinks[bleFrameSlot].lastRxMillis, false);
+#if BOARD_HAS_PROJECTS
+    curRxBleSlot = -1;
+#endif
   }
 }
 
@@ -9686,6 +9739,7 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // caller states it here, immediately before the call, the same
     // convention projOpenLevel1() already uses for projOpenKey.
     scrollProjLive = psess[si].live != 0;
+    scrollProjHost = projOpenHost;   // SET FIRST, like scrollProjLive: the transcript's own Mac
     scrollOpenById(psess[si].id, psess[si].title);
     Serial.printf("PSESSOPEN: session %d (%s)\n", si, psess[si].title);
 #endif

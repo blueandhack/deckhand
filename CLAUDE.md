@@ -357,6 +357,7 @@ the physical screen" - plus a large set of offline checkers.
 # firmware geometry and arithmetic
 node firmware/deckhand_display/{usage,sessions,settings}-geom-check.mjs
 node firmware/deckhand_display/{sessions-rank,scrollback,palette,textwidth}-check.mjs
+node firmware/deckhand_display/projects-multimac-check.mjs   # PROJECTS with two Macs: merge, attribution, addressing
 node firmware/deckhand_display/commands-check.mjs      # every verb handled or refused BY NAME, both boards
 python3 firmware/deckhand_display/{usage-trend,batt-trend}-check.py
 node firmware/deckhand_display/geom-sweep.mjs          # fault-injection sweep, ~110s
