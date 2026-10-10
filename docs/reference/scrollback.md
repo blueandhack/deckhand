@@ -456,7 +456,9 @@ manager-design.md`'s whole point, very often is not) in `sessions[]` at all. `pr
 (both `deckhand_display.ino`) are the Mac-drivable ones. `scrollFetch()` is the busy-guard/
 already-held/wire-line core both `requestScrollback()` and `scrollOpenById()` now build one
 call to; the latter's is BROADCAST (no `hostSlot` on file for an id that may not be live),
-`requestProjects()`'s own reasoning applied one level deeper.
+`requestProjects()`'s own reasoning applied one level deeper. *(Since 2026-10-09 it is ADDRESSED
+whenever the caller names the project's Mac through `scrollProjHost` - see the RESOLVED note under
+NOT VERIFIED below.)*
 
 **RESUME IS SIGNED** - `RESUME <id12> <b64> <hmac>`, `verifyPrompt`'s own frame shape with a
 third label. It shipped as `RESUME <id> <plaintext>`, which ran `claude -p --resume` for anything
@@ -518,3 +520,13 @@ and fails by name if it reverses (`SB_FAULT=tick-order`).
   broadcasts; a single paired Mac is unaffected (there is nothing to misaddress to), but two
   Macs paired at once could see a per-chunk ack's `to=` suffix name the wrong one. Out of scope
   for this task; flagged rather than fixed.
+  **RESOLVED FOR A PROJECTS-OPENED TRANSCRIPT, 2026-10-09** (kept above, corrected in place): a
+  PROJECTS row now records its Mac, and both routes in (the level-2 tap and `PSESSOPEN`) set the
+  one-shot `scrollProjHost` before `scrollOpenById()`, which then calls `scrollFetch(id12,
+  scrollProjHost, false)` - ADDRESSED - so `scrollHostSlot` is that Mac's real slot and every
+  `SCROLLACK` names it. The broadcast-and-slot-0 path survives only for a caller that names no
+  Mac, or one whose link has since gone (`hostLinks[..].used` false). Bound by
+  `projects-multimac-check.mjs`; the addressing itself is NOT yet watched on a two-Mac wire - see
+  `pairing-and-multi-mac.md`. **`RESUME` is unchanged by it:** it still sends one signed frame per
+  paired Mac, because it predates the device knowing the transcript's Mac. That Mac is now
+  knowable (`scrollHostSlot`), so addressing `RESUME` to it alone is possible and is not built.

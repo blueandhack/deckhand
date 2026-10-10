@@ -941,3 +941,20 @@ guard are therefore UNMEASURED on hardware.
   it is a PRE-EXISTING CLASS rather than a new defect. It is written down here as a class so it is
   not rediscovered one control at a time: **if the panel ever stops advertising dead controls in
   the sent state, all of them come off together.**
+
+- **"N MORE IN PROJECTS" ON AN EMPTY LIST SAT ON THE MESSAGE, LEFT-ALIGNED (fixed 2026-10-09,
+  board 2).** `countLineY()` re-derived "the middle plus a bit" on its own - `+20`, against the
+  "No active Claude Code sessions" line's `+10` - so on board 2 the count line's top landed 2px
+  under that 16px message, and at `SESSION_ROW_X + 2` under a message drawn centred. Reported by
+  the owner from the glass. Now both read one `sessionsEmptyMsgY()`; the count line sits
+  `SESSION_EMPTY_COUNT_GAP` (12 - the gap the sparkle already keeps above the message) under the
+  message's bottom edge, centred (`TC_DATUM` at `width / 2`, padded on BOTH sides to the same 26
+  cells, so `drawIfChanged`'s cleared box keeps one width and a shorter count leaves no ghost).
+  Board 2's numbers, from `sessions-geom-check.mjs`: message bottom 271, count line 283. With rows
+  on the list it is unchanged - left-aligned under the last row. **Board 1 is byte-identical**
+  (`--check 1` UNCHANGED): it never draws the line (`BOARD_HAS_PROJECTS 0`), and the helper is
+  `static inline` and read once because an out-of-line copy called twice cost it 80 bytes for
+  nothing. Bound by four assertions and four selftest faults (the original `+20`, left alignment,
+  a zero gap, and the message changing face without `countLineY()` following). **NOT seen on the
+  glass:** an empty list is unreachable while a Claude session is live on a connected Mac, which
+  it was for the whole of this fix; a capture of the non-empty list confirmed that path unchanged.

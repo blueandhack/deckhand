@@ -606,3 +606,80 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
   missed. The burst is idempotent (host re-pins/re-provisions only on a change) and boot-only, so a
   device-side RESET PAIRING (no reboot) still won't silently re-pair. (`deviceNameReported` is now
   vestigial — nothing gates on it.)
+- **PROJECTS WITH TWO MACS (2026-10-09): the list showed ONE Mac, because the second reply erased
+  the first.** `PROJECTS` is a broadcast and both Macs answer it, but the `projs` absorption wrote
+  from `projects[0]` every time - whichever Mac answered last was the whole list. The level below
+  had the same root: `PROJSESS` was broadcast too, so the Mac WITHOUT the project answered "this
+  Mac has no such project" over the real list, and the transcript fetch went to both. Fixed by
+  giving every row a Mac and every later request an address:
+  - **Each row records its Mac** (`ProjInfo.hostSlot`, board 2 only, behind
+    `BOARD_HAS_PROJECTS`). A reply REPLACES its own Mac's rows and leaves the other's alone, inside
+    a fair share (`projMakeRoomFor()`: `PROJ_SLOTS / Macs listed`, reclaimed from the
+    least-active end of whichever Mac is over it), so the first Mac to answer cannot crowd out
+    the second. The merged list is re-sorted by `count` (`projSortRows()`, stable) - the SAME
+    key each host sorts its own reply by, so one Mac's order is never silently changed.
+  - **Attribution needs no host change.** `replyHostSlot()` trusts a payload that names itself
+    (`curLink`) first; otherwise it takes the USB Mac, or the Mac LEARNED for that BLE slot from
+    that Mac's own 5-second tick (`BleLink.hostId`). The slot is marked by `curRxBleSlot` ONLY
+    around the real drain and cleared after it, so an injected line (`MULTITEST`) is never
+    credited to whichever central spoke last.
+  - **Opening a project asks only its Mac.** `projOpenLevel1()` keeps `projOpenHost`;
+    `requestProjSessions()` sends `PROJSESS` with `sendLineToHost(m, projOpenHost)`; a `projsess`
+    reply from the OTHER Mac is ignored BEFORE it touches any level-2 state (`PSESSFETCH: ignored a
+    reply from another Mac`). Both routes into a transcript (the level-2 tap and `PSESSOPEN`) set
+    the one-shot `scrollProjHost`, so `scrollOpenById()` ADDRESSES the fetch rather than
+    broadcasting it, and the per-chunk `SCROLLACK` follows (`scrollback.md`).
+  - **A Mac that left loses its rows** at the next fetch (`projDropStaleHosts()`, `LINK_STALE_MS`),
+    so no row can address a Mac that is gone.
+  - **The row names its Mac** with `dispMacTag()` - right-aligned in the NAME zone, never in
+    `PROJ_META_W`, and part of the row signature - so it is `""` with one Mac and appears the moment
+    a second one does, as on every other surface.
+
+  **Measured on two real Macs:** the first reply logged `PROJECTS: 17 from pro, 17 listed across 1
+  Mac(s)`, the second `PROJECTS: 4 from pro, 21 listed across 2 Mac(s)`, and a capture showed one
+  merged list ordered by activity. Only THIS Mac's log is readable, so the other Mac's half is
+  verified by its effect (four projects arriving on a second link and merging), not by its own log.
+  **NOT VERIFIED on hardware:** the ADDRESSING of levels 2 and 3 - that a `PROJSESS` or `HISTORY`
+  for the other Mac's project leaves on that Mac's link alone, and that the stray-reply guard
+  fires on a real one. Those are bound by `firmware/deckhand_display/projects-multimac-check.mjs`
+  (`--selftest` catches 12 of 12 injected faults, the original `projects[0]` bug among them, and
+  it parses the sort key from BOTH the device and `host/project-replies.mjs` rather than
+  transcribing either), which proves the code says it and not that the radio did it.
+
+  **THE TAG COLLISION BITES HARDER HERE.** Both of this machine's Macs tag as `pro` (above), and a
+  PROJECTS row carries the TEXT tag only - not the Mac icon that settles it on a session row - so
+  the two `deckhand` rows read identically apart from their numbers. The remedy is
+  `DECKHAND_MAC_TAG` (sanitised, 6 characters), but **the launchd plist passes only `PATH`**
+  (`~/Library/LaunchAgents/com.deckhand.host.plist`), so setting it means adding a
+  `DECKHAND_MAC_TAG` key to its `EnvironmentVariables` dict on EACH Mac and restarting its service. Not done: what each Mac is
+  called is the owner's choice. Drawing the icon on a PROJECTS row as well is the other fix, and
+  is not built.
+
+  **BUILT THE SAME DAY: `Settings > Mac name...` in the menu-bar app** (the paragraph above is kept
+  as written; its "not done" was true when it was). The person names the Mac; nothing is guessed.
+  - **The order is `DECKHAND_MAC_TAG` > the person's name > the hostname's last word**
+    (`resolveMacTag()` in `host/host-tag.mjs`). The env var keeps winning because it always has;
+    a name set from the menu sits between it and the guess. Every source goes through `macTag()`,
+    so all three are sanitised to lowercase letters and digits and capped at 6 alike - the
+    device's fonts are ASCII and its tag lane is measured for six (`host-tag-check.mjs` asserts
+    the cap from each source, and that a name is sanitised WHOLE, never split like a hostname).
+  - **The wire is the icon's.** The dialog writes `MACTAG <name>` to the trigger file; the host
+    intercepts it (never forwarded to a device), sanitises, and persists it to
+    `~/.claude/deckhand-mac-tag`; `currentMacTag()` re-reads that per tick, so the next payload's
+    `hostTag` carries it - no restart, no plist. A bare `MACTAG` (Save with an empty field, or "Use
+    automatic") deletes the file. A name with nothing left after sanitising (`!!!`) is REFUSED by
+    name rather than read as a clear, so a typo cannot silently undo a chosen name.
+  - **The menu row says what the device says**: `Mac name: pro (automatic)...`, `Mac name:
+    home...`, or `Mac name: work (set by env)` DISABLED - the heartbeat carries `macTag`,
+    `macTagSource` and `macTagAuto` for it, the same reason `iconFromEnv` exists. Disabled too while
+    the host is down, when nothing would read the command.
+  - **Each Mac names ITSELF.** The other Mac needs this host and menu-bar build to get the item.
+
+  **Measured 2026-10-09, end to end on this Mac**, with the worktree's host run through
+  `DeckhandBLE.app` in place of the service and then the service restored: `MACTAG Home!` logged
+  `Name: this Mac is now "home" on the device.`, the file held `home`, the heartbeat read
+  `macTag home / name`, `--menu-dump` printed `Mac name: home...`, and a board-2 capture of PROJECTS
+  showed this Mac's rows tagged `home` beside the other Mac's `pro` - the two `deckhand` rows
+  distinguishable for the first time. `MACTAG !!!` was refused and kept `home`; bare `MACTAG`
+  removed the file and the row returned to `pro (automatic)`. **NOT exercised:** the dialog
+  itself (an `NSAlert` with a text field - no way to click it from here), and the other Mac.

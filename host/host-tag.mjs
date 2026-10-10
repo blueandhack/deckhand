@@ -22,3 +22,18 @@ export function macTag(hostname = "", override = "") {
   const lastSegment = parts[parts.length - 1];
   return lastSegment.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 6);
 }
+
+// Which tag this Mac publishes, and WHERE it came from - the menu-bar app shows the
+// name and, when the environment pins it, says so instead of offering a rename that
+// could never take. Order: DECKHAND_MAC_TAG (the launchd environment - it has always
+// won) > the person's own name (the menu-bar's "Mac Name...", persisted by the host
+// to ~/.claude/deckhand-mac-tag) > the hostname's last segment. That last one is a
+// GUESS, and it collides between two Macs of one model: both MacBook Pros read "pro".
+// Every route goes through macTag(), so every source is sanitised and capped alike.
+export function resolveMacTag({ hostname = "", env = "", file = "" } = {}) {
+  const fromEnv = macTag("", env);
+  if (fromEnv) return { tag: fromEnv, source: "env" };
+  const fromFile = macTag("", file);
+  if (fromFile) return { tag: fromFile, source: "name" };
+  return { tag: macTag(hostname), source: "auto" };
+}

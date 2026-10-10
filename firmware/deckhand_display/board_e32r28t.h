@@ -530,6 +530,10 @@ const int SESSION_SUB_LANE_W = SESSION_ROW_W - SESSION_NAME_DX - 12;
 // TEXT, not the panel: one Cozette 6x13 line plus 3px, so it does not move with
 // the screen.
 const int SESSION_OVERFLOW_H = 16;
+// Empty list only: the gap under the "No active" message to the PROJECTS count line.
+// Never drawn here (BOARD_HAS_PROJECTS 0 folds that line away), but countLineY() is
+// shared code and names it on both boards. See board_es3c35p.h.
+const int SESSION_EMPTY_COUNT_GAP = 12;
 // The row signature's buffer. WAS 176 - the literal that was in
 // deckhand_display.ino's rowSigCache declaration - then 304, because this board
 // draws the band card too and its expanded first row appends the LAST PROMPT and

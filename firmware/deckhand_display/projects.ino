@@ -111,6 +111,95 @@ int projLevel = 0;
 // board_es3c35p.h): this buffer holds a COPY of one of those keys, so a size
 // of its own would be a second place for the wire's worst case to be wrong.
 char projOpenKey[PROJ_KEY_MAX] = "";
+// THE OPENED PROJECT'S MAC (a hostLinks index, 255 = not known), copied from its
+// row exactly when projOpenKey is. Everything below level 1 is ADDRESSED to it -
+// the PROJSESS request and the transcript fetch - and a PROJSESS reply from any
+// other Mac is ignored. With one Mac it is that Mac, and nothing changes.
+uint8_t projOpenHost = 255;
+
+// ---- TWO MACS, ONE LIST ------------------------------------------------------
+// Which Mac sent the line being parsed. A payload that names itself (hostId, so
+// curLink) wins; otherwise the transport it arrived on decides - the USB Mac, or
+// the Mac learned for that BLE slot from its own ticks. 255 when neither knows,
+// which every caller treats as "one unattributed Mac", i.e. today's behaviour.
+uint8_t replyHostSlot() {
+  if (curLink >= 0 && curLink < MAX_LINKS) return (uint8_t) curLink;
+  const char* hid = curLineFromUsb ? usbHostId
+                  : (curRxBleSlot >= 0 && curRxBleSlot < MAX_LINKS) ? bleLinks[curRxBleSlot].hostId
+                  : "";
+  const int s = linkForHost(hid, false);
+  return s >= 0 ? (uint8_t) s : 255;
+}
+int projHeldBy(uint8_t host) {
+  int n = 0;
+  for (int r = 0; r < projectCount; r++) if (projects[r].hostSlot == host) n++;
+  return n;
+}
+int projHostsListed() {
+  int hosts = 0;
+  for (int r = 0; r < projectCount; r++) {
+    bool seen = false;
+    for (int q = 0; q < r; q++) if (projects[q].hostSlot == projects[r].hostSlot) { seen = true; break; }
+    if (!seen) hosts++;
+  }
+  return hosts;
+}
+// Removes `host`'s own rows - its reply REPLACES them, it never appends to them -
+// then makes room for `incoming` new ones: free slots first, then rows reclaimed
+// from any OTHER Mac holding more than its fair share (PROJ_SLOTS / Macs), always
+// from that Mac's least-active end. So neither Mac can fill the list and leave the
+// other with nothing, whichever answers first - which is the bug in a new form if
+// it is left to arrival order. Returns how many incoming rows may be stored.
+int projMakeRoomFor(uint8_t host, int incoming) {
+  int w = 0;
+  for (int r = 0; r < projectCount; r++)
+    if (projects[r].hostSlot != host) { if (w != r) projects[w] = projects[r]; w++; }
+  projectCount = w;
+  const int fair = PROJ_SLOTS / (projHostsListed() + 1);
+  const int want = incoming < PROJ_SLOTS ? incoming : PROJ_SLOTS;
+  while (PROJ_SLOTS - projectCount < want) {
+    int victim = -1, most = fair;
+    for (int r = 0; r < projectCount; r++) {
+      const uint8_t g = projects[r].hostSlot;
+      if (g == host) continue;
+      const int held = projHeldBy(g);
+      if (held > most) { most = held; victim = g; }
+    }
+    if (victim < 0) break;
+    for (int r = projectCount - 1; r >= 0; r--) {
+      if (projects[r].hostSlot != victim) continue;
+      for (int q = r; q < projectCount - 1; q++) projects[q] = projects[q + 1];
+      projectCount--;
+      break;
+    }
+  }
+  const int room = PROJ_SLOTS - projectCount;
+  return want < room ? want : room;
+}
+// Most-active first, the host's own ordering (out.sort((a, b) => b.c - a.c) in
+// host/project-replies.mjs), applied across both Macs. STABLE, so one Mac's list
+// comes out in exactly the order its host sent - including its ties.
+void projSortRows() {
+  for (int i = 1; i < projectCount; i++) {
+    const ProjInfo t = projects[i];
+    int j = i - 1;
+    while (j >= 0 && projects[j].count < t.count) { projects[j + 1] = projects[j]; j--; }
+    projects[j + 1] = t;
+  }
+}
+// Before a fresh request, forget the rows of a Mac that is no longer talking to
+// us - nothing else would ever remove them, and opening one would address a Mac
+// that cannot answer. A live Mac's rows stay until its own reply replaces them.
+void projDropStaleHosts() {
+  int w = 0;
+  for (int r = 0; r < projectCount; r++) {
+    const uint8_t g = projects[r].hostSlot;
+    const bool live = g < MAX_LINKS && hostLinks[g].used &&
+                      millis() - hostLinks[g].lastPayloadMillis <= LINK_STALE_MS;
+    if (live) { if (w != r) projects[w] = projects[r]; w++; }
+  }
+  projectCount = w;
+}
 
 PSessInfo psess[PSESS_SLOTS];
 int psessCount = 0;
@@ -252,7 +341,8 @@ void requestProjects() {
   // paired Mac answers. Whichever Mac replies first wins the render; a
   // second Mac's reply lands as an ordinary re-fetch (wholesale replace) a
   // moment later.
-  sendLineToHost("PROJECTS");
+  projDropStaleHosts();
+  sendLineToHost("PROJECTS");   // BROADCAST on purpose: every Mac lists its own
 }
 
 // THE ONE PLACE THE TIMEOUT ARITHMETIC AND ITS REPORT LIVE, shared by BOTH
@@ -537,12 +627,24 @@ void drawProjectRow(int pos) {
   char meta[16];
   snprintf(meta, sizeof(meta), "%ux %s", dispCount, timeStr);
 
+  // WHICH MAC, only once there are two - dispMacTag() is "" with one, so a
+  // single-Mac row is drawn exactly as before. It takes its width out of the
+  // NAME's budget, never the meta's, so PROJ_META_W's own arithmetic stands.
+  const char* mac = dispMacTag(p.hostSlot);
+  const int nameZoneW = PROJ_ROW_W - 2 * PROJ_PAD - PROJ_META_W;
+  const int macW = *mac ? tft.textWidth(mac) + PROJ_PAD : 0;
+
   char nameBuf[PROJ_NAME_CHARS + 4]; // host caps at 22; +4 for "..." and a NUL
-  fitText(nameBuf, sizeof(nameBuf), p.name, PROJ_ROW_W - 2 * PROJ_PAD - PROJ_META_W);
+  fitText(nameBuf, sizeof(nameBuf), p.name, nameZoneW - macW);
 
   tft.setTextColor(nameColor, COLOR_CARD);
   tft.setTextDatum(TL_DATUM);
   tft.drawString(nameBuf, PROJ_ROW_X + PROJ_PAD, textY);
+  if (*mac) {
+    tft.setTextColor(COLOR_LABEL, COLOR_CARD);
+    tft.setTextDatum(TR_DATUM);
+    tft.drawString(mac, PROJ_ROW_X + PROJ_PAD + nameZoneW, textY);
+  }
 
   tft.setTextColor(COLOR_LABEL, COLOR_CARD);
   tft.setTextDatum(TR_DATUM);
@@ -641,6 +743,7 @@ void projOpenLevel1(int pos) {
 #endif
   strncpy(projOpenKey, projects[pos].key, sizeof(projOpenKey) - 1);
   projOpenKey[sizeof(projOpenKey) - 1] = '\0';
+  projOpenHost = projects[pos].hostSlot;
   psessEverReceived = false;
   psessCount = 0;
   psessTotal = 0;
@@ -710,7 +813,11 @@ void requestProjSessions(const char* key) {
   // readdir before anything noticed.
   char m[PROJ_KEY_MAX + 16];
   snprintf(m, sizeof(m), "PROJSESS %s", key);
-  sendLineToHost(m);
+  // ADDRESSED to the project's own Mac. Broadcast, the OTHER Mac answered too -
+  // "this Mac has no such project" for a folder it does not have - and could
+  // overwrite the real list. sendLineToHost() broadcasts by itself when the slot
+  // is unknown (255), so one Mac behaves exactly as before.
+  sendLineToHost(m, projOpenHost);
 }
 
 // ---------- Level 2 scrolling - projScroll*'s own shape at a second list,
@@ -1004,8 +1111,8 @@ void renderProjLevel0() {
       // cache at all (CLAUDE.md) unless it is signed explicitly, which is
       // exactly why it is a term here rather than an afterthought.
       char sig[48];
-      snprintf(sig, sizeof(sig), "%s|%u|%ld|%d", p.name, (unsigned) p.count, p.tod,
-               projectIsLive(pos) ? 1 : 0);
+      snprintf(sig, sizeof(sig), "%s|%u|%ld|%d|%s", p.name, (unsigned) p.count, p.tod,
+               projectIsLive(pos) ? 1 : 0, dispMacTag(p.hostSlot));
       if (strncmp(sig, projRowSigCache[pos], sizeof(projRowSigCache[pos])) != 0) {
         strncpy(projRowSigCache[pos], sig, sizeof(projRowSigCache[pos]) - 1);
         projRowSigCache[pos][sizeof(projRowSigCache[pos]) - 1] = '\0';
@@ -1272,6 +1379,7 @@ void handlePSessTouch(int sx, int sy) {
     // (deckhand_display.ino) reads it to refuse a headless turn against a
     // session someone may be driving interactively right now.
     scrollProjLive = psess[pos].live != 0;
+    scrollProjHost = projOpenHost;   // SET FIRST, like scrollProjLive: the transcript's own Mac
     scrollOpenById(psess[pos].id, psess[pos].title);
   }
 }

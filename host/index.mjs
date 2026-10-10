@@ -30,7 +30,7 @@ import { pickTranscript, cwdFromLines, SCAN_LINES } from "./project-index.mjs";
 import { makeProjectReplies, countUserTurns } from "./project-replies.mjs";
 import { postToSessionInbox } from "./session-inbox.mjs";
 import { verifyPrompt, verifyTypedAnswer, verifyResume } from "./typed-answer.mjs";
-import { macTag } from "./host-tag.mjs";
+import { macTag, resolveMacTag } from "./host-tag.mjs";
 import { accountKey } from "./account-id.mjs";
 import { toAscii, deviceText } from "./to-ascii.mjs";
 import { askChips } from "./ask-chips.mjs";
@@ -561,8 +561,8 @@ const PAIR_FILE = path.join(os.homedir(), ".claude", "deckhand-secret");
 const MAX_PAIRED_DEVICES = 8;
 let hostId = "";                 // this Mac, e.g. "9f3c1a20"
 let hostLabel = os.hostname().replace(/\.local$/, "");
-// Short display form for the device's session rows. DECKHAND_MAC_TAG overrides it.
-let hostTag = macTag(hostLabel, process.env.DECKHAND_MAC_TAG || "");
+// Its short display form for the device's rows is currentMacTag(), below - re-read per
+// tick so a rename from the menu bar shows without a restart.
 // Which Claude account this Mac polls - see host/account-id.mjs. Refreshed at the
 // OAuth cadence, not per tick: ~/.claude.json can run to megabytes.
 let acctKey = "";
@@ -590,6 +590,21 @@ function currentMacEmoji() {
     // not set
   }
   return resolveMacEmoji({ env: process.env.DECKHAND_MAC_EMOJI || "", file });
+}
+// The person's own name for this Mac (MACTAG, from the menu-bar's "Mac Name..."), the
+// icon's sibling and re-read per tick for the same reason. It exists because the
+// automatic tag is the hostname's last word, and two Macs of one model collide: both
+// of the owner's MacBook Pros published "pro", so two PROJECTS rows - which carry the
+// text tag and not the icon - read identically. See resolveMacTag() for the order.
+const MAC_TAG_FILE = path.join(os.homedir(), ".claude", "deckhand-mac-tag");
+function currentMacTag() {
+  let file = "";
+  try {
+    file = readFileSync(MAC_TAG_FILE, "utf8");
+  } catch {
+    // not set - the hostname's tag
+  }
+  return resolveMacTag({ hostname: hostLabel, env: process.env.DECKHAND_MAC_TAG || "", file });
 }
 let pairedDevices = [];          // [{ name, secret, label, lastSeen }]
 let selectedDevice = "";         // "" = auto (talk to any remembered device)
@@ -5919,6 +5934,13 @@ async function tick(generation = tickGeneration) {
           // only way it learns either fact.
           icon: currentMacEmoji(),
           iconFromEnv: !!resolveMacEmoji({ env: process.env.DECKHAND_MAC_EMOJI || "", file: "" }),
+          // The "Mac Name..." item: the name the device shows, where it came from
+          // ("env" makes the item say the environment pins it, as iconFromEnv does),
+          // and what "Automatic" would give, so the dialog can name it.
+          ...(() => {
+            const t = currentMacTag();
+            return { macTag: t.tag, macTagSource: t.source, macTagAuto: macTag(hostLabel) };
+          })(),
           voice: lastVoice,
           // The pairing dialog's whole state, INCLUDING the code this Mac
           // derived - the menu bar draws it for the user to compare against the
@@ -5953,6 +5975,7 @@ async function tick(generation = tickGeneration) {
     // device whether its option buttons are live or read-only, so it never
     // offers a control that can't do anything.
     const hostEmoji = currentMacEmoji();
+    const hostTag = currentMacTag().tag;
     // MEASURED, NOT ASSUMED. feedChar() clears its whole buffer past 16000 bytes
     // and the remainder of the line lands in the emptied one, so an over-guard
     // line does not merely fail to arrive - it freezes the screen for as long as
@@ -6177,6 +6200,33 @@ setInterval(async () => {
         // disagree with what actually displays.
         const envOverrides = !!resolveMacEmoji({ env: process.env.DECKHAND_MAC_EMOJI || "", file: "" });
         console.log(`Icon: this Mac is now ${want}${envOverrides ? " (but DECKHAND_MAC_EMOJI overrides it)" : ""}.`);
+      }
+      return;
+    }
+    // MACTAG <name> - this Mac's name on the device (from the menu-bar app). Host-side
+    // only, like EMOJI: the device learns it from the payload's hostTag, so the next
+    // tick carries it. A bare MACTAG clears it back to the hostname's automatic tag;
+    // a name with nothing left after sanitising is REFUSED, not taken as a clear - a
+    // typo must never silently undo a name the person chose.
+    if (command === "MACTAG" || command.startsWith("MACTAG ")) {
+      const raw = command.slice(6).trim();
+      const want = macTag("", raw);
+      if (raw && !want) {
+        console.error(`Name: MACTAG ignored - "${raw}" has no letters or digits to keep.`);
+        return;
+      }
+      let saved = true;
+      const write = want ? fs.writeFile(MAC_TAG_FILE, want) : fs.rm(MAC_TAG_FILE, { force: true });
+      await write.catch((err) => {
+        saved = false;
+        console.error(`Name: could not save: ${err.message}`);
+      });
+      if (saved) {
+        const now = currentMacTag();
+        const pinned = now.source === "env" ? " (but DECKHAND_MAC_TAG overrides it)" : "";
+        console.log(want
+          ? `Name: this Mac is now "${want}" on the device${pinned}.`
+          : `Name: cleared - this Mac is "${macTag(hostLabel)}" again, from its hostname${pinned}.`);
       }
       return;
     }

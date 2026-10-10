@@ -1638,7 +1638,7 @@ Verification block is the short form; this is all of them, and every one is gree
 
 ```
 node firmware/deckhand_display/{usage,sessions,settings}-geom-check.mjs
-node firmware/deckhand_display/{sessions-rank,scrollback,palette,commands,textwidth}-check.mjs
+node firmware/deckhand_display/{sessions-rank,scrollback,palette,commands,textwidth,projects-multimac}-check.mjs
 python3 firmware/deckhand_display/{usage-trend,batt-trend}-check.py
 node firmware/deckhand_display/geom-sweep.mjs
 node firmware/board-baseline.mjs --doc-check      # CLAUDE.md's quoted hashes/sizes vs the JSON
@@ -1831,6 +1831,30 @@ reverse (an inverted comparison is the exact regression this whole change exists
 is what the operand names in that last assertion are pinned against — an unpinned `\w+`/`\w+`
 version of it let an inverted comparator pass clean). This split is why the pass line reports
 `9 mirror + 3 source assertions pass` rather than one undifferentiated total.
+
+---
+
+## `projects-multimac-check.mjs` - PROJECTS with two Macs (board 2)
+
+```
+node firmware/deckhand_display/projects-multimac-check.mjs             # structural, every assertion bound to a FUNCTION BODY
+node firmware/deckhand_display/projects-multimac-check.mjs --selftest  # 12/12 injected faults, each naming the assertion that caught it
+```
+
+Guards the fix in `pairing-and-multi-mac.md` ("PROJECTS WITH TWO MACS"): a `projs` reply replaces
+only its own Mac's rows inside a fair share, every row records its Mac, the merged list is sorted,
+attribution trusts a self-identifying payload before the transport, and `PROJSESS` and the
+transcript fetch are ADDRESSED to the project's Mac. The first selftest fault is the original bug
+(`int n = 0,` - the list written from `projects[0]` again), so reverting the fix fails by name.
+
+**One assertion reads BOTH sides of the wire.** The device must order the merged list by the same
+field each host sorts its own reply by, or one Mac's projects silently reorder when the second Mac
+answers. The checker parses the key out of `host/project-replies.mjs` (`out.sort((a, b) => b.c -
+a.c)`) AND out of `projSortRows()`, maps the wire letter to the field, and compares - it
+transcribes neither, so changing either sort alone fails.
+
+**What it does not prove:** that the radio carried any of it. It is all source text. The level-0
+merge has been seen on two real Macs; the addressing of levels 2 and 3 has not - see that doc.
 
 ---
 

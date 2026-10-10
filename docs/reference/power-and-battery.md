@@ -32,6 +32,19 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
 > value is left alone until a meter says which fix is right - a calibration trim on the reading,
 > or a genuinely lower threshold here - because the two answers are incompatible and guessing
 > would bake one in.
+>
+> **NARROWED 2026-10-09, still without a meter.** The x1.8-vs-x2-vs-x2.2 ambiguity above came from
+> reasoning about a MID-RANGE reading, where a cell's voltage is free to be anything. The
+> FULL-CHARGE reading is not free: a 1S charger pins the cell near 4.1-4.2 V. At x1.8 the observed
+> 4165 mV would be a true full of **3748 mV**, at x2.2 **4582 mV** - both impossible for a 1S
+> charger - so the ratio is **2.00 +/- ~1%** (2.017 if the charger ends at 4.20 V, 1.993 if 4.15 V).
+> That favours the second explanation above - the charger genuinely terminates near 4.16 V - over a
+> divider error, but it rests on the assumption of a standard charger rather than on a meter, and
+> `BOARD_BATT_FULL_MV` is still 4180. **Consequence, user-visible and unchanged: board 2 can never
+> show 100% or report FULL**; its ceiling is 96-97% (`pctFromMv(4165)`). A suspected error in the
+> SHAPE of `pctFromMv()` was raised the same day and **withdrawn** - it rested on reading "I found it
+> dead after a week" as "it lasted eight days", which the owner corrected. Nothing has measured the
+> curve's shape; one instrumented discharge would.
 
 #### Board 2's battery divider is CONFIRMED by measurement
 
@@ -246,6 +259,14 @@ and walk away - lands on the WORSE one. A 13-hour absence was measured doing exa
 `PWROFF` record, so it had light-slept the whole time. **The fix was in a path the device rarely
 entered.** `AUTO_POWEROFF_MS` (2h, board 2) now routes it there on its own.
 
+> **THE PREMISE DID NOT SURVIVE A LONGER MEASUREMENT (2026-10-09).** The -3.6 was an 8.9-hour leg
+> on a reconstructed clock; the 69-hour, receipt-bracketed run below measured power-off at
+> **-7.41 mV/h**, which is light idle's -6.9 to within leg-length noise. On that figure the saving
+> this section is named for is about zero, and what auto power-off still buys is only a firm floor
+> for a device whose owner has not turned light idle on. `AUTO_POWEROFF_MS` is left at two hours
+> rather than shortened: shortening it would save almost nothing and cost touch-to-wake. See
+> "LIGHT IDLE ALREADY COSTS ABOUT WHAT POWER-OFF DOES" below.
+
 **THIS REOPENS A DECISION THAT WAS CLOSED, AND THE OLD REASONING IS KEPT IN PLACE rather than
 deleted.** `BOARD_HAS_TOUCH_SLEEP_WAKE`'s note refuses auto-sleep here because this board cannot
 wake itself on a touch, so it would become *"a status display that has silently become a brick
@@ -305,6 +326,11 @@ About HALF - roughly 10%/day where it was 17-21%/day. **The comparison errs agai
 this run sat entirely in 4045..4077 where `pctFromMv()`'s curve is STEEPER (8.3 mV per point) than
 the band the references spanned, so equal current would have read a LARGER mV/h here, not smaller.
 Converting all three to %/h - which normalises that away - gives the same 1.7-2x.
+
+> **SUPERSEDED IN SIZE 2026-09-24 - read "A 69-HOUR POWER-OFF" below.** A receipt-bracketed run
+> 7.8x longer than the `0x7` leg, on `0x37` (this default plus two hygiene bits), measured
+> **1.08 %/h**, against the **0.43 %/h** in this table: 2.5x worse. The table is kept as measured;
+> the longer run is the better figure, and caveats 1 and 2 below are the likely reason they differ.
 
 **THREE CAVEATS, ALL LOAD-BEARING.**
 1. **The elapsed time is RECONSTRUCTED, not measured**: 8.94 h from 1761 host ticks (2.45 h) plus
@@ -449,3 +475,143 @@ tab settled on, and the checker asserts it stays above zero. **There is no room 
 further row has to come from somewhere else. Total cost **+4140 bytes of flash, +288 RAM** (the two
 30-slot rings are 240 of that), measured against a worktree build of HEAD rather than against this
 file's previous figures, which were stale.
+
+#### A 69-HOUR POWER-OFF: -7.41 mV/h, about FOUR DAYS from full
+
+The best power-off figure this board has, and the reason the table above is superseded in size:
+
+| | |
+|---|---|
+| mode | `0x37` |
+| off / awake | **4158 -> 3645 mV**, from the device's own `PWROFF record` (12 settling samples before it compares) |
+| elapsed | **69.2 h** (last collector contact 2026-09-22 02:02 to wake 2026-09-24 23:17) |
+| rate | **-7.41 mV/h**, **1.08 %/h** (96% -> 21%) |
+| full charge lasts | **~3.9 days** (4.3 if the start is taken as the ~4100 mV a cell rests at after unplugging) |
+
+A 40-minute `PWROFF record` three days earlier (4157 -> 4152, -5 mV) gave **-7.4 mV/h** - a spot
+reading at the top of the curve and a three-day average across most of it, agreeing to ~2%.
+"I found it dead after a week" (2026-10-01) is consistent with this, not a contradiction: it went
+flat around day four and sat there. An earlier estimate of 5.4 days, built on an ASSUMED split
+between blanked and powered-off time, was ~30% optimistic and is not repeated here.
+
+Converted at the unverified 3000 mAh, 1.08 %/h is **~25-30 mA** - roughly a thousand times the
+S3's own deep-sleep current. So almost all of it is OTHER chips on rails no pin switches. If the
+cell is smaller than claimed the current is proportionally smaller; only a meter settles it.
+
+#### THE POWER-OFF RECEIPT NOW FINISHES ITSELF
+
+Three of the first power-off measurements were lost to the same missing number - elapsed time -
+which the device cannot hold (deep sleep here ends in a RESET, which clears RTC memory, and
+`hostNowSec()` carries no date). Two changes close it:
+
+- **The receipt is delivered off the cable.** It used to be sent from `setup()`, before any
+  central had subscribed, so with the cable out it went nowhere. It is now armed at boot and sent
+  from `loop()` once a host is LISTENING - `usbLinkActive()` or `bleHostHeard()`, both "the host has
+  sent us a payload within 10 s". `bleConnected` was tried first and lost a receipt on 2026-10-09:
+  it flips at the radio-link level, seconds before the Mac subscribes.
+- **The Mac supplies elapsed.** `host/index.mjs` persists last contact per device to
+  `~/.claude/deckhand-power-state.json` and turns every receipt into one line:
+  `POWEROFF MEASURED: 4158 -> 3645 mV, 513 mV over 69.20 h = 7.41 mV/h (mode 0x37)`.
+
+**Its limits, stated:** elapsed runs from LAST CONTACT to when the receipt is PROCESSED, so it is an
+upper bound twice over - the device may have left range before powering off, and a receipt pulled
+later with `PWROFFMODE` (which re-emits it from RAM) counts the awake time since the wake. Under
+~3 minutes of elapsed it prints NOTHING rather than a refusal - a known silent path, not yet fixed.
+And it cannot see relaxation: legs of 22 and 29 minutes came straight off the charger and read
+**189** and **130 mV/h** - 18-25x the real rate - because the whole leg sat inside the post-charge
+relaxation this file measures above. **Short legs measure the plumbing, never the drain.**
+
+#### THE AMP ENABLE DOES GATE THE AMP - ON BATTERY (2026-10-05)
+
+`board_es3c35p.h` recorded "PIN_AMP_EN GATES NOTHING" - true, and measured ON USB, where U6 sits on
+a real 5 V that a 3.3 V high cannot reach. With the cable OUT, `TONETEST 85` over BLE played trial A
+(pin LOW, 1000 Hz) and was **silent on trial B (pin HIGH, 400 Hz)**, heard and confirmed twice by
+the owner, the second time asked for pitch. On battery U6's supply is lower and 3.3 V reaches it:
+**LOW = amp on, HIGH = amp off**, board 1's own scheme. (The cabled positive control at volume 30
+was inaudible - the device warns that level is quiet - so the battery runs were at 85.)
+
+**This is most of why board 1 "loses almost nothing" and board 2 does not.** Board 1's FM8002E sits
+behind a 10 K pull-up that holds it MUTED, so in deep sleep its floating GPIO keeps it off for free.
+Board 2's wiring intends the same (R26 is a 10 K pull-up) and on battery gets it - the floating pin
+already sits at the OFF level. While AWAKE, though, the firmware deliberately holds the pin at
+`AMP_EN_ENABLE_LEVEL` (LOW) the whole time, so on battery the amp is powered every second the
+device runs. Muting between sounds is NOT done: coming out of shutdown is the hundreds-of-ms C41
+ramp, so every beep would pay it. That trade is open.
+
+#### MORE POWER-OFF STEPS, AND WHAT EACH MEASURED
+
+All are bits of `PWROFFMODE`, all DEFAULT 0, all readable in its reply and in the receipt's `mode=`.
+
+| bit | step | result |
+|---|---|---|
+| `0x40` usbIso | float the USB-Serial-JTAG pads (GPIO19/20; the core ships FLASH and PSRAM sleep-leakage workarounds and none for USB) | **15.29 mV/h**, 2.29 %/h, 30.3 h, 4126 -> 3663 - worse than the control, see the confound below |
+| `0x80` sdIso | float the SDMMC bus (GPIO2..7; a 16 GB card is present and never deselected) | not measured. Cannot cut the card's VDD, so its ceiling may be zero |
+| `0x100` ampLow | drive the amp enable LOW and hold it | **MEASURED WRONG.** Reasoned from the USB-only note; on battery LOW turns the amp ON, so it held it on: **12.01 mV/h**, 1.33 %/h, 21.6 h (elapsed overcounted ~1 h). Kept so that result stays readable |
+| `0x200` ampHigh | drive the amp enable HIGH (the heard OFF level) and hold it | not measured. Expected to match the control, since the floating pin already sits HIGH - it makes that deliberate |
+| `0x400` codecSusp | Espressif's own `es8311_suspend()`, all 15 writes. `CODEC_DOWN` only ever did the last one, leaving `0x0D` = 0x01 (analog ON) and `0x01` = 0x3F (all clocks ON) through every power-off | **Verified to take** - the receipt read back `codec=0D:FC/01:00`; the post-wake register dump was byte-identical to the one before; MICTEST captured live audio after. Current saving NOT measured |
+
+**The confound that blocks every comparison in this table:** the control was measured BEFORE the
+cell ran completely flat (see below), every new leg AFTER, and a cell that lost capacity drains
+faster at the same current. A fresh `0x37` leg on today's cell is the prerequisite, not optional.
+A `0x237` leg (2026-10-06..09) is VOID: it was powered off at 14% and ran through the bottom of the
+curve to 2769 mV. `qspiIsolate` (`0x8`) remains measured-against, as recorded above.
+
+#### LIGHT IDLE ALREADY COSTS ABOUT WHAT POWER-OFF DOES
+
+Blanked with light idle **-6.9 mV/h** (this file, above) against power-off **-7.4** (the 69-hour
+run). Different-length legs, so "about equal" rather than a tie - but it means that on a device with
+light idle on, shortening `AUTO_POWEROFF_MS` saves almost nothing, at the price of needing RESET to
+wake. Both states sit on the same board-level floor; the S3's own sleep current is a rounding error
+in either. `saveLightIdle` still defaults to `false`; the owner's device has it on.
+
+#### RUNNING-STATE SAVINGS: built, the battery effect UNMEASURED
+
+- **Dynamic CPU never worked until 0b66072** (`cpuBoost()` re-armed every loop) - see the CPU
+  section above.
+- **The awake loop yields** `AWAKE_LOOP_IDLE_MS` (4 ms, under the 15 ms touch poll) when no finger
+  is down, so the idle task reaches WAITI.
+- **The awake BLE link carries slave latency** `BLE_AWAKE_LATENCY` (4), pushed on CONNECT - before,
+  parameters were only ever pushed on a sleep/wake transition, so a link that connected awake kept
+  macOS's 15-30 ms with no latency for its life.
+- **Advertising slows to 1000-1200 ms** once a link is up and no pairing is underway (stock was
+  20-40 ms, continuously, while connected). Slowed, never stopped: a second Mac attaches through it.
+
+Die temperature across those steps, same charging state: **42.6 -> 40.6 -> 36.6 C**, part of the last
+step being charge-current taper. No battery figure exists for any of them.
+
+#### CHARGING: about 6.5-7 %/h awake on the cable - roughly 15 hours from empty
+
+Measured 2026-10-09 from the collector, the device awake and on the Mac's cable throughout:
+
+| window | gained | rate |
+|---|---|---|
+| 13:30 -> 14:30 | 3% -> 9% | ~6 %/h |
+| 14:30 -> 17:58 | 9% -> 32% | ~6.6 %/h |
+| 17:58 -> 18:26 | 32% -> 37% | ~7 %/h |
+
+Consistent with 2026-09-25 (~8 %/h, 22% -> 38% in ~2 h), so it is how this board charges, not a
+fault. Compare in %/h: mV/h falls through the flat middle of the curve at a constant current.
+
+Why, as INFERENCE: the charger is small for the cell - this file's heat estimate (`(5V - Vbat) x
+Icharge` ~ half a watt) puts it near **0.4 A**, 7-8 h for 3000 mAh with nothing running - and the
+observed rate implies only **~0.2 A** reaching the cell, consistent with the awake device consuming
+the rest. On the cable it never light-sleeps (light idle is inert while `usbLinkActive()`).
+**NOT ESTABLISHED:** board 2's power path. The `TP4054 + Q3 power-path` note in
+`deckhand_display.ino` describes BOARD 1 (its `BAT_ADC` is IO34); board 2's is undocumented, and the
+3000 mAh and the charge current are both unverified. **Charging continues while powered off** - the
+charger is hardware off USB 5 V - so charging powered off should be faster; one hour each way,
+compared through the receipt's off/awake voltages, would test that directly.
+
+#### THE CELL HAS BEEN RUN FLAT TWICE, AND NOTHING IN FIRMWARE STOPS IT
+
+1. **~2026-09-25 .. 10-01:** powered off and found flat after about a week; read 3277-3309 mV, 0%,
+   on reconnecting, and recovered on charge.
+2. **2026-10-06 .. 10-09:** powered off at **3586 mV (14%)** - the Mac's last reading, 3749 mV, was a
+   CHARGING voltage - and found at **2769-2853 mV**, well below the 3300 mV the curve calls 0%, then
+   left AWAKE on battery until plugged in. It accepted charge (2853 -> 2990 within minutes).
+
+Power-off still draws milliamps and nothing wakes the board to look, so a device powered off low
+simply drains through zero. **Not built, proposed:** a warning at power-off below ~25% ("flat in ~N
+hours, charge first"), an immediate power-off below ~3.45 V while awake, and a Mac notification on a
+low reading. After two deep discharges, a loss of capacity would show as a faster %/h drain on the
+next control leg - which is one more reason that leg comes first.

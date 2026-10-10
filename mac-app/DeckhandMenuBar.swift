@@ -115,6 +115,15 @@ struct HostStatus {
     // both into its heartbeat instead.
     var icon = ""
     var iconFromEnv = false
+    // This Mac's NAME on the device - the text tag beside its sessions and
+    // projects once a second Mac connects - as the host resolved it (see
+    // host/host-tag.mjs's resolveMacTag). macTagSource says WHY: "env"
+    // (DECKHAND_MAC_TAG pins it), "name" (set from this menu), "auto" (the
+    // hostname's last word, which two Macs of one model share). macTagAuto is
+    // what "Automatic" would give, so the dialog can say so before you pick it.
+    var macTag = ""
+    var macTagSource = ""
+    var macTagAuto = ""
     // The wireless-pairing exchange, straight out of the heartbeat. The menu is
     // the ONLY surface for it: the device's own screen shows the other code, and
     // nothing about it is written to host.log.
@@ -145,6 +154,9 @@ func readStatus() -> HostStatus {
             s.remoteAnswer = (obj["remoteAnswer"] as? Bool) ?? true
             s.icon = (obj["icon"] as? String) ?? ""
             s.iconFromEnv = (obj["iconFromEnv"] as? Bool) ?? false
+            s.macTag = (obj["macTag"] as? String) ?? ""
+            s.macTagSource = (obj["macTagSource"] as? String) ?? ""
+            s.macTagAuto = (obj["macTagAuto"] as? String) ?? ""
             if let b = obj["batt"] as? [String: Any] {
                 s.battPct = b["pct"] as? Int
                 s.battState = b["state"] as? Int
@@ -1843,6 +1855,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     let iconItem = NSMenuItem(title: "Mac icon", action: nil, keyEquivalent: "")
     let iconMenu = NSMenu()
     var iconItems: [(String, NSMenuItem)] = []
+    // The icon's sibling: the TEXT this Mac is called on the device. Title and
+    // enabled state are set per refresh (rebuildNameRow), from the heartbeat.
+    let nameItem = NSMenuItem(title: "Mac name\u{2026}", action: #selector(editMacName), keyEquivalent: "")
     // Diffed every refresh, so it must outlive one - a local would announce
     // every asking session on every 3s tick.
     var askWatcher = AskWatcher()
@@ -1911,7 +1926,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // informational and dim them.
         settingsMenu.autoenablesItems = false
         settingsItem.submenu = settingsMenu
-        for it in [remoteItem, colourItem, barItem, soundItem, iconItem, pairItem, loginItem] {
+        for it in [remoteItem, colourItem, barItem, soundItem, iconItem, nameItem, pairItem, loginItem] {
             it.target = self
             it.isEnabled = true
             settingsMenu.addItem(it)
@@ -2162,6 +2177,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         remoteItem.state = s.remoteAnswer ? .on : .off
         rebuildDeviceMenu(s)
         rebuildIconMenu(s)
+        rebuildNameRow(s)
         rebuildPairRow(s)
         startStop.title = s.running ? "Stop Deckhand" : "Start Deckhand"
         // Naming the supervisor matters: with launchd in charge, a stop is permanent
@@ -2426,6 +2442,73 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let s = readStatus()
         try? "REMOTE \(s.remoteAnswer ? "off" : "on")"
             .write(toFile: commandTriggerPath, atomically: true, encoding: .utf8)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.refresh() }
+    }
+
+    // "Mac name: pro" - the setting legible without opening anything, like the
+    // icon row's glyph. Disabled, and saying why, in the two states where a
+    // click could not work: the host is down (nothing would read the command,
+    // and the dialog could not show the current name) or DECKHAND_MAC_TAG pins
+    // it (a rename would be accepted and then never shown).
+    func rebuildNameRow(_ s: HostStatus) {
+        guard s.running else {
+            nameItem.title = "Mac name\u{2026}"
+            nameItem.isEnabled = false
+            return
+        }
+        let shown = s.macTag.isEmpty ? "" : ": \(s.macTag)"
+        switch s.macTagSource {
+        case "env":
+            nameItem.title = "Mac name\(shown) (set by env)"
+            nameItem.isEnabled = false
+        case "auto":
+            nameItem.title = "Mac name\(shown) (automatic)\u{2026}"
+            nameItem.isEnabled = true
+        default:
+            nameItem.title = "Mac name\(shown)\u{2026}"
+            nameItem.isEnabled = true
+        }
+    }
+
+    // Writes MACTAG <name> to the trigger file, the EMOJI/FORGET mechanism. The
+    // host sanitises (letters and digits, lowercase, 6 at most - the device's
+    // fonts are ASCII and the tag lane is measured for six) and persists it to
+    // ~/.claude/deckhand-mac-tag; none of that is repeated here, so the two can
+    // never disagree. A bare MACTAG returns to the automatic name.
+    @objc func editMacName() {
+        let s = readStatus()
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 24))
+        field.stringValue = s.macTagSource == "name" ? s.macTag : ""
+        field.placeholderString = s.macTagAuto.isEmpty ? "home" : s.macTagAuto
+        let a = NSAlert()
+        a.messageText = "Name this Mac"
+        a.informativeText = "Shown on the Deckhand beside this Mac's sessions and projects whenever two Macs are connected, so you can tell them apart. Up to 6 letters or digits; it is shown in lowercase.\n\nEach Mac names itself: set the other one from its own menu."
+        a.accessoryView = field
+        a.addButton(withTitle: "Save")
+        a.addButton(withTitle: "Cancel")
+        // Only offered when there is a name to undo - "automatic" is already
+        // what an unnamed Mac is.
+        if s.macTagSource == "name" {
+            a.addButton(withTitle: s.macTagAuto.isEmpty ? "Use automatic" : "Use automatic (\(s.macTagAuto))")
+        }
+        // A menu-bar app is never the active one, so without this the field
+        // would not take the keyboard until clicked.
+        NSApp.activate(ignoringOtherApps: true)
+        a.window.initialFirstResponder = field
+        let r = a.runModal()
+        let line: String
+        switch r {
+        case .alertFirstButtonReturn:
+            let typed = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Save with an empty field is "no name", the same as Use automatic.
+            line = typed.isEmpty ? "MACTAG" : "MACTAG \(typed)"
+        case .alertThirdButtonReturn:
+            line = "MACTAG"
+        default:
+            return
+        }
+        try? line.write(toFile: commandTriggerPath, atomically: true, encoding: .utf8)
+        refresh()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.refresh() }
     }
 
