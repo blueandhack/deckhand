@@ -193,6 +193,24 @@ const SOURCE_FAULTS = [
     (t) => t.replace(/if \(BOARD_HAS_PROJECTS && !sessionsScrollActive\(\) && sessionTotalAll > sessionCount\) \{/,
                      "if (BOARD_HAS_PROJECTS && !sessionsScrollActive() && sessionsTotal > sessionCount) {"),
     "gated on sessionTotalAll"],
+  // The empty-list placement, as it shipped and three ways it could regress.
+  ["the empty-list count line re-derives its own y again (the original +20 overlap)",
+    "sessions.ino",
+    (t) => t.replace(/return sessionsEmptyMsgY\(\) \+ uiLineH\(2\) \/ 2 \+ SESSION_EMPTY_COUNT_GAP;/,
+                     "return (CONTENT_Y + contentBottom()) / 2 + 20;"),
+    "both read sessionsEmptyMsgY()"],
+  ["the empty-list count line is left-aligned under the centred message again",
+    "sessions.ino",
+    (t) => t.replace(/emptyList \? TC_DATUM : TL_DATUM/, "TL_DATUM"),
+    "is CENTRED under the centred message"],
+  ["board 2's empty-list gap is zeroed, so the count line clears into the message",
+    "board_es3c35p.h", (t) => t.replace(/const int SESSION_EMPTY_COUNT_GAP = 12;/, "const int SESSION_EMPTY_COUNT_GAP = 0;"),
+    "at or below"],
+  ["the empty message moves to the 24px face and countLineY() does not follow",
+    "sessions.ino",
+    (t) => t.replace(/setUIFont\(2\);(\s*tft\.setTextColor\(COLOR_LABEL, COLOR_BG\);\s*tft\.setTextDatum\(MC_DATUM\);\s*tft\.drawString\("No active)/,
+                     "setUIFont(3);$1"),
+    "message's OWN font"],
   // The board gate dropped, which is how it shipped: board 1 drawing a line that
   // names a tab it does not have.
   ["the count line loses its BOARD_HAS_PROJECTS gate, so board 1 points at a tab it has not got",
@@ -4774,6 +4792,42 @@ for (const b of [1, 2]) {
     chk(/if \(BOARD_HAS_PROJECTS &&/.test(rlBody),
         "the count line is gated on BOARD_HAS_PROJECTS - board 1 has no PROJECTS tab for it " +
         "to point at, so on that board the branch (and its format string) must fold away");
+    // ---- the count line on an EMPTY list ----
+    // It used to re-derive "the middle plus a bit" on its own (+20 against the
+    // message's +10): on board 2 its top sat 2px under the 16px "No active" line,
+    // LEFT-aligned under a centred message. Every number below is parsed - the
+    // message's offset from sessionsEmptyMsgY(), both font ids, the gap per board.
+    const emBody = fnSrc("static inline int sessionsEmptyMsgY() {");
+    const emOff = (/return \(CONTENT_Y \+ contentBottom\(\)\) \/ 2 \+ (\d+);/.exec(emBody) || [])[1];
+    const clEmpty = /if \(sessionCount == 0\)\s*return sessionsEmptyMsgY\(\) \+ uiLineH\((\d)\) \/ 2 \+ SESSION_EMPTY_COUNT_GAP;/.exec(clBody);
+    // The draw reads it ONCE (board 1's flash - see the firmware's comment): the
+    // sparkle sits N above it and the message at cy + N, the SAME N, both parsed.
+    const msgDraw = /int cy = sessionsEmptyMsgY\(\) - (\d+);[\s\S]*?setUIFont\((\d)\);[^;]*;[^;]*;\s*tft\.drawString\("No active Claude Code sessions", tft\.width\(\) \/ 2, cy \+ (\d+)\);/.exec(rlBody);
+    chk(emOff !== undefined && clEmpty && msgDraw && msgDraw[1] === msgDraw[3],
+        "the empty list's message AND countLineY()'s empty branch both read sessionsEmptyMsgY() - " +
+        "two separate \"middle plus a bit\" derivations is how the line landed on the message");
+    if (emOff !== undefined && clEmpty && msgDraw) {
+      chk(clEmpty[1] === msgDraw[2],
+          `countLineY() clears the message by the message's OWN font (uiLineH(${clEmpty[1]}) vs ` +
+          `the draw's setUIFont(${msgDraw[2]})) - a face change would otherwise overlap again`);
+      const msgY = Math.floor((c.CONTENT_Y + contentBottom) / 2) + +emOff;
+      const msgH = lineHB(b, +msgDraw[2]);
+      const msgBottom = msgY - Math.floor(msgH / 2) + msgH;
+      const top = msgY + Math.floor(lineHB(b, +clEmpty[1]) / 2) + c.SESSION_EMPTY_COUNT_GAP;
+      // drawIfChanged clears from y - 1, so that row must already be below the message.
+      chk(top - 1 >= msgBottom,
+          `board ${b}: the empty-list count line's cleared box starts at y ${top - 1}, at or below ` +
+          `the "No active" message's bottom edge ${msgBottom} (SESSION_EMPTY_COUNT_GAP ` +
+          `${c.SESSION_EMPTY_COUNT_GAP}) - above it, the count line erases the message's last row`);
+      chk(top + c.SESSION_OVERFLOW_H <= contentBottom,
+          `board ${b}: the empty-list count line (y ${top}) passes the draw's own fit gate ` +
+          `(+${c.SESSION_OVERFLOW_H} <= ${contentBottom}) - failing it, the line is silently not drawn`);
+    }
+    chk(/emptyList \? tft\.width\(\) \/ 2 : SESSION_ROW_X \+ 2/.test(rlBody) &&
+        /emptyList \? TC_DATUM : TL_DATUM/.test(rlBody) &&
+        /if \(emptyList\) padLeftTo\(buf, sizeof\(buf\), strlen\(buf\) \+ \(26 - strlen\(buf\)\) \/ 2\);\s*padTo\(buf, sizeof\(buf\), 26\);/.test(rlBody),
+        "the empty-list count line is CENTRED under the centred message (TC_DATUM at width/2, " +
+        "padded on both sides to one fixed 26-cell box so a shorter count leaves no ghost)");
   }
   // THE MARGIN, PARSED FROM THE SKETCH RATHER THAN CHOSEN HERE. "Holds its worst
   // case" is the assertion that let both signature caches drift to within a

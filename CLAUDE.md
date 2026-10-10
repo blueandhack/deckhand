@@ -53,7 +53,7 @@ panel, which reads as a layout bug rather than a build mistake.
 | mic / beeper | both fitted and working | both work, via the ES8311 |
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64 |
-| size today | flash 1428896, RAM 72284 | flash 1178048, RAM 66660 |
+| size today | flash 1428896, RAM 72284 | flash 1179552, RAM 66780 |
 
 **FOUR of the six numbers this file quotes about the binaries are BOUND and two are not.**
 `node firmware/board-baseline.mjs --doc-check` asserts the two **hashes** and the two **sizes**
@@ -214,7 +214,15 @@ own (1,171,184 -> 1,171,648, no RAM - recorded only in the numbers at the time),
 image measured 64 bytes MORE than the two deltas summed: most likely the image's segment
 padding, which is not additive, and NOT verified section by section. Board 1 measured
 byte-identical to the transitions baseline - neither change reaches its code. The merged image
-was not flashed: the board was running another branch at the time. `arduino-cli`'s
+was not flashed: the board was running another branch at the time. **Board 2 then rose 120 bytes
+of RAM on 2026-10-09** (66,660 -> 66,780, branch `projects-multi-mac`: PROJECTS with two Macs, and
+the empty SESSIONS list's count line), all of it the multi-Mac fields: `ProjInfo.hostSlot` is one
+byte that alignment makes four, x `PROJ_SLOTS` (24) = 96 - `nm` puts `projects[]` at 3,936 bytes,
+164 a row - and `BleLink.hostId[12]` x `MAX_LINKS` (2) = 24. The three new one-byte globals
+(`projOpenHost`, `scrollProjHost`, `curRxBleSlot`) land in existing padding. Flash 1,178,048 ->
+1,179,552 (+1,504) for both changes. **Board 1 measured byte-identical:** every multi-Mac line is
+behind `BOARD_HAS_PROJECTS`, and the count line's helper is `static inline` and read once, because
+an out-of-line copy called twice measured +80 bytes on board 1 for a line it never draws. `arduino-cli`'s
 "Sketch uses N" is a
 slightly smaller number than the `.bin` - the same image without its trailing padding - so do
 not expect the compile summary to print these.
@@ -277,7 +285,7 @@ arduino-cli compile --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app" \
 node firmware/board-baseline.mjs /tmp/b1/deckhand_display.ino.bin --check 1
 ```
 
-Today: `d59aa9697ec52ad2...`, size 1428896 (board 2: `c3b2868733784871...`, size 1178048).
+Today: `d59aa9697ec52ad2...`, size 1428896 (board 2: `0a66806766cd8d77...`, size 1179552).
 
 It compares **BYTES, not sizes**, and that matters: a default argument on a shared function
 once changed board 1's codegen with **no size change whatsoever** - invisible to a size

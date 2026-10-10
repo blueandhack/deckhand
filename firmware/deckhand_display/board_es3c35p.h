@@ -1422,6 +1422,11 @@ const int SESSION_SUB_LANE_W = SESSION_ROW_W - SESSION_NAME_DX - 12;
 // contentBottom() - SESSION_OVERFLOW_H + 4, board 1's own relationship, so both
 // boards keep the same 1-row overhang into the footer's padding and no more.
 const int SESSION_OVERFLOW_H = 19;
+// Empty list only: the gap from the "No active Claude Code sessions" line's bottom
+// edge to the "N more in PROJECTS" line under it. 12 is the gap the sparkle already
+// keeps ABOVE that message (sparkle bottom cy+10, message top cy+30-8), so the three
+// read as one stack. The count line used to sit 2px under the message, left-aligned.
+const int SESSION_EMPTY_COUNT_GAP = 12;
 
 // ---------- Projects tab: the project list (level 1) ----------
 // EVERY ROW IS THE SAME HEIGHT - unlike SESSIONS there is no ladder here, no

@@ -1774,8 +1774,17 @@ void drawSessionRow(int pos) {
 // Only meaningful outside the scrolling regime (see the caller): with zero
 // sessions there is no "last row" to float under, so it sits under the empty-state
 // message instead - the same vertical centre that message itself uses.
+// The empty list's message line (MC_DATUM centre). ONE derivation, read by the
+// draw below AND by countLineY(): the count line used to re-derive "the middle
+// plus a bit" on its own (+20 against the message's +10), which on board 2 put
+// its top 2px under a 16px message and LEFT-aligned beneath a centred one.
+// INLINE, and read ONCE in the draw: board 1 never shows the count line, and as an
+// out-of-line function called twice this cost it 80 bytes of flash for nothing.
+static inline int sessionsEmptyMsgY() { return (CONTENT_Y + contentBottom()) / 2 + 10; }
 int countLineY() {
-  if (sessionCount == 0) return (CONTENT_Y + contentBottom()) / 2 + 20;
+  // Under the message's own bottom edge by the gap the sparkle keeps above it.
+  if (sessionCount == 0)
+    return sessionsEmptyMsgY() + uiLineH(2) / 2 + SESSION_EMPTY_COUNT_GAP;
   const int lastPos = sessionCount - 1;
   return sessionRowYAt(lastPos) + sessionRowHAt(lastPos) + SESSION_ROW_GAP;
 }
@@ -1820,7 +1829,7 @@ void renderSessionsList() {
     overflowCache[0] = '\0';
     countLineCache[0] = '\0'; // Task 8: the count line's Y is a LAYOUT property too
     if (sessionCount == 0) {
-      int cy = (CONTENT_Y + contentBottom()) / 2 - 20;
+      int cy = sessionsEmptyMsgY() - 30;   // the sparkle, 30 above the message
       drawSparkle(tft.width() / 2, cy, 10, COLOR_LABEL);
       setUIFont(2);
       tft.setTextColor(COLOR_LABEL, COLOR_BG);
@@ -2084,6 +2093,11 @@ void renderSessionsList() {
   if (BOARD_HAS_PROJECTS && !sessionsScrollActive() && sessionTotalAll > sessionCount) {
     char buf[32];
     snprintf(buf, sizeof(buf), "%d more in PROJECTS", sessionTotalAll - sessionCount);
+    // With no rows it sits under the CENTRED empty message, so it is centred too:
+    // padded on BOTH sides to the same 26 cells, so the box drawIfChanged clears
+    // is still one fixed width and a shorter count leaves no ghost at either end.
+    const bool emptyList = sessionCount == 0;
+    if (emptyList) padLeftTo(buf, sizeof(buf), strlen(buf) + (26 - strlen(buf)) / 2);
     padTo(buf, sizeof(buf), 26);
     int cy = countLineY();
     // Fits WHOLLY inside the list area or not drawn at all - the same rule the
@@ -2093,8 +2107,9 @@ void renderSessionsList() {
     // what makes the line cost nothing on a full list: with it off the bottom,
     // this is false and nothing is drawn - no row reserved, no space spent.
     if (cy + SESSION_OVERFLOW_H <= contentBottom()) {
-      drawIfChanged(countLineCache, sizeof(countLineCache), buf, SESSION_ROW_X + 2,
-                    cy, 1, 1, COLOR_LABEL, COLOR_BG);
+      drawIfChanged(countLineCache, sizeof(countLineCache), buf,
+                    emptyList ? tft.width() / 2 : SESSION_ROW_X + 2,
+                    cy, 1, 1, COLOR_LABEL, COLOR_BG, emptyList ? TC_DATUM : TL_DATUM);
     } else {
       // Off the bottom. Cleared rather than left alone so that a layout change
       // that brings it back on screen (a session ends, shortening the list) does
