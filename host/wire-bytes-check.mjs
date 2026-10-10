@@ -91,7 +91,7 @@ function readCaps(hookSrc, hostSrc, fwSrc, voiceSrc, chipsSrc, b2Src) {
   c.promptChars = grab(hostSrc, "the last-PROMPT cap (host)", /prompt: deviceText\(tx\.prompt, (\d+)\)/);
   c.voiceTextChars = grab(hostSrc, "VOICE_TEXT_MAX (host)", /const VOICE_TEXT_MAX = (\d+);/);
   c.voiceReplyChars = grab(hostSrc, "VOICE_REPLY_MAX (host)", /const VOICE_REPLY_MAX = (\d+);/);
-  c.tagChars = grab(hostSrc, "the host TAG cap (host-tag)", /hostTag = macTag\(/, () => 6);
+  c.tagChars = grab(hostSrc, "the host TAG cap (host-tag: currentMacTag -> resolveMacTag -> macTag, all capped at 6 - host-tag-check.mjs)", /const hostTag = currentMacTag\(\)\.tag;/, () => 6);
   // THE FULL-PAYLOAD SET, WHICH IS NO LONGER THE SAME AS THE SLICE. The host now
   // slices SESSION_ROW_CAP (20) records and builds only the first SESSION_FULL_SLOTS
   // (6) of them as FULL records; the rest ship lean - no ask, no chips, no optDescs.

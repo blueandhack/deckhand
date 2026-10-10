@@ -654,3 +654,32 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
   `DECKHAND_MAC_TAG` key to its `EnvironmentVariables` dict on EACH Mac and restarting its service. Not done: what each Mac is
   called is the owner's choice. Drawing the icon on a PROJECTS row as well is the other fix, and
   is not built.
+
+  **BUILT THE SAME DAY: `Settings > Mac name...` in the menu-bar app** (the paragraph above is kept
+  as written; its "not done" was true when it was). The person names the Mac; nothing is guessed.
+  - **The order is `DECKHAND_MAC_TAG` > the person's name > the hostname's last word**
+    (`resolveMacTag()` in `host/host-tag.mjs`). The env var keeps winning because it always has;
+    a name set from the menu sits between it and the guess. Every source goes through `macTag()`,
+    so all three are sanitised to lowercase letters and digits and capped at 6 alike - the
+    device's fonts are ASCII and its tag lane is measured for six (`host-tag-check.mjs` asserts
+    the cap from each source, and that a name is sanitised WHOLE, never split like a hostname).
+  - **The wire is the icon's.** The dialog writes `MACTAG <name>` to the trigger file; the host
+    intercepts it (never forwarded to a device), sanitises, and persists it to
+    `~/.claude/deckhand-mac-tag`; `currentMacTag()` re-reads that per tick, so the next payload's
+    `hostTag` carries it - no restart, no plist. A bare `MACTAG` (Save with an empty field, or "Use
+    automatic") deletes the file. A name with nothing left after sanitising (`!!!`) is REFUSED by
+    name rather than read as a clear, so a typo cannot silently undo a chosen name.
+  - **The menu row says what the device says**: `Mac name: pro (automatic)...`, `Mac name:
+    home...`, or `Mac name: work (set by env)` DISABLED - the heartbeat carries `macTag`,
+    `macTagSource` and `macTagAuto` for it, the same reason `iconFromEnv` exists. Disabled too while
+    the host is down, when nothing would read the command.
+  - **Each Mac names ITSELF.** The other Mac needs this host and menu-bar build to get the item.
+
+  **Measured 2026-10-09, end to end on this Mac**, with the worktree's host run through
+  `DeckhandBLE.app` in place of the service and then the service restored: `MACTAG Home!` logged
+  `Name: this Mac is now "home" on the device.`, the file held `home`, the heartbeat read
+  `macTag home / name`, `--menu-dump` printed `Mac name: home...`, and a board-2 capture of PROJECTS
+  showed this Mac's rows tagged `home` beside the other Mac's `pro` - the two `deckhand` rows
+  distinguishable for the first time. `MACTAG !!!` was refused and kept `home`; bare `MACTAG`
+  removed the file and the row returned to `pro (automatic)`. **NOT exercised:** the dialog
+  itself (an `NSAlert` with a text field - no way to click it from here), and the other Mac.

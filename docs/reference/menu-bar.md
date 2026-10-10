@@ -120,6 +120,11 @@ Four things are load-bearing:
   and `--icon-preview` now renders colour rows AS-IS while still faking the system tint for
   the template rows - painting our own tint over a coloured icon would show a colour the
   bar never renders.
+- **`Settings > Mac name...` names this Mac on the device** - the text tag beside its sessions
+  and projects once a second Mac connects - because the automatic tag (the hostname's last word)
+  collides between two Macs of one model. It writes `MACTAG <name>` to the trigger file, like the
+  icon picker's `EMOJI`; the row's title carries the current name and where it came from. See
+  [`pairing-and-multi-mac.md`](pairing-and-multi-mac.md), "PROJECTS WITH TWO MACS".
 - **The menu is grouped by KIND: the top level is actions, `Settings ▸` holds every
   preference.** Answer-prompts, Menu bar shows, Needs-input sound and Launch at login used
   to sit in the top-level row, which had grown to three consecutive submenus and pushed
