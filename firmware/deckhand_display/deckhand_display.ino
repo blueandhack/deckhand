@@ -940,8 +940,17 @@ bool saveLightIdle = false;
 // combination and the evidence is against it.
 // 0 remains reachable and still means the original teardown, so the baseline can
 // always be reproduced on the same cell.
+// DEFAULT 0x3E37 SINCE 2026-10-11, AND AGAIN BECAUSE IT WAS MEASURED: three receipt-
+// bracketed legs, same protocol, the old behaviour (0x36) against this combination -
+// 215 mV in ~11.6 h against 111 mV in 14.86 h, every receipt confirming each step
+// took (pm=0x88 dstb=ok codec=0D:FC/01:00 sd=standby). Best estimate ~75% less drain;
+// the five new bits were measured TOGETHER and never bisected, so none of them is
+// individually credited. QSPI_ISOLATE, USB_ISOLATE, SD_ISOLATE and AMP_LOW stay out:
+// none was in the measured combination, and AMP_LOW is measured WRONG.
 uint32_t pwrOffMode = PWROFF_PANEL_SLEEP | PWROFF_IC_RESET | PWROFF_CODEC_DOWN
-                    | PWROFF_LED_LOW | PWROFF_RTC_OFF;
+                    | PWROFF_LED_LOW | PWROFF_RTC_OFF
+                    | PWROFF_AMP_HIGH | PWROFF_CODEC_SUSPEND | PWROFF_PANEL_DSTB
+                    | PWROFF_QUIET_PINS | PWROFF_SD_STANDBY;
 // What the last power-off left behind, read and CLEARED on the next boot. The
 // device cannot time its own outage - a hard reset takes RTC memory with it - so
 // this carries the mV and the mode and lets the MAC's clock supply the elapsed

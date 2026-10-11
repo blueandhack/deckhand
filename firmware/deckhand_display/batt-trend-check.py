@@ -804,7 +804,10 @@ _dflt = re.search(r"uint32_t\s+pwrOffMode\s*=([^;]*);", MAIN)
 check("the teardown default is an expression of named bits, not a literal",
       _dflt is not None and "PWROFF_" in _dflt.group(1)
       and not re.search(r"=\s*0x?[0-9A-Fa-f]+\s*$", _dflt.group(1).strip()))
-for nm in ("PWROFF_PANEL_SLEEP", "PWROFF_IC_RESET", "PWROFF_CODEC_DOWN"):
+for nm in ("PWROFF_PANEL_SLEEP", "PWROFF_IC_RESET", "PWROFF_CODEC_DOWN",
+           # measured together as 0x3E37, 2026-10-10..11 (docs: power-and-battery.md)
+           "PWROFF_AMP_HIGH", "PWROFF_CODEC_SUSPEND", "PWROFF_PANEL_DSTB",
+           "PWROFF_QUIET_PINS", "PWROFF_SD_STANDBY"):
     check(f"the default keeps the MEASURED bit {nm}",
           _dflt is not None and nm in _dflt.group(1))
 # The one step the evidence is AGAINST must stay out of the default - it was
@@ -1161,8 +1164,8 @@ check("PWROFFMODE reports it, or the leg cannot be attributed", "ampLow=%d" in M
 # sleep, and its leg measured worse than the control. ampHigh is the fix.
 check("the HIGH step exists as its own bit", "PWROFF_AMP_HIGH" in _val)
 check("...distinct from every other step, ampLow included", len(set(_val.values())) == len(_val))
-check("...and DEFAULT OFF like every step - silence is heard, the milliamps are not "
-      "measured yet", "PWROFF_AMP_HIGH" not in _dflt)
+check("...and DEFAULT ON since the 0x3E37 legs measured it (as part of the combination)",
+      "PWROFF_AMP_HIGH" in _dflt)
 _ah = re.search(r"if \(pwrOffMode & PWROFF_AMP_HIGH\) \{(.*?)\n  \}", POWER, re.S)
 _ah = _ah.group(1) if _ah else ""
 check("it drives the pin HIGH - the level that silenced the amp on battery - and HOLDS "
@@ -1184,7 +1187,8 @@ check("PWROFFMODE reports ampHigh, or the leg cannot be attributed", "ampHigh=%d
 # (clocks ON) surviving every power-off. The sequence is PARSED out of power.ino.
 check("the codec-suspend step exists as its own bit", "PWROFF_CODEC_SUSPEND" in _val)
 check("...distinct from every other step", len(set(_val.values())) == len(_val))
-check("...and DEFAULT OFF until a leg measures it", "PWROFF_CODEC_SUSPEND" not in _dflt)
+check("...and DEFAULT ON since the 0x3E37 legs measured it (as part of the combination)",
+      "PWROFF_CODEC_SUSPEND" in _dflt)
 _cs = re.search(r"esSuspend\[\]\[2\] = \{(.*?)\};", POWER, re.S)
 _seq = [(int(a,16), int(b,16)) for a, b in re.findall(r"\{0x([0-9A-Fa-f]+), 0x([0-9A-Fa-f]+)\}",
                                                        _cs.group(1))] if _cs else []
@@ -1247,7 +1251,14 @@ check("deepStandby() writes 0x4F = 0x01 through the framed path",
 _new3 = ("PWROFF_PANEL_DSTB", "PWROFF_QUIET_PINS", "PWROFF_SD_STANDBY")
 check("the three new steps exist as bits", all(b in _val for b in _new3))
 check("...distinct from every other step", len(set(_val.values())) == len(_val))
-check("...and DEFAULT OFF until a leg measures them", not any(b in _dflt for b in _new3))
+check("...and DEFAULT ON since the 0x3E37 legs measured them (together, not bisected)",
+      all(b in _dflt for b in _new3))
+# The comment that justifies the default names its value; the value is COMPUTED from the
+# parsed bits, so the note and the code cannot drift apart silently.
+_dnote = re.search(r"DEFAULT (0x[0-9A-Fa-f]+) SINCE 2026-10-11", MAIN)
+_dval = sum(_val[b] for b in re.findall(r"PWROFF_[A-Z_]+", _dflt))
+check(f"the default's own note names the value the bits compute to (0x{_dval:X})",
+      _dnote is not None and int(_dnote.group(1), 16) == _dval)
 check("PWROFFMODE reports all three",
       all(f in MAIN for f in ("panelDstb=%d", "quietPins=%d", "sdStandby=%d")))
 # DEEP STANDBY only from a sleep-in that SUCCEEDED: 4Fh is "only effect at sleep in mode".
