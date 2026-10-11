@@ -281,14 +281,16 @@ void loadPwrOffRecord() {
   if (cd == 0xFFFF)      snprintf(codec, sizeof(codec), "skipped");
   else if (cd == 0xFFFE) snprintf(codec, sizeof(codec), "UNREAD");
   else snprintf(codec, sizeof(codec), "0D:%02X/01:%02X", cd >> 8, cd & 0xFF);
-  for (int i = 0; i < 12; i++) sampleBattery();       // settle before comparing
+  // The wake end is setup()'s first reading, taken before anything was switched on
+  // (bootRestMv) - no longer twelve samples taken after the backlight was at 100%.
+  const int awakeMv = bootRestMv > 0 ? bootRestMv : batteryMv;
   snprintf(pwrOffReport, sizeof(pwrOffReport),
            "PWROFF record: off at %umV mode=0x%lX sleepPanel=%s pm=%s dstb=%s codec=%s sd=%s; "
            "awake at %dmV (%+d mV). Elapsed is the Mac's to supply - a reset takes RTC with it.",
            (unsigned) mv, (unsigned long) mode,
            ps == 2 ? "skipped" : (ps ? "ok" : "FAILED"), pmS,
            ds == 2 ? "skipped" : (ds ? "ok" : "FAILED"), codec, sdS,
-           batteryMv, batteryMv - (int) mv);
+           awakeMv, awakeMv - (int) mv);
   prefs.remove("poMv");
 }
 void saveLightIdleSetting() { prefs.putBool("lightIdle", saveLightIdle); }
@@ -380,6 +382,22 @@ void wakeUp() {
   // thing lit is whatever the panel held mid-sequence.
   ledcWrite(TFT_BL_PIN, brightnessPct * 255 / 100);
 }
+#if !BOARD_USES_TFT_ESPI
+// RAW, NOT THE EMA: the average of n reads taken NOW. sampleBattery()'s batteryMv is
+// an EMA of the last eight one-second samples, so at any moment it still carries
+// several seconds of whatever the load WAS - at power-off, the lit screen. The two
+// ends of a power-off receipt are both read with this, each under the smallest load
+// the board ever has while running, so their difference is the cell rather than two
+// different loads.
+int batteryRestMv(int n) {
+  long sum = 0;
+  for (int i = 0; i < n; i++) {
+    sum += analogReadMilliVolts(BAT_ADC_PIN);
+    delayMicroseconds(200);
+  }
+  return (int) (sum / n) * BOARD_BAT_MV_SCALE;
+}
+#endif
 void sampleBattery() {
   long sum = 0;
   for (int i = 0; i < 4; i++) sum += analogReadMilliVolts(BAT_ADC_PIN);
@@ -1375,6 +1393,13 @@ void enterDeepSleep() {
     };
     for (unsigned i = 0; i < sizeof(sd) / sizeof(sd[0]); i++) rtc_gpio_isolate(sd[i]);
   }
+  // 9. THE OFF READING, AGAIN AND LAST. Record-first above keeps a value in case a
+  //    step hangs, but it is the EMA, read seconds after the screen went dark. This
+  //    one is raw and taken after every step - backlight, panel, codec, amp, touch,
+  //    card all off - so the load is the S3 and its radio, matching the wake reading
+  //    setup() now takes before anything is switched on. Same load at both ends is
+  //    what makes a short power-off run measure the cell instead of the load.
+  prefs.putUShort("poMv", (uint16_t) batteryRestMv(32));
   // NOT powering down VDD_SPI here, and that is a REVERSAL of an earlier guess.
   // This core already sets CONFIG_ESP_SLEEP_{PSRAM,FLASH}_LEAKAGE_WORKAROUND and
   // CONFIG_ESP_SLEEP_MSPI_NEED_ALL_IO_PU, and esp_deep_sleep_start() powers the

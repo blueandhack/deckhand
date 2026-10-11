@@ -956,7 +956,10 @@ uint32_t pwrOffMode = PWROFF_PANEL_SLEEP | PWROFF_IC_RESET | PWROFF_CODEC_DOWN
 // this carries the mV and the mode and lets the MAC's clock supply the elapsed
 // time. Retained rather than only printed, because a board that powered off on
 // battery has no listener at boot.
-char pwrOffReport[256] = {0};   // 176 until pm=/dstb=/sd= joined the receipt
+char pwrOffReport[256] = {0};
+#if !BOARD_USES_TFT_ESPI
+int bootRestMv = 0;   // the cell before setup() switched anything on - see setup()
+#endif   // 176 until pm=/dstb=/sd= joined the receipt
 #if !BOARD_USES_TFT_ESPI
 // The record is BUILT at boot and SENT once a host can actually hear it, which
 // are not the same moment. sendLineToHost() fans out to Serial and to BLE, but
@@ -6829,6 +6832,16 @@ void setupBLE() {
 }
 
 void setup() {
+#if !BOARD_USES_TFT_ESPI
+  // THE WAKE READING, FIRST - before the backlight, the amp, the radio or the panel
+  // draw anything. Every power-off receipt until 2026-10-11 took its "awake at" after
+  // setBacklight(100) and audioOutBegin() (amp ON), i.e. under full load: unplugging
+  // a full board showed what that costs in one sample, 4158 -> 4074 mV through ~0.3
+  // ohm. Here the only load is the S3 itself, which is the closest a running board
+  // gets to the cell's rest voltage - and it is what the power-off end of the
+  // receipt is now matched against (see enterDeepSleep's last step).
+  bootRestMv = batteryRestMv(32);
+#endif
   // 115200, and DO NOT RAISE IT. Raising this was tried specifically to speed up
   // audio transfer (a 4s 16kHz mu-law take is ~64KB -> ~85KB of base64, ~9s here)
   // and every higher rate LOSES DATA on this CH340 + macOS combination. Measured,

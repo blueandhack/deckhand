@@ -1310,6 +1310,31 @@ check("poPm/poDs/poSd are reset to 'did not run' at record-first, so a skipped s
 check("the receipt prints all three (pm=, dstb=, sd=)",
       all(f in POWER for f in ("pm=%s", "dstb=%s", "sd=%s")))
 
+# ---- BOTH ENDS OF THE RECEIPT UNDER THE SAME, SMALLEST LOAD (2026-10-11) ----
+# The wake reading used to be twelve EMA samples taken AFTER setBacklight(100) and
+# audioOutBegin() (amp on) - full load - while the off reading was an EMA of samples
+# taken with the screen lit. Unplugging a full board showed the size of it in one
+# sample: 4158 -> 4074 mV. Now both ends are raw averages under the S3's own load.
+_brm = fnbody(POWER, "int batteryRestMv(int n)")
+check("batteryRestMv() averages RAW reads (analogReadMilliVolts), never the EMA",
+      _brm is not None and "analogReadMilliVolts(BAT_ADC_PIN)" in _brm and "batteryMv" not in _brm)
+check("...scaled by the board's divider constant, not a literal",
+      _brm is not None and "* BOARD_BAT_MV_SCALE" in _brm)
+_set = strip_comments(_body(MAIN, "void setup()") or "")
+check("setup() takes the wake reading BEFORE the backlight goes to 100%",
+      before(_set, "bootRestMv = batteryRestMv(", "setBacklight(100)"))
+check("...and BEFORE the amp is switched on",
+      before(_set, "bootRestMv = batteryRestMv(", "audioOutBegin()"))
+_lpr = strip_comments(fnbody(POWER, "void loadPwrOffRecord()") or "")
+check("the receipt's wake end is that boot reading, not samples taken under load",
+      "bootRestMv" in _lpr and "sampleBattery()" not in _lpr and "awakeMv, awakeMv - (int) mv" in _lpr)
+check("the off reading is taken raw and LAST - after the final teardown step, with "
+      "everything already off",
+      before(edc, "if (pwrOffMode & (PWROFF_SD_ISOLATE | PWROFF_SD_STANDBY))",
+             'prefs.putUShort("poMv", (uint16_t) batteryRestMv('))
+check("...while record-first still writes one first, so a hung step leaves a value",
+      before(edc, 'prefs.putUShort("poMv"', "pwrOffMode &"))
+
 # ---- THE POWER-OFF RECEIPT REACHES A HOST THAT IS NOT ON THE CABLE ---------
 # sendLineToHost() fans out to Serial AND BLE, but its BLE half is gated on
 # bleConnected - and at boot no central has connected yet. So the receipt for a
