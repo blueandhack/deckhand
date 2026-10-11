@@ -835,8 +835,8 @@ check("the mode is recorded alongside it, so a result names its own combination"
 # sleepPanel() has five return-false paths and the first version DISCARDED the
 # result, so a step that never ran looked exactly like one that did nothing.
 check("sleepPanel()'s RETURN is captured, never discarded",
-      edc is not None and re.search(r'putUChar\("poPs",\s*tft\.sleepPanel\(true\)', edc)
-      is not None)
+      edc is not None and re.search(r'const bool slept = tft\.sleepPanel\(true\);', edc) is not None
+      and re.search(r'putUChar\("poPs",\s*slept \? 1 : 0\)', edc) is not None)
 # GPIO48 is outside the RTC set (0..21), so it takes a hold, not an isolate.
 check("the display-IC reset is HELD through sleep (48 is not an RTC GPIO)",
       edc is not None and "PIN_TOUCH_RST" in edc and "gpio_hold_en" in edc)
@@ -1115,8 +1115,8 @@ check("both default OFF - a saving that defaults ON optimises the 'before' leg o
 _pw = POWER
 check("the USB step is GATED on its own bit",
       re.search(r"if \(pwrOffMode & PWROFF_USB_ISOLATE\)", _pw) is not None)
-check("the SD step is GATED on its own bit",
-      re.search(r"if \(pwrOffMode & PWROFF_SD_ISOLATE\)", _pw) is not None)
+check("the SD isolate is GATED on its own bit - or on SD standby, which implies it",
+      re.search(r"if \(pwrOffMode & \(PWROFF_SD_ISOLATE \| PWROFF_SD_STANDBY\)\)", _pw) is not None)
 # The SD pins are PARSED from the board header, never retyped: a re-pinned board
 # would otherwise isolate six pins belonging to something else entirely.
 check("the SD step names the PIN_SD_* constants rather than literals, so a re-pin "
@@ -1212,6 +1212,92 @@ check("the step READS BACK 0x0D and stores it, rather than assuming its writes t
 check("the receipt reports the readback as codec=",
       "codec=%s" in POWER and 'prefs.getUShort("poCd"' in POWER)
 check("PWROFFMODE reports codecSusp", "codecSusp=%d" in MAIN)
+
+# ---- THE PANEL'S COMMANDS ARE FRAMED, AND THREE STEPS FROM THE SCHEMATIC ----
+# For three months sleepPanel() handed the bare register to a QSPI handle built
+# with 32-bit commands. The ST77922 decodes only an INSTRUCTION in the top byte -
+# 0x02 write, 0x0B read - with the register at bits 8..15 (the vendor driver's own
+# tx_param()), so DISPOFF/SLPIN went out as instruction 0x00 and were ignored,
+# while esp_lcd returned ESP_OK and every receipt said sleepPanel=ok. The width
+# that makes the framing necessary is PARSED from the board's panel config.
+CONF = pathlib.Path(__file__).with_name("esp_panel_board_custom_conf.h").read_text()
+_cmdbits = re.search(r"#define\s+ESP_PANEL_BOARD_LCD_QSPI_CMD_BITS\s+\((\d+)\)", CONF)
+check("the panel bus carries 32-bit commands - the width that needs the framing (parsed from "
+      "esp_panel_board_custom_conf.h)", _cmdbits is not None and int(_cmdbits.group(1)) == 32)
+_qf = fnbody(SHIM, "static int qspiFrame(")
+check("qspiFrame() puts the instruction in the TOP byte and the register at bits 8..15, the "
+      "vendor driver's own layout", _qf is not None and "instruction << 24" in _qf and "cmd << 8" in _qf)
+check("...with the vendor's opcodes: 0x02 write, 0x0B read",
+      re.search(r"QSPI_WRITE = 0x02, QSPI_READ = 0x0B", SHIM) is not None)
+_pc = fnbody(SHIM, "bool PanelShim::panelCmd(")
+check("panelCmd() sends through qspiFrame(QSPI_WRITE, ...)",
+      _pc is not None and "qspiFrame(QSPI_WRITE, cmd)" in _pc)
+_pr = fnbody(SHIM, "int PanelShim::panelRead(")
+check("panelRead() reads through qspiFrame(QSPI_READ, ...)",
+      _pr is not None and "qspiFrame(QSPI_READ, cmd)" in _pr)
+check("NO bare register reaches the control handle anywhere in the shim - the bug, by its own "
+      "shape: esp_lcd_panel_io_tx_param(io, 0x..)",
+      re.search(r"esp_lcd_panel_io_(tx|rx)_param\(io,\s*0x", strip_comments(SHIM)) is None)
+check("sleepPanel() goes through panelCmd for all four commands (DISPOFF, SLPIN, SLPOUT, DISPON)",
+      sp is not None and all(f"panelCmd(0x{c}" in sp for c in ("28", "10", "11", "29")))
+_ds = fnbody(SHIM, "bool PanelShim::deepStandby()")
+check("deepStandby() writes 0x4F = 0x01 through the framed path",
+      _ds is not None and "panelCmd(0x4F, &on, 1)" in _ds and "on = 0x01" in _ds)
+
+_new3 = ("PWROFF_PANEL_DSTB", "PWROFF_QUIET_PINS", "PWROFF_SD_STANDBY")
+check("the three new steps exist as bits", all(b in _val for b in _new3))
+check("...distinct from every other step", len(set(_val.values())) == len(_val))
+check("...and DEFAULT OFF until a leg measures them", not any(b in _dflt for b in _new3))
+check("PWROFFMODE reports all three",
+      all(f in MAIN for f in ("panelDstb=%d", "quietPins=%d", "sdStandby=%d")))
+# DEEP STANDBY only from a sleep-in that SUCCEEDED: 4Fh is "only effect at sleep in mode".
+check("deep standby runs only when sleepPanel(true) succeeded AND its own bit is set",
+      edc is not None and re.search(r"if \(slept && \(pwrOffMode & PWROFF_PANEL_DSTB\)\)", edc) is not None)
+check("...and after the sleep-in, never before it",
+      before(edc, "tft.sleepPanel(true)", "tft.deepStandby()"))
+check("the panel is READ BACK after SLPIN and the byte kept - 'the bytes left the pins' is "
+      "what three months of sleepPanel=ok turned out to mean",
+      before(edc, "tft.sleepPanel(true)", 'prefs.putShort("poPm", (int16_t) tft.panelRead(0x0A))'))
+# QUIET PINS: the table is PARSED and each level checked against what the line IS.
+_qt = re.search(r"quiet\[\] = \{(.*?)\};", edc or "", re.S)
+_q = dict(re.findall(r"\{ (PIN_[A-Z0-9_]+), (\d) \}", _qt.group(1))) if _qt else {}
+check("quiet pins hold the panel DESELECTED: PIN_LCD_CS high", _q.get("PIN_LCD_CS") == "1")
+check("...its clock and four data lines low",
+      all(_q.get(f"PIN_LCD_{n}") == "0" for n in ("SCK", "D0", "D1", "D2", "D3")))
+check("...the codec's MCLK, BCLK, LRCK and our data OUT low",
+      all(_q.get(f"PIN_I2S_{n}") == "0" for n in ("MCLK", "BCLK", "LRCK", "DOUT")))
+check("...and NOT PIN_I2S_DIN, which the codec drives - holding it would be the contention this "
+      "removes", bool(_q) and "PIN_I2S_DIN" not in _q)
+_qb = (edc or "")[(edc or "").find("if (pwrOffMode & PWROFF_QUIET_PINS)"):][:1500]
+check("the held levels have the internal pulls OFF - a low held against an internal pull-up "
+      "is ~73 uA a pin", "GPIO_PULLUP_DISABLE" in _qb and "GPIO_PULLDOWN_DISABLE" in _qb)
+check("...each level is set BEFORE the pad becomes an output, so CS cannot glitch low",
+      before(_qb, "gpio_set_level(g, quiet[i].level)", "gpio_config(&c)"))
+check("...and then HELD through the sleep", "gpio_hold_en(g)" in _qb)
+check("quiet pins run AFTER the panel's last command, which travels over those pins",
+      before(edc, "tft.deepStandby()", "if (pwrOffMode & PWROFF_QUIET_PINS)"))
+check("the QSPI isolate YIELDS to quiet pins rather than floating the levels just held",
+      edc is not None and "if ((pwrOffMode & PWROFF_QSPI_ISOLATE) && !(pwrOffMode & PWROFF_QUIET_PINS))" in edc)
+# SD STANDBY
+_sb = fnbody(POWER, "uint8_t sdStandby()")
+check("SD standby deselects with CMD7 to RCA 0",
+      _sb is not None and "cmd.opcode = MMC_SELECT_CARD;" in _sb and "cmd.arg = MMC_ARG_RCA(0);" in _sb)
+check("...expecting NO response - a deselected card does not answer, and asking for one would "
+      "turn every success into a timeout",
+      _sb is not None and "cmd.flags = SCF_CMD_AC;" in _sb and "SCF_RSP" not in _sb)
+check("...and stops the clock (host deinit) on every path out after the host came up",
+      _sb is not None and strip_comments(_sb).count("sdmmc_host_deinit()") >= 3)
+check("...on the PIN_SD_* constants, not literals",
+      _sb is not None and all(f"PIN_SD_{n}" in _sb for n in ("CLK", "CMD", "D0")))
+check("SD standby runs BEFORE the isolate it implies",
+      before(edc, 'prefs.putUChar("poSd", sdStandby())',
+             "if (pwrOffMode & (PWROFF_SD_ISOLATE | PWROFF_SD_STANDBY))"))
+_rec2 = POWER[POWER.find('prefs.putUChar("poPs", 2)'):POWER.find("if (pwrOffMode & PWROFF_PANEL_SLEEP)")]
+check("poPm/poDs/poSd are reset to 'did not run' at record-first, so a skipped step cannot "
+      "report a stale value",
+      all(k in _rec2 for k in ('putShort("poPm", -2)', 'putUChar("poDs", 2)', 'putUChar("poSd", 0xFF)')))
+check("the receipt prints all three (pm=, dstb=, sd=)",
+      all(f in POWER for f in ("pm=%s", "dstb=%s", "sd=%s")))
 
 # ---- THE POWER-OFF RECEIPT REACHES A HOST THAT IS NOT ON THE CABLE ---------
 # sendLineToHost() fans out to Serial AND BLE, but its BLE half is gated on

@@ -266,16 +266,28 @@ void loadPwrOffRecord() {
   // The codec suspend's own readback: what 0x0D and 0x01 held AFTER the writes,
   // which is the only evidence they took. 0x0D:FC/01:00 is fully suspended.
   const uint16_t cd   = prefs.getUShort("poCd", 0xFFFF);
+  // What the panel said after SLPIN, whether deep standby was sent, and where the
+  // SD card was left - each "skipped" when its step did not run this time.
+  const int16_t  pm   = prefs.getShort("poPm", -2);
+  const uint8_t  ds   = prefs.getUChar("poDs", 2);
+  const uint8_t  sd   = prefs.getUChar("poSd", 0xFF);
+  char pmS[10];
+  if (pm == -2)     snprintf(pmS, sizeof(pmS), "skipped");
+  else if (pm < 0)  snprintf(pmS, sizeof(pmS), "UNREAD");
+  else              snprintf(pmS, sizeof(pmS), "0x%02X", (unsigned) pm);
+  const char* sdS = sd == 0xFF ? "skipped" : sd == 0 ? "standby" : sd == 1 ? "nocard"
+                  : sd == 2 ? "DESELECT-FAILED" : "HOST-FAILED";
   char codec[20];
   if (cd == 0xFFFF)      snprintf(codec, sizeof(codec), "skipped");
   else if (cd == 0xFFFE) snprintf(codec, sizeof(codec), "UNREAD");
   else snprintf(codec, sizeof(codec), "0D:%02X/01:%02X", cd >> 8, cd & 0xFF);
   for (int i = 0; i < 12; i++) sampleBattery();       // settle before comparing
   snprintf(pwrOffReport, sizeof(pwrOffReport),
-           "PWROFF record: off at %umV mode=0x%lX sleepPanel=%s codec=%s; awake at %dmV "
-           "(%+d mV). Elapsed is the Mac's to supply - a reset takes RTC with it.",
+           "PWROFF record: off at %umV mode=0x%lX sleepPanel=%s pm=%s dstb=%s codec=%s sd=%s; "
+           "awake at %dmV (%+d mV). Elapsed is the Mac's to supply - a reset takes RTC with it.",
            (unsigned) mv, (unsigned long) mode,
-           ps == 2 ? "skipped" : (ps ? "ok" : "FAILED"), codec,
+           ps == 2 ? "skipped" : (ps ? "ok" : "FAILED"), pmS,
+           ds == 2 ? "skipped" : (ds ? "ok" : "FAILED"), codec, sdS,
            batteryMv, batteryMv - (int) mv);
   prefs.remove("poMv");
 }
@@ -1084,6 +1096,39 @@ void updateBeep() {
 void startBeep() {}
 void updateBeep() {}
 #endif
+#if BOARD_HAS_SD
+// PWROFF_SD_STANDBY's body. Plain IDF rather than SD_MMC: the deselect is a raw
+// CMD7 and SD_MMC keeps its card handle private, and nothing here wants a
+// filesystem - a mount would read the FAT only to throw it away.
+// Returns what the receipt prints: 0 stand-by, 1 no card answered (an empty slot
+// looks exactly like this), 2 the deselect itself failed, 3 the host would not
+// come up.
+uint8_t sdStandby() {
+  sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+  sdmmc_slot_config_t slot = SDMMC_SLOT_CONFIG_DEFAULT();
+  // 1-bit: CLK, CMD and D0 are all a deselect needs, and D1..D3 stay on their
+  // pull-ups - D3 HIGH at CMD0 is what keeps the card in SD mode rather than SPI.
+  slot.width = 1;
+  slot.clk = (gpio_num_t) PIN_SD_CLK;
+  slot.cmd = (gpio_num_t) PIN_SD_CMD;
+  slot.d0  = (gpio_num_t) PIN_SD_D0;
+  slot.d1 = slot.d2 = slot.d3 = GPIO_NUM_NC;
+  if (sdmmc_host_init() != ESP_OK) return 3;
+  if (sdmmc_host_init_slot(host.slot, &slot) != ESP_OK) { sdmmc_host_deinit(); return 3; }
+  sdmmc_card_t card;
+  if (sdmmc_card_init(&host, &card) != ESP_OK) { sdmmc_host_deinit(); return 1; }
+  // CMD7 to RCA 0 deselects every card: transfer -> stand-by. A deselected card
+  // does not answer, so the command carries no response flag - IDF's own
+  // sdmmc_send_cmd_select_card() builds a deselect exactly this way.
+  sdmmc_command_t cmd = {};
+  cmd.opcode = MMC_SELECT_CARD;
+  cmd.arg = MMC_ARG_RCA(0);
+  cmd.flags = SCF_CMD_AC;
+  const esp_err_t e = sdmmc_host_do_transaction(host.slot, &cmd);
+  sdmmc_host_deinit();   // and the clock stops with the host
+  return e == ESP_OK ? 0 : 2;
+}
+#endif
 // The actual teardown into deep sleep, shared by the manual power-off (BOOT
 // hold) and the automatic battery-idle sleep. Assumes a farewell has already
 // been drawn (or not) by the caller.
@@ -1128,13 +1173,31 @@ void enterDeepSleep() {
   prefs.putUInt("poMode", pwrOffMode);
   prefs.putUChar("poPs", 2);   // 2 = the panel step did not run
   prefs.putUShort("poCd", 0xFFFF);   // 0xFFFF = codec suspend did not run
+  prefs.putShort("poPm", -2);        // -2 = the panel was not read back
+  prefs.putUChar("poDs", 2);         // 2 = deep standby did not run
+  prefs.putUChar("poSd", 0xFF);      // 0xFF = SD standby did not run
 
   // 1. SLEEP THE PANEL - and KEEP THE RETURN. sleepPanel() has five paths that
   //    return false, and the first version of this discarded the result, so a
   //    step that silently never ran was indistinguishable from one that ran and
   //    did nothing. That is the same class as esp_pm_configure()'s stub.
-  if (pwrOffMode & PWROFF_PANEL_SLEEP)
-    prefs.putUChar("poPs", tft.sleepPanel(true) ? 1 : 0);
+  if (pwrOffMode & PWROFF_PANEL_SLEEP) {
+    const bool slept = tft.sleepPanel(true);
+    prefs.putUChar("poPs", slept ? 1 : 0);
+    // READ IT BACK, because "the bytes left the pins" is all the last three months
+    // of "sleepPanel=ok" turned out to mean - the panel ignored every one (see
+    // PanelShim::panelCmd). RDDPM (0x0A): bit 4 is sleep-OUT and bit 2 display-ON,
+    // so a panel that obeyed reads both CLEAR. Whether a read works on this bus at
+    // all is PANELPM's question; the receipt just keeps the byte, so a power-off
+    // reports what the panel said rather than what was sent.
+    if (slept) prefs.putShort("poPm", (int16_t) tft.panelRead(0x0A));
+    // 1b. DEEP STANDBY, only from a sleep-in that succeeded and after its 120 ms -
+    //     the datasheet's ">100ms", and 4Fh is "only effect at sleep in mode". See
+    //     PWROFF_PANEL_DSTB for why RESET is a free exit on this board. Set alone,
+    //     without PANEL_SLEEP, this bit does nothing and the receipt says skipped.
+    if (slept && (pwrOffMode & PWROFF_PANEL_DSTB))
+      prefs.putUChar("poDs", tft.deepStandby() ? 1 : 0);
+  }
 
   // 2a. SUSPEND THE CODEC - Espressif's es8311_suspend(), verbatim and in order
   //     (esp-adf components/esp_codec_dev/device/es8311/es8311.c). The single
@@ -1173,7 +1236,10 @@ void enterDeepSleep() {
                                pdMS_TO_TICKS(50));
   }
 
-  // 3. HOLD THE DISPLAY IC IN RESET. Deeper than SLPIN and it reaches what SLPIN
+  // 3. HOLD THE DISPLAY IC IN RESET. (CORRECTED 2026-10-10 from the vendor
+  //    schematic: GPIO48 is the TOUCH reset, TP_RESX, and nothing else - the
+  //    display's RESX is on EN. So this resets the touch controller, which is the
+  //    part the note below is right about: it is what scans.) Deeper than SLPIN and it reaches what SLPIN
   //    cannot: the capacitive TOUCH controller lives INSIDE the ST77922 (I2C
   //    0x55) and scans continuously. Nothing is lost by it here - touch cannot
   //    wake a powered-off board 2, which is the whole reason this board has no
@@ -1193,6 +1259,10 @@ void enterDeepSleep() {
   //    measurement, and it is written down as one; what makes it safe to act on
   //    here is that deep sleep ends in a RESET, so there is no state to restore
   //    and nothing to get wrong on the way out.
+  //    CORRECTED 2026-10-10: that A-B-A was measured while SLPIN NEVER REACHED the
+  //    panel (the shim sent an unframed command - see PWROFF_PANEL_SLEEP), so SLPIN
+  //    cannot have caused it, and this hypothesis explains nothing. The result
+  //    stands unexplained. QUIET_PINS below is the defined-level alternative.
   //    rtc_gpio_isolate() disconnects output, input AND the pull resistors, which
   //    is why it beats driving the pin to a level - a driven level is exactly
   //    what injects. All six are RTC GPIOs (SOC_RTCIO_PIN_COUNT is 22, so 0..21)
@@ -1229,7 +1299,36 @@ void enterDeepSleep() {
   if (pwrOffMode & PWROFF_RTC_OFF)
     esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_OFF);
 
-  if (pwrOffMode & PWROFF_QSPI_ISOLATE)
+  // 5b. QUIET PINS - see PWROFF_QUIET_PINS. AFTER every step that talks over these
+  //     pins (the panel commands above), and each level is set BEFORE its pad
+  //     becomes an output, so the panel's CS never glitches low on the way.
+  //     gpio_config rather than pinMode: Arduino's pinMode would route the pin
+  //     through the peripheral manager (and the I2S driver's own teardown), and
+  //     this needs the INTERNAL pulls explicitly off - a held LOW against an
+  //     internal pull-up is ~73 uA a pin spent on nothing. PIN_I2S_DIN is not in
+  //     the table on purpose: the codec drives it.
+  if (pwrOffMode & PWROFF_QUIET_PINS) {
+    static const struct { uint8_t pin; uint8_t level; } quiet[] = {
+      { PIN_LCD_CS, 1 },   { PIN_LCD_SCK, 0 },  { PIN_LCD_D0, 0 },
+      { PIN_LCD_D1, 0 },   { PIN_LCD_D2, 0 },   { PIN_LCD_D3, 0 },
+      { PIN_I2S_MCLK, 0 }, { PIN_I2S_BCLK, 0 }, { PIN_I2S_LRCK, 0 }, { PIN_I2S_DOUT, 0 },
+    };
+    for (unsigned i = 0; i < sizeof(quiet) / sizeof(quiet[0]); i++) {
+      const gpio_num_t g = (gpio_num_t) quiet[i].pin;
+      gpio_set_level(g, quiet[i].level);
+      gpio_config_t c = {};
+      c.pin_bit_mask = 1ULL << g;
+      c.mode = GPIO_MODE_OUTPUT;
+      c.pull_up_en = GPIO_PULLUP_DISABLE;
+      c.pull_down_en = GPIO_PULLDOWN_DISABLE;
+      c.intr_type = GPIO_INTR_DISABLE;
+      gpio_config(&c);
+      gpio_set_level(g, quiet[i].level);
+      gpio_hold_en(g);
+    }
+  }
+  // Floating the same six pins would undo the levels just held, so it yields.
+  if ((pwrOffMode & PWROFF_QSPI_ISOLATE) && !(pwrOffMode & PWROFF_QUIET_PINS))
     for (unsigned i = 0; i < sizeof(qspi) / sizeof(qspi[0]); i++) rtc_gpio_isolate(qspi[i]);
   // 6. FLOAT THE USB D-/D+ PADS. This core sets CONFIG_USJ_ENABLE_USB_SERIAL_JTAG
   //    and CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG (CDCOnBoot=cdc requires them), so the
@@ -1264,7 +1363,12 @@ void enterDeepSleep() {
     digitalWrite(PIN_AMP_EN, LOW);
     gpio_hold_en((gpio_num_t) PIN_AMP_EN);
   }
-  if (pwrOffMode & PWROFF_SD_ISOLATE) {
+  // 7a. SD STANDBY - see PWROFF_SD_STANDBY. Before the isolate below, which it
+  //     implies: after the deselect the bus is handed to its own 10K pull-ups.
+#if BOARD_HAS_SD
+  if (pwrOffMode & PWROFF_SD_STANDBY) prefs.putUChar("poSd", sdStandby());
+#endif
+  if (pwrOffMode & (PWROFF_SD_ISOLATE | PWROFF_SD_STANDBY)) {
     const gpio_num_t sd[] = {
       (gpio_num_t) PIN_SD_CLK, (gpio_num_t) PIN_SD_CMD, (gpio_num_t) PIN_SD_D0,
       (gpio_num_t) PIN_SD_D1,  (gpio_num_t) PIN_SD_D2,  (gpio_num_t) PIN_SD_D3,

@@ -62,6 +62,10 @@
 // claims. Board 1 is BOARD_HAS_SD 0, so it links no FATFS and no SDMMC driver
 // and its binary must not move by a byte when this lands.
 #include <SD_MMC.h>
+// PWROFF_SD_STANDBY's raw CMD7: the IDF host and command layer SD_MMC sits on.
+#include <driver/sdmmc_host.h>
+#include <sdmmc_cmd.h>
+#include <sd_protocol_defs.h>   // MMC_SELECT_CARD, MMC_ARG_RCA
 #endif
 #if BOARD_TOUCH_NEEDS_CAL
 // Board 1's resistive panel only. Board 2's controller lives inside the
@@ -767,10 +771,20 @@ bool saveLightIdle = false;
 // runtime toggles rather than #ifs: a power-off measurement costs a night, so a
 // reflash per guess costs a week.
 #define PWROFF_PANEL_SLEEP  0x1   // SLPIN via the shim method that actually works
+                                  // CORRECTED 2026-10-10: it did NOT work until
+                                  // then - the shim sent the bare register, which
+                                  // the QSPI panel ignores (PanelShim::panelCmd).
+                                  // Every leg measured before that ran with the
+                                  // panel AWAKE behind a dark backlight.
 #define PWROFF_IC_RESET     0x2   // hold the ST77922 in reset - covers the TOUCH
                                   // block inside it, which SLPIN may not, and
                                   // which scans continuously. Free here: touch
                                   // cannot wake a powered-off board 2 anyway.
+                                  // CORRECTED 2026-10-10 from the vendor
+                                  // schematic: GPIO48 is the TOUCH reset (TP_RESX)
+                                  // only. The display's own RESX is on EN, which no
+                                  // pin here can hold - so this resets the touch
+                                  // controller, which is the part that scans.
 #define PWROFF_CODEC_DOWN   0x4   // ES8311 reset register - never once done
 #define PWROFF_QSPI_ISOLATE 0x8   // float the panel bus. Kept only so it can be
                                   // COMPARED; the evidence so far is against it.
@@ -867,7 +881,50 @@ bool saveLightIdle = false;
 // DEFAULT 0 with the rest: it is Espressif's sequence, but how many milliamps the
 // analog section was costing is a measurement nobody has made.
 #define PWROFF_CODEC_SUSPEND 0x400 // es8311_suspend(): analog, ADC, DAC and clocks off
-// DEFAULT 0x7, AND THE DEFAULT MOVED BECAUSE THE ANSWER WAS SEEN. It shipped as
+// THREE MORE, FROM THE VENDOR SCHEMATIC (2026-10-10). Read against it, the
+// always-powered parts of this board add up to roughly 0.7-1.4 mA (two ME6217
+// LDOs, the mic, the WS2812B, the battery divider, the TP4054), while a power-off
+// loses about 1%/h - tens of times more. So something still running is
+// switchable, and these are the three candidates software can still reach. All
+// DEFAULT 0 with the rest, by this file's own rule.
+//
+// DEEP STANDBY. The ST77922's lowest state, below sleep-in (datasheet 9.8 and
+// 4Fh): DISPOFF, SLPIN, wait >100 ms, then 0x4F = 0x01 - "only effect at sleep in
+// mode", so it runs only after a sleepPanel(true) that succeeded. Its one exit is
+// a RESX low pulse >1 ms followed by a full re-init, which would make it useless
+// on most boards and makes it FREE on this one: the panel's RESX is wired to EN,
+// and EN - the RESET key - is the only way out of this power-off. The same pulse
+// that boots the chip resets the panel, and setup() re-inits it anyway. The cost
+// it carries is a constraint, not a bug: any future wake from deep sleep that is
+// NOT a reset (a timer, a BOOT-key ext1) would find the panel deaf until RESET.
+// Its current is "TBD" in the only datasheet there is, so this is a measurement.
+#define PWROFF_PANEL_DSTB   0x800  // ST77922 deep standby after a successful SLPIN
+// QUIET PINS. The panel's QSPI lines and the codec's I2S inputs stay connected to
+// chips that stay POWERED (VDDI and AU_VCC3V3 are always-on LDO rails), and in
+// deep sleep those pads float - CMOS inputs left mid-rail draw through both input
+// transistors, and a floating panel CS lets noise clock into a live interface.
+// This drives them to their idle levels and holds them: panel CS HIGH (deselected),
+// its clock and four data lines LOW; the codec's MCLK, BCLK, LRCK and the ESP's
+// data OUT low. The codec's data OUT to us (PIN_I2S_DIN) is deliberately NOT held -
+// the codec drives it, and holding it against the codec would make the very
+// contention this exists to remove. None of these lines has a pull resistor on the
+// schematic, so a held level costs nothing. Takes precedence over QSPI_ISOLATE,
+// which floats the same six pins this defines.
+#define PWROFF_QUIET_PINS   0x1000 // panel bus and codec I2S outputs held at idle levels
+// SD STANDBY. The card's VDD is VCC3V3 directly - always on - and nothing ever
+// tells it to stand by: SDPROBE initialises it and leaves it SELECTED, and a card
+// that was never initialised sits in its power-up state, which the SD spec allows
+// up to 15 mA. Card draw varies tenfold between models. This initialises it (1-bit,
+// no filesystem), deselects it with CMD7 to RCA 0 - stand-by, the state a card
+// with no clock idles lowest in - stops the clock, and isolates the bus so its
+// own 10K pull-ups hold every line high. Implies SD_ISOLATE. With no card seated,
+// the init simply fails and the receipt says so.
+#define PWROFF_SD_STANDBY   0x2000 // card initialised, CMD7-deselected to stand-by, clock stopped
+// DEFAULT 0x7, AND THE DEFAULT MOVED BECAUSE THE ANSWER WAS SEEN.
+// (CORRECTED 2026-10-10: the default below is 0x37 - LED_LOW and RTC_OFF joined
+// it as hygiene. And the -3.6 that justified it was measured with SLPIN NOT
+// reaching the panel - see PWROFF_PANEL_SLEEP - so what halved that leg was the
+// touch reset and the codec write, not the panel sleeping.) It shipped as
 // 0 while every step was a guess - a saving defaulting ON silently optimises the
 // "before" leg of every future A/B, which poisons a measurement rather than
 // breaking it. That reasoning expired the moment there was a number:
@@ -890,7 +947,7 @@ uint32_t pwrOffMode = PWROFF_PANEL_SLEEP | PWROFF_IC_RESET | PWROFF_CODEC_DOWN
 // this carries the mV and the mode and lets the MAC's clock supply the elapsed
 // time. Retained rather than only printed, because a board that powered off on
 // battery has no listener at boot.
-char pwrOffReport[176] = {0};
+char pwrOffReport[256] = {0};   // 176 until pm=/dstb=/sd= joined the receipt
 #if !BOARD_USES_TFT_ESPI
 // The record is BUILT at boot and SENT once a host can actually hear it, which
 // are not the same moment. sendLineToHost() fans out to Serial and to BLE, but
@@ -7155,6 +7212,11 @@ static const UnavailableCommand UNAVAILABLE_COMMANDS[] = {
   { "TONELADDER",
     "it is TONETEST's five-volume ladder for finding the audible floor of the ES8311's dB "
     "volume scale. This board has no codec and no volume scale; its beeper is on or off." },
+  { "PANELPM",
+    "it reads the ST77922's power-mode register over QSPI and blinks DISPOFF/DISPON, to prove "
+    "board 2's framed panel commands reach the glass. This board's ILI9341 is driven by "
+    "TFT_eSPI, whose writecommand() reaches the panel directly - there is no QSPI framing "
+    "here to get wrong, and so nothing for this to verify." },
   { "PANELSLEEP",
     "the three blanked-state savings (PANELSLEEP, CPUSLOW, BLESLOW) are board 2's: "
     "savingsSync()'s whole body is behind !BOARD_USES_TFT_ESPI. This board has no panel "
@@ -8961,6 +9023,52 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     if (arg == "off") powerProbeStop("stopped");
     else powerProbeStart(arg.c_str());
 #if !BOARD_USES_TFT_ESPI
+  } else if (buf == "PANELPM" || buf.startsWith("PANELPM ")) {
+    // THE INSTRUMENT FOR THE BUG IT WAS WRITTEN AFTER. For three months the shim
+    // sent the panel unframed commands that it ignored (PanelShim::panelCmd), and
+    // every receipt said "sleepPanel=ok" because the SPI transfer succeeded. So
+    // this asks the panel itself: RDDPM (0x0A) and the three ID bytes (DA/DB/DC).
+    // Whether a READ works over this QSPI bus is unknown - no driver in the
+    // library reads an LCD this way - so a read is evidence only once it MOVES:
+    // `PANELPM blink` sends DISPOFF, holds 1.5 s, sends DISPON, and reads RDDPM
+    // at each step. Bit 2 (display on) should drop and come back. If the numbers
+    // never change, the read path does not work here and only a person watching
+    // the glass go dark can say whether the commands did.
+    // Refused while blanked: the backlight is off, so a dark panel looks like a
+    // dark panel. Not deduped against the double delivery - two blinks in a row
+    // are harmless and visibly two.
+    char line[200];
+    String arg = buf.length() > 7 ? buf.substring(7) : String("");
+    arg.trim();
+    if (arg.length() && arg != "blink") {
+      snprintf(line, sizeof(line),
+               "PANELPM refused: unknown argument '%.40s' - bare PANELPM reads the panel, "
+               "'PANELPM blink' sends DISPOFF/DISPON", arg.c_str());
+    } else if (!arg.length()) {
+      const int pm = tft.panelRead(0x0A);
+      const int i1 = tft.panelRead(0xDA), i2 = tft.panelRead(0xDB), i3 = tft.panelRead(0xDC);
+      snprintf(line, sizeof(line),
+               "PANELPM pm=%d id=%d/%d/%d (-1 = transfer failed; a value that does not "
+               "move under 'PANELPM blink' is not a register)", pm, i1, i2, i3);
+    } else if (isAsleep) {
+      snprintf(line, sizeof(line),
+               "PANELPM blink refused: the screen is blanked, so the backlight is off and a "
+               "panel told DISPOFF would look exactly like it does now - wake it first");
+    } else {
+      const int before = tft.panelRead(0x0A);
+      const bool off = tft.panelCmd(0x28, NULL, 0);   // DISPOFF
+      delay(50);
+      const int during = tft.panelRead(0x0A);
+      delay(1500);
+      const bool on = tft.panelCmd(0x29, NULL, 0);    // DISPON
+      delay(50);
+      const int after = tft.panelRead(0x0A);
+      snprintf(line, sizeof(line),
+               "PANELPM blink: DISPOFF %s, DISPON %s; pm %d -> %d -> %d. The glass should "
+               "have gone dark for 1.5 s with the backlight still on",
+               off ? "sent" : "FAILED", on ? "sent" : "FAILED", before, during, after);
+    }
+    sendLineToHost(line);
   } else if (buf.startsWith("PANELSLEEP ") || buf.startsWith("CPUSLOW ")
              || buf.startsWith("BLESLOW ") || buf.startsWith("LOOPIDLE ")
              || buf.startsWith("LIGHTIDLE ")) {
@@ -9054,10 +9162,13 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
       pwrOffMode = (uint32_t) strtoul(arg.c_str(), nullptr, 0);
       savePwrOffMode();
     }
-    char line[200];
+    // 256, not 200: three more fields took the line past 200 and snprintf would
+    // have cut the tail - the "0 is the baseline" note first, then the fields.
+    char line[256];
     snprintf(line, sizeof(line),
              "PWROFFMODE 0x%lX (panelSleep=%d icReset=%d codecDown=%d qspiIsolate=%d "
-             "ledLow=%d rtcOff=%d usbIso=%d sdIso=%d ampLow=%d ampHigh=%d codecSusp=%d) - 0 is the original teardown, the baseline",
+             "ledLow=%d rtcOff=%d usbIso=%d sdIso=%d ampLow=%d ampHigh=%d codecSusp=%d "
+             "panelDstb=%d quietPins=%d sdStandby=%d) - 0 is the original teardown, the baseline",
              (unsigned long) pwrOffMode,
              (pwrOffMode & PWROFF_PANEL_SLEEP) ? 1 : 0,
              (pwrOffMode & PWROFF_IC_RESET) ? 1 : 0,
@@ -9069,7 +9180,10 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
              (pwrOffMode & PWROFF_SD_ISOLATE) ? 1 : 0,
              (pwrOffMode & PWROFF_AMP_LOW) ? 1 : 0,
              (pwrOffMode & PWROFF_AMP_HIGH) ? 1 : 0,
-             (pwrOffMode & PWROFF_CODEC_SUSPEND) ? 1 : 0);
+             (pwrOffMode & PWROFF_CODEC_SUSPEND) ? 1 : 0,
+             (pwrOffMode & PWROFF_PANEL_DSTB) ? 1 : 0,
+             (pwrOffMode & PWROFF_QUIET_PINS) ? 1 : 0,
+             (pwrOffMode & PWROFF_SD_STANDBY) ? 1 : 0);
     sendLineToHost(line);
     sendLineToHost(pwrOffReport);
   } else if (buf == "SAVINGS") {

@@ -349,6 +349,13 @@ looks bricked.
 So on board 2 deep sleep is exited by **RESET**, encoded as `BOARD_HAS_TOUCH_SLEEP_WAKE 0` with no
 wake source armed, and every farewell screen says exactly that instead of promising a touch.
 
+> **DISPUTED 2026-10-10, NOT VERIFIED ON THIS BOARD:** the S3's TRM and datasheet say the strapping
+> pins are latched only at a full CHIP reset, while a wake from deep sleep is a core reset that does
+> not re-sample them - which would make a GPIO0 (BOOT key) `ext1` wake safe rather than a trip into
+> the bootloader. Nobody has tried it here. Note the constraint it would meet: with
+> `PWROFF_PANEL_DSTB` the panel leaves deep standby only on a RESX pulse, and RESX is EN, so a BOOT
+> wake would need that bit off.
+
 **The consequence: `AUTO_SLEEP_IDLE_MS` is disabled on board 2.** Auto-sleep's whole documented
 purpose is saving battery on a device you will wake with a touch; remove the touch wake and it
 becomes a device that turns *itself* permanently off after 20 idle minutes, and a status display
@@ -357,6 +364,9 @@ never sleeps. **Manual POWER OFF stays** — that is an explicit choice behind a
 existing job is to state the consequence. The backlight blank (`SLEEP AFTER`) is unaffected and
 still recovers on a touch. If board 2's battery life turns out to matter, re-enabling is then a
 deliberate trade with the RESET cost understood rather than a default nobody chose.
+
+> **SUPERSEDED:** it did turn out to matter. Board 2 now powers itself off after `AUTO_POWEROFF_MS`
+> (two hours idle on battery), RESET to wake - see `power-and-battery.md`, "AUTO POWER-OFF".
 
 Related, and fixed here because it is board-2-only: **the farewell screens now `flush()` BEFORE
 their `delay()`.** The 1200/1500ms dwell used to run before the flush, so on board 2 the goodbye
@@ -427,7 +437,8 @@ speaker; what it does not have is a capture path in this firmware.
 
 **The speaker is PROVEN to make sound, and `TONETEST` is what proves it** — it configures the
 codec, dumps all 74 registers, and plays a tone at each level of the amp enable. Read the chain off
-`vendor/schematic.pdf` before touching any of it, because none of it is GPIO-driven the way board
+`vendor/schematic.pdf` (that path is in the `demo` bring-up project, `/Users/yujia/projects/demo/vendor/`,
+not in this repo; the vendor's copy is linked from `power-and-battery.md`) before touching any of it, because none of it is GPIO-driven the way board
 1's is: **U5 (ES8311) → `OUTP`/`OUTN` → R21/R22 4.7K → U6 (SC8002B class-D BTL amp, VDD from
 +5) → `VO2`/`VO1` = `SP+`/`SP-` → JP3**, a 2-pin header (pin 2 = `SP+`, pin 1 = `SP-`). Board 1's
 wiring has no counterpart here — its amp input IO26 is this module's `SPICS1` (the flash/PSRAM

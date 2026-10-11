@@ -53,7 +53,7 @@ panel, which reads as a layout bug rather than a build mistake.
 | mic / beeper | both fitted and working | both work, via the ES8311 |
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64 |
-| size today | flash 1428896, RAM 72284 | flash 1179552, RAM 66780 |
+| size today | flash 1429232, RAM 72284 | flash 1182096, RAM 66860 |
 
 **FOUR of the six numbers this file quotes about the binaries are BOUND and two are not.**
 `node firmware/board-baseline.mjs --doc-check` asserts the two **hashes** and the two **sizes**
@@ -222,7 +222,15 @@ byte that alignment makes four, x `PROJ_SLOTS` (24) = 96 - `nm` puts `projects[]
 (`projOpenHost`, `scrollProjHost`, `curRxBleSlot`) land in existing padding. Flash 1,178,048 ->
 1,179,552 (+1,504) for both changes. **Board 1 measured byte-identical:** every multi-Mac line is
 behind `BOARD_HAS_PROJECTS`, and the count line's helper is `static inline` and read once, because
-an out-of-line copy called twice measured +80 bytes on board 1 for a line it never draws. `arduino-cli`'s
+an out-of-line copy called twice measured +80 bytes on board 1 for a line it never draws. **Board 2 then rose 80
+bytes of RAM on 2026-10-10** (66,780 -> 66,860, branch `pwroff-deep`: the panel finally sleeps, plus
+three power-off steps), all of it `pwrOffReport` growing 176 -> 256 for the receipt's new `pm=`,
+`dstb=` and `sd=` fields. Flash 1,179,552 -> 1,182,096 (+2,544): the framed panel commands, deep
+standby, the quiet-pin table, `sdStandby()` and the SDMMC host it links, and `PANELPM`. **Board 1
+moved too, by its refusal only:** flash 1,428,896 -> 1,429,232 (+336), all of it `PANELPM`'s entry in
+`UNAVAILABLE_COMMANDS[]`; `.flash.text` measured identical at 1,008,392 and RAM unchanged at 72,284.
+The baselines are the exact images that ran the measured power-off legs (`docs/reference/
+power-and-battery.md`, "THE PANEL NEVER SLEPT"). `arduino-cli`'s
 "Sketch uses N" is a
 slightly smaller number than the `.bin` - the same image without its trailing padding - so do
 not expect the compile summary to print these.
@@ -285,7 +293,7 @@ arduino-cli compile --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app" \
 node firmware/board-baseline.mjs /tmp/b1/deckhand_display.ino.bin --check 1
 ```
 
-Today: `d59aa9697ec52ad2...`, size 1428896 (board 2: `0a66806766cd8d77...`, size 1179552).
+Today: `649457f0e09f1b34...`, size 1429232 (board 2: `a800136b4543ac7d...`, size 1182096).
 
 It compares **BYTES, not sizes**, and that matters: a default argument on a shared function
 once changed board 1's codegen with **no size change whatsoever** - invisible to a size
@@ -436,6 +444,7 @@ one is neither handled nor refused.
 | `PROJFETCH` / `PROJOPEN <n>` / `PSESSOPEN <n>` | board 2 PROJECTS: fetch level 1 without a tap, open project `n`'s own sessions (level 2), open session `n`'s transcript (level 3, the EXISTING scrollback surface via `scrollOpenById()` - no new reader). Each refuses BY NAME on a non-numeric or out-of-range index, PROJECTS not being the live tab, `PSESSOPEN` additionally on level 2 not being open yet or another full-screen surface being up. `PROJOPEN <n>` also DEDUPES a repeat of the SAME `n` within 2000ms and says so BY NAME (`projOpenLevel1()` is not idempotent against its own double delivery: it resets `psessEverReceived`/`psessCount` and re-fetches, which the host's own request dedupe then drops, timing out over a list already loaded) - a later re-open of the same project still works. `PSESSOPEN` needs no such guard: its fetch (`scrollFetch()`, shared with SCROLLFETCH/SCROLLOPEN) already answers a repeat from what is already held in PSRAM rather than re-fetching it. `PROJFETCH` - and `TAB 2`'s own background refresh, and the dead-end retry tap, since all three route through the SAME `requestProjects()` - carries the identical dedupe one level up: a request landing within 2000ms of the LAST successful `projs` reply (`projectsLastLoadMs`) is a no-op that reports "PROJSFETCH held N project(s)" rather than re-fetching, because level 1's own fetch has no per-request key the host could dedupe by identity the way `PSESSOPEN`'s does - only a time window tells a double-delivered echo from a genuine, later re-open (leaving PROJECTS and coming back a minute later still fetches for real). Board 1 refuses all three from `UNAVAILABLE_COMMANDS[]` |
 | `RESUME <text>` | a HEADLESS continuation (`claude -p --resume <id> <text>`) of whichever transcript is open, addressed to `scrollLoadedId`. **This does not open a session on the Mac** - one turn runs, replies, and exits; the session hook republishes the record afterwards, which is how it reappears in the live list. Refuses BY NAME on no transcript open, on a LIVE session (a headless turn would become a second, concurrent author of it - `scrollFromProjects`/`scrollProjLive` gate this), and on empty text. Board 1 refuses it from `UNAVAILABLE_COMMANDS[]`. Not yet reachable from a tap - see `docs/reference/scrollback.md` |
 | `BLEMTU` | board 2: the negotiated ATT MTU per link |
+| `PANELPM` / `PANELPM blink` | board 2: read the ST77922's power-mode register (RDDPM) back over QSPI; `blink` sends DISPOFF, holds 1.5 s, sends DISPON and reads it at each step. **The only proof a panel command took**: until 2026-10-10 the shim sent unframed commands the panel ignored while every call returned ESP_OK (`PanelShim::panelCmd`). Measured `pm 156 -> 152 -> 156`. Refuses `blink` BY NAME while blanked. Board 1 refuses it from `UNAVAILABLE_COMMANDS[]` |
 | `SDPROBE` | board 2: mount the microSD over SDMMC, report, unmount. Tries 4-bit then 1-bit and REPORTS WHICH WIDTH WON - "4-bit failed, 1-bit worked" is a wiring story and "both failed" is a card-or-slot story. `CARD_NONE` after a successful mount is a THIRD outcome (the slot is empty), not a failure. Measured 2026-09-20: `ok width=4 type=SDHC size=14911MB`. Leaves GPIO 2..7 as it found them, which nothing else in this firmware touches. Board 1 refuses it from `UNAVAILABLE_COMMANDS[]` - and that refusal is NOT "board 1 has no slot", it has one, wired for SPI rather than SDMMC |
 | `SDPERF` | board 2: times SD writes, reads and an APPEND, from a PSRAM source buffer because that is where `scrollText` lives - a DRAM-sourced write measures a path the real code never takes. Measured 2026-09-20: write 2048/49152/262144 B in 9/23/66ms, read in 2/9/40ms, append 2048 to a 262144 B file in 9ms, open+close 5ms. **The append costing the same as a small write, not the same as the 66ms rewrite, is what the offline-sessions hybrid write policy stands on.** Board 1 refuses it from `UNAVAILABLE_COMMANDS[]` |
 | `SESSIONSCROLL <n>` | board 2: park the SCROLLING session list at step `n` so a capture can see a position other than the top. The unit is STEPS, not pixels - the offset is only ever a multiple of `SESSION_SCROLL_STEP` - and it reports the rows now on screen. Refuses BY NAME on a non-numeric or out-of-range argument (quoting the range), on SESSIONS not being the live tab, on a full-screen surface, and on a list of six or fewer that is not scrolling at all. Board 1 refuses it from `UNAVAILABLE_COMMANDS[]` |

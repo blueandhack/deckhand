@@ -639,6 +639,8 @@ bool PanelShim::invertColor(bool en) {
 // what the writecommand() note above records as a dead end. It is not one: the
 // BUS exposes getControlPanelHandle(), and esp_lcd_panel_io_tx_param on that
 // handle reaches any command the panel takes.
+// CORRECTED 2026-10-10, IN PLACE: only in the FRAMED form - see qspiFrame()
+// below. The bare form this note led to was silently ignored by the panel.
 //
 // THE INVERSION RE-APPLY IS THE WHOLE REASON THIS IS ONE FUNCTION AND NOT TWO
 // CALLS AT THE CALL SITE. Sleep-out RESETS the display's inversion state, and
@@ -647,19 +649,62 @@ bool PanelShim::invertColor(bool en) {
 // the vendor table, silently undone by SLPOUT) cost this port an entire
 // debugging cycle once already; putting the re-apply inside the wake branch
 // makes forgetting it structurally impossible rather than merely unlikely.
-bool PanelShim::sleepPanel(bool sleep) {
+// THE ST77922 ONLY DECODES A FRAMED COMMAND, AND FOR THREE MONTHS THIS FILE SENT
+// IT A BARE ONE. This bus is built with 32-bit commands
+// (ESP_PANEL_BOARD_LCD_QSPI_CMD_BITS in esp_panel_board_custom_conf.h), and the
+// panel's QSPI protocol reads the top byte as an INSTRUCTION - 0x02 write, 0x0B
+// read - with the register in the middle of the 24-bit address. The vendor
+// driver builds exactly that in its own tx_param() (esp_lcd_st77922_general.c:
+// `lcd_cmd <<= 8; lcd_cmd |= LCD_OPCODE_WRITE_CMD << 24`), and every command the
+// LIBRARY sends goes through it. sleepPanel() alone went straight to the handle
+// with the bare register, so the wire carried instruction 0x00 - which the panel
+// does not decode - while esp_lcd_panel_io_tx_param() still returned ESP_OK,
+// because the SPI transfer DID happen. So DISPOFF and SLPIN never reached the
+// panel: not in the blanked state, and not in any power-off, whose receipts
+// all said "sleepPanel=ok". That "ok" meant "the bytes left the pins".
+static int qspiFrame(uint8_t instruction, uint8_t cmd) {
+  return (int) (((uint32_t) instruction << 24) | ((uint32_t) cmd << 8));
+}
+static const uint8_t QSPI_WRITE = 0x02, QSPI_READ = 0x0B;   // LCD_OPCODE_{WRITE,READ}_CMD
+
+bool PanelShim::panelCmd(uint8_t cmd, const uint8_t* param, size_t n) {
   if (!_lcd) return false;
   auto* bus = _lcd->getBus();
   if (!bus) return false;
   esp_lcd_panel_io_handle_t io = bus->getControlPanelHandle();
   if (!io) return false;
+  return esp_lcd_panel_io_tx_param(io, qspiFrame(QSPI_WRITE, cmd), param, n) == ESP_OK;
+}
+
+// A READ IS AN EXPERIMENT ON THIS BUS, NOT A GIVEN. No driver in the library reads
+// an LCD over QSPI (only touch controllers read, over I2C), so whether the panel
+// answers on this wiring is what PANELPM exists to find out. -1 is "the transfer
+// failed"; a value that never changes across DISPOFF/DISPON is "the read does not
+// work here", and only PANELPM can tell those apart from a real register.
+int PanelShim::panelRead(uint8_t cmd) {
+  if (!_lcd) return -1;
+  auto* bus = _lcd->getBus();
+  if (!bus) return -1;
+  esp_lcd_panel_io_handle_t io = bus->getControlPanelHandle();
+  if (!io) return -1;
+  uint8_t v = 0;
+  if (esp_lcd_panel_io_rx_param(io, qspiFrame(QSPI_READ, cmd), &v, 1) != ESP_OK) return -1;
+  return v;
+}
+
+bool PanelShim::deepStandby() {
+  const uint8_t on = 0x01;      // DSTB = 1
+  return panelCmd(0x4F, &on, 1);
+}
+
+bool PanelShim::sleepPanel(bool sleep) {
   if (sleep) {
-    if (esp_lcd_panel_io_tx_param(io, 0x28, NULL, 0) != ESP_OK) return false;  // DISPOFF
-    if (esp_lcd_panel_io_tx_param(io, 0x10, NULL, 0) != ESP_OK) return false;  // SLPIN
+    if (!panelCmd(0x28, NULL, 0)) return false;   // DISPOFF
+    if (!panelCmd(0x10, NULL, 0)) return false;   // SLPIN
     delay(120);   // datasheet minimum before the rails are allowed to settle
     return true;
   }
-  if (esp_lcd_panel_io_tx_param(io, 0x11, NULL, 0) != ESP_OK) return false;    // SLPOUT
+  if (!panelCmd(0x11, NULL, 0)) return false;     // SLPOUT
   delay(120);     // and again on the way out, before anything is drawn
   // NO #if HERE, AND THAT IS THE POINT. This was written as
   // `#if BOARD_PANEL_INVERT` and that macro is UNDEFINED in this translation
@@ -670,7 +715,7 @@ bool PanelShim::sleepPanel(bool sleep) {
   // prevent, reintroduced by the guard meant to scope it.
   if (!invertColor(_inverted))
     Serial.println("PANEL: invertColor FAILED after SLPOUT - colours will be complemented");
-  if (esp_lcd_panel_io_tx_param(io, 0x29, NULL, 0) != ESP_OK) return false;    // DISPON
+  if (!panelCmd(0x29, NULL, 0)) return false;     // DISPON
   return true;
 }
 

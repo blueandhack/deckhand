@@ -271,6 +271,13 @@ private:
   // did not get.
   bool invertColor(bool en);
   bool sleepPanel(bool sleep);       // SLPIN/SLPOUT; re-applies inversion on wake
+  // One register write or read in the QSPI framing the ST77922 actually decodes -
+  // see qspiFrame() in the .cpp for the three months this was missing.
+  bool panelCmd(uint8_t cmd, const uint8_t* param, size_t n);
+  int  panelRead(uint8_t cmd);       // the byte read, or -1 if the transfer failed
+  // Deep standby (0x4F = 0x01). Only takes effect from sleep-in, so call it after
+  // sleepPanel(true); only a RESX low pulse leaves it - on this board, EN.
+  bool deepStandby();
   // Times the flush path and prints the breakdown. Diagnostic only.
   void perfReport();
   // Last flush in microseconds, for the SETTINGS LINK card. STORED rather than
