@@ -369,6 +369,18 @@ const int BORDER_CTRL = 1;
 // silence. Costs one digitalWrite; the alternative is a board that regresses to
 // this same afternoon's bug with no code change to blame.
 #define AMP_EN_ENABLE_LEVEL  LOW
+// THE AUDIO CHAIN SLEEPS BETWEEN SOUNDS (2026-10-11). Awake, the amp was enabled and
+// the codec powered and clocked - I2S TX+RX running, MCLK 4.096 MHz, the RX DMA
+// interrupting - from boot to power-off, so on battery every awake second paid for
+// a speaker that is silent nearly all of the time: the SC8002B's ~6.5 mA quiescent
+// (LM4871 datasheet; 10 mA for the 8002B clone) plus the ES8311's ~8 mA in normal
+// operation. Now the chain comes up when something plays or records and goes down
+// after AUDIO_IDLE_SLEEP_MS of quiet, or at once when the screen blanks.
+// AUDIO_AMP_RAMP_MS is what a sound waits for after a wake: an LM4871-class amp
+// takes ~170 ms typical, 220 ms max, to come out of shutdown on a 1 uF bypass
+// (LM4890 datasheet), so a sound is scheduled that far out rather than cut off.
+#define AUDIO_IDLE_SLEEP_MS  10000UL
+#define AUDIO_AMP_RAMP_MS    250UL
 
 // ---- Beeper, through the codec rather than a GPIO ---------------------------
 // Volume presets are ES8311 volume 0..100, NOT a duty. The scale is linear in dB
