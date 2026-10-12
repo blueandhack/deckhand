@@ -52,6 +52,22 @@ print(f"  thresholds read from power.ino: span={MIN_SPAN_MS // 60000}min "
 
 mvT = [3300,3500,3600,3700,3800,3900,4000,4100,4200]
 pcT = [0,8,15,28,45,62,78,90,100]
+# THE FIRMWARE'S OWN TABLE, PARSED, with its top row resolved through each board's
+# header (BOARD_BATT_TOP_MV) - so the mirror above is checked against board 1's
+# resolved table rather than trusted, and board 2's top is the one its estimator uses.
+_tbl = re.search(r"static const int mvT\[\] = \{([^}]*)\};", POWER)
+def _resolve(tok, hdr, where):
+    tok = tok.strip()
+    return int(tok) if tok.isdigit() else board_const(hdr, tok, where)
+MVT_B1 = [_resolve(t, B1H, "board_e32r28t.h") for t in _tbl.group(1).split(",")] if _tbl else []
+MVT_B2 = [_resolve(t, B2H, "board_es3c35p.h") for t in _tbl.group(1).split(",")] if _tbl else []
+def pctFromTable(mv, table):
+    if mv <= table[0]: return 0
+    if mv >= table[-1]: return 100
+    for i in range(1, len(table)):
+        if mv < table[i]:
+            return pcT[i-1] + (pcT[i]-pcT[i-1])*(mv-table[i-1])//(table[i]-table[i-1])
+    return 100
 def pctFromMv(mv):
     if mv <= mvT[0]: return 0
     if mv >= mvT[-1]: return 100
@@ -138,7 +154,14 @@ print(f"  {'PASS' if ok else 'FAIL'}  sagged window gives the same rate as a cle
 CHG_MIN_SPAN_MS = firmware_const("BATT_CHG_MIN_SPAN_MS")
 CHG_MIN_RISE_MV = firmware_const("BATT_CHG_MIN_RISE_MV")
 CHG_KNEE_MV     = firmware_const("BATT_CHG_KNEE_MV")
-CHG_TARGET_MV   = firmware_const("BATT_CHG_TARGET_MV")
+# The target is now the board's own top of the display (BOARD_BATT_TOP_MV), so it is
+# RESOLVED through board 2's header rather than read as a literal - a literal here
+# would have to be retyped every time the top moved.
+_ctm = re.search(r"BATT_CHG_TARGET_MV\s*=\s*(\w+)", POWER)
+if not _ctm:
+    sys.exit("FAIL: BATT_CHG_TARGET_MV not found in power.ino - was it renamed?")
+CHG_TARGET_MV = (int(_ctm.group(1)) if _ctm.group(1).isdigit()
+                 else board_const(B2H, _ctm.group(1), "board_es3c35p.h"))
 # BOARD 2's, because every charge-estimator invariant below is board 2's: the
 # whole estimator is behind !BOARD_USES_TFT_ESPI.
 CHG_FULL_MV     = board_const(B2H, "BOARD_BATT_FULL_MV", "board_es3c35p.h")
@@ -203,13 +226,21 @@ for name, cond in [
      re.search(r"BATT_FULL_MV\s*=\s*BOARD_BATT_FULL_MV", POWER) is not None
      and re.search(r"BATT_FULL_MV\s*=\s*\d", POWER) is None),
     ("board 1's FULL threshold sits above the charge knee", FULL_MV_B1 > CHG_KNEE_MV),
-    ("board 1's FULL threshold is at or below the 100% point",
-     FULL_MV_B1 <= CHG_TARGET_MV),
+    ("the mirror's curve IS board 1's resolved firmware table, row for row",
+     MVT_B1 == mvT),
+    ("board 1's FULL threshold is at or below ITS 100% point (its own top row)",
+     bool(MVT_B1) and FULL_MV_B1 <= MVT_B1[-1]),
     ("board 2's FULL threshold sits above the charge knee", CHG_FULL_MV > CHG_KNEE_MV),
     ("board 2's FULL threshold is at or below the 100% point",
      CHG_FULL_MV <= CHG_TARGET_MV),
-    ("BATT_CHG_TARGET_MV is the mv at which pctFromMv() actually reads 100%",
-     pctFromMv(CHG_TARGET_MV) == 100 and pctFromMv(CHG_TARGET_MV - 1) < 100),
+    ("BATT_CHG_TARGET_MV is the mv at which board 2's curve actually reads 100%",
+     bool(MVT_B2) and pctFromTable(CHG_TARGET_MV, MVT_B2) == 100
+     and pctFromTable(CHG_TARGET_MV - 1, MVT_B2) < 100),
+    ("board 2's 100% sits at or below where its charger is measured to stop (4157 mV), "
+     "so a finished charge can show it",
+     bool(MVT_B2) and MVT_B2[-1] <= 4157),
+    ("...and above the 90% row, so the curve stays monotonic",
+     bool(MVT_B2) and MVT_B2[-1] > MVT_B2[-2]),
     ("the knee sits below the target, so the refusal band is non-empty",
      CHG_KNEE_MV < CHG_TARGET_MV),
     ("the target is at or above the FULL threshold, so the estimate cannot read 0 "
@@ -301,10 +332,14 @@ good = chgMinsToFull(chgRing(contaminated), 4047)       # what the guard gives
 # The truth, computed independently: a least-squares fit over the settled samples
 # only. 65 min was the figure derived by hand from this same series during the
 # investigation; the tolerance covers the few samples added since.
-ok = good > bad and abs(good - 65) <= 15
+# 65 min was for the old 4200 target. The estimator is a straight-line extrapolation
+# with this series' slope, so the truth scales with the distance to whatever the
+# target is now - derived, not retyped when the target moves.
+_truth = 65.0 * (CHG_TARGET_MV - 4047) / (4200 - 4047)
+ok = good > bad and abs(good - _truth) <= 15.0 * _truth / 65.0
 fails += 0 if ok else 1
 print(f"  {'PASS' if ok else 'FAIL'}  the measured rebound case: contaminated={bad} min "
-      f"(optimistic, breaks the >= floor), settled={good} min (true ~65)")
+      f"(optimistic, breaks the >= floor), settled={good} min (true ~{_truth:.0f})")
 
 # The direction is the whole point: the guard must never make the estimate SHORTER.
 ok = good >= bad
@@ -804,7 +839,10 @@ _dflt = re.search(r"uint32_t\s+pwrOffMode\s*=([^;]*);", MAIN)
 check("the teardown default is an expression of named bits, not a literal",
       _dflt is not None and "PWROFF_" in _dflt.group(1)
       and not re.search(r"=\s*0x?[0-9A-Fa-f]+\s*$", _dflt.group(1).strip()))
-for nm in ("PWROFF_PANEL_SLEEP", "PWROFF_IC_RESET", "PWROFF_CODEC_DOWN"):
+for nm in ("PWROFF_PANEL_SLEEP", "PWROFF_IC_RESET", "PWROFF_CODEC_DOWN",
+           # measured together as 0x3E37, 2026-10-10..11 (docs: power-and-battery.md)
+           "PWROFF_AMP_HIGH", "PWROFF_CODEC_SUSPEND", "PWROFF_PANEL_DSTB",
+           "PWROFF_QUIET_PINS", "PWROFF_SD_STANDBY"):
     check(f"the default keeps the MEASURED bit {nm}",
           _dflt is not None and nm in _dflt.group(1))
 # The one step the evidence is AGAINST must stay out of the default - it was
@@ -835,8 +873,8 @@ check("the mode is recorded alongside it, so a result names its own combination"
 # sleepPanel() has five return-false paths and the first version DISCARDED the
 # result, so a step that never ran looked exactly like one that did nothing.
 check("sleepPanel()'s RETURN is captured, never discarded",
-      edc is not None and re.search(r'putUChar\("poPs",\s*tft\.sleepPanel\(true\)', edc)
-      is not None)
+      edc is not None and re.search(r'const bool slept = tft\.sleepPanel\(true\);', edc) is not None
+      and re.search(r'putUChar\("poPs",\s*slept \? 1 : 0\)', edc) is not None)
 # GPIO48 is outside the RTC set (0..21), so it takes a hold, not an isolate.
 check("the display-IC reset is HELD through sleep (48 is not an RTC GPIO)",
       edc is not None and "PIN_TOUCH_RST" in edc and "gpio_hold_en" in edc)
@@ -1115,8 +1153,8 @@ check("both default OFF - a saving that defaults ON optimises the 'before' leg o
 _pw = POWER
 check("the USB step is GATED on its own bit",
       re.search(r"if \(pwrOffMode & PWROFF_USB_ISOLATE\)", _pw) is not None)
-check("the SD step is GATED on its own bit",
-      re.search(r"if \(pwrOffMode & PWROFF_SD_ISOLATE\)", _pw) is not None)
+check("the SD isolate is GATED on its own bit - or on SD standby, which implies it",
+      re.search(r"if \(pwrOffMode & \(PWROFF_SD_ISOLATE \| PWROFF_SD_STANDBY\)\)", _pw) is not None)
 # The SD pins are PARSED from the board header, never retyped: a re-pinned board
 # would otherwise isolate six pins belonging to something else entirely.
 check("the SD step names the PIN_SD_* constants rather than literals, so a re-pin "
@@ -1161,8 +1199,8 @@ check("PWROFFMODE reports it, or the leg cannot be attributed", "ampLow=%d" in M
 # sleep, and its leg measured worse than the control. ampHigh is the fix.
 check("the HIGH step exists as its own bit", "PWROFF_AMP_HIGH" in _val)
 check("...distinct from every other step, ampLow included", len(set(_val.values())) == len(_val))
-check("...and DEFAULT OFF like every step - silence is heard, the milliamps are not "
-      "measured yet", "PWROFF_AMP_HIGH" not in _dflt)
+check("...and DEFAULT ON since the 0x3E37 legs measured it (as part of the combination)",
+      "PWROFF_AMP_HIGH" in _dflt)
 _ah = re.search(r"if \(pwrOffMode & PWROFF_AMP_HIGH\) \{(.*?)\n  \}", POWER, re.S)
 _ah = _ah.group(1) if _ah else ""
 check("it drives the pin HIGH - the level that silenced the amp on battery - and HOLDS "
@@ -1184,7 +1222,8 @@ check("PWROFFMODE reports ampHigh, or the leg cannot be attributed", "ampHigh=%d
 # (clocks ON) surviving every power-off. The sequence is PARSED out of power.ino.
 check("the codec-suspend step exists as its own bit", "PWROFF_CODEC_SUSPEND" in _val)
 check("...distinct from every other step", len(set(_val.values())) == len(_val))
-check("...and DEFAULT OFF until a leg measures it", "PWROFF_CODEC_SUSPEND" not in _dflt)
+check("...and DEFAULT ON since the 0x3E37 legs measured it (as part of the combination)",
+      "PWROFF_CODEC_SUSPEND" in _dflt)
 _cs = re.search(r"esSuspend\[\]\[2\] = \{(.*?)\};", POWER, re.S)
 _seq = [(int(a,16), int(b,16)) for a, b in re.findall(r"\{0x([0-9A-Fa-f]+), 0x([0-9A-Fa-f]+)\}",
                                                        _cs.group(1))] if _cs else []
@@ -1212,6 +1251,181 @@ check("the step READS BACK 0x0D and stores it, rather than assuming its writes t
 check("the receipt reports the readback as codec=",
       "codec=%s" in POWER and 'prefs.getUShort("poCd"' in POWER)
 check("PWROFFMODE reports codecSusp", "codecSusp=%d" in MAIN)
+
+# ---- THE PANEL'S COMMANDS ARE FRAMED, AND THREE STEPS FROM THE SCHEMATIC ----
+# For three months sleepPanel() handed the bare register to a QSPI handle built
+# with 32-bit commands. The ST77922 decodes only an INSTRUCTION in the top byte -
+# 0x02 write, 0x0B read - with the register at bits 8..15 (the vendor driver's own
+# tx_param()), so DISPOFF/SLPIN went out as instruction 0x00 and were ignored,
+# while esp_lcd returned ESP_OK and every receipt said sleepPanel=ok. The width
+# that makes the framing necessary is PARSED from the board's panel config.
+CONF = pathlib.Path(__file__).with_name("esp_panel_board_custom_conf.h").read_text()
+_cmdbits = re.search(r"#define\s+ESP_PANEL_BOARD_LCD_QSPI_CMD_BITS\s+\((\d+)\)", CONF)
+check("the panel bus carries 32-bit commands - the width that needs the framing (parsed from "
+      "esp_panel_board_custom_conf.h)", _cmdbits is not None and int(_cmdbits.group(1)) == 32)
+_qf = fnbody(SHIM, "static int qspiFrame(")
+check("qspiFrame() puts the instruction in the TOP byte and the register at bits 8..15, the "
+      "vendor driver's own layout", _qf is not None and "instruction << 24" in _qf and "cmd << 8" in _qf)
+check("...with the vendor's opcodes: 0x02 write, 0x0B read",
+      re.search(r"QSPI_WRITE = 0x02, QSPI_READ = 0x0B", SHIM) is not None)
+_pc = fnbody(SHIM, "bool PanelShim::panelCmd(")
+check("panelCmd() sends through qspiFrame(QSPI_WRITE, ...)",
+      _pc is not None and "qspiFrame(QSPI_WRITE, cmd)" in _pc)
+_pr = fnbody(SHIM, "int PanelShim::panelRead(")
+check("panelRead() reads through qspiFrame(QSPI_READ, ...)",
+      _pr is not None and "qspiFrame(QSPI_READ, cmd)" in _pr)
+check("NO bare register reaches the control handle anywhere in the shim - the bug, by its own "
+      "shape: esp_lcd_panel_io_tx_param(io, 0x..)",
+      re.search(r"esp_lcd_panel_io_(tx|rx)_param\(io,\s*0x", strip_comments(SHIM)) is None)
+check("sleepPanel() goes through panelCmd for all four commands (DISPOFF, SLPIN, SLPOUT, DISPON)",
+      sp is not None and all(f"panelCmd(0x{c}" in sp for c in ("28", "10", "11", "29")))
+_ds = fnbody(SHIM, "bool PanelShim::deepStandby()")
+check("deepStandby() writes 0x4F = 0x01 through the framed path",
+      _ds is not None and "panelCmd(0x4F, &on, 1)" in _ds and "on = 0x01" in _ds)
+
+_new3 = ("PWROFF_PANEL_DSTB", "PWROFF_QUIET_PINS", "PWROFF_SD_STANDBY")
+check("the three new steps exist as bits", all(b in _val for b in _new3))
+check("...distinct from every other step", len(set(_val.values())) == len(_val))
+check("...and DEFAULT ON since the 0x3E37 legs measured them (together, not bisected)",
+      all(b in _dflt for b in _new3))
+# The comment that justifies the default names its value; the value is COMPUTED from the
+# parsed bits, so the note and the code cannot drift apart silently.
+_dnote = re.search(r"DEFAULT (0x[0-9A-Fa-f]+) SINCE 2026-10-11", MAIN)
+_dval = sum(_val[b] for b in re.findall(r"PWROFF_[A-Z_]+", _dflt))
+check(f"the default's own note names the value the bits compute to (0x{_dval:X})",
+      _dnote is not None and int(_dnote.group(1), 16) == _dval)
+check("PWROFFMODE reports all three",
+      all(f in MAIN for f in ("panelDstb=%d", "quietPins=%d", "sdStandby=%d")))
+# DEEP STANDBY only from a sleep-in that SUCCEEDED: 4Fh is "only effect at sleep in mode".
+check("deep standby runs only when sleepPanel(true) succeeded AND its own bit is set",
+      edc is not None and re.search(r"if \(slept && \(pwrOffMode & PWROFF_PANEL_DSTB\)\)", edc) is not None)
+check("...and after the sleep-in, never before it",
+      before(edc, "tft.sleepPanel(true)", "tft.deepStandby()"))
+check("the panel is READ BACK after SLPIN and the byte kept - 'the bytes left the pins' is "
+      "what three months of sleepPanel=ok turned out to mean",
+      before(edc, "tft.sleepPanel(true)", 'prefs.putShort("poPm", (int16_t) tft.panelRead(0x0A))'))
+# QUIET PINS: the table is PARSED and each level checked against what the line IS.
+_qt = re.search(r"quiet\[\] = \{(.*?)\};", edc or "", re.S)
+_q = dict(re.findall(r"\{ (PIN_[A-Z0-9_]+), (\d) \}", _qt.group(1))) if _qt else {}
+check("quiet pins hold the panel DESELECTED: PIN_LCD_CS high", _q.get("PIN_LCD_CS") == "1")
+check("...its clock and four data lines low",
+      all(_q.get(f"PIN_LCD_{n}") == "0" for n in ("SCK", "D0", "D1", "D2", "D3")))
+check("...the codec's MCLK, BCLK, LRCK and our data OUT low",
+      all(_q.get(f"PIN_I2S_{n}") == "0" for n in ("MCLK", "BCLK", "LRCK", "DOUT")))
+check("...and NOT PIN_I2S_DIN, which the codec drives - holding it would be the contention this "
+      "removes", bool(_q) and "PIN_I2S_DIN" not in _q)
+_qb = (edc or "")[(edc or "").find("if (pwrOffMode & PWROFF_QUIET_PINS)"):][:1500]
+check("the held levels have the internal pulls OFF - a low held against an internal pull-up "
+      "is ~73 uA a pin", "GPIO_PULLUP_DISABLE" in _qb and "GPIO_PULLDOWN_DISABLE" in _qb)
+check("...each level is set BEFORE the pad becomes an output, so CS cannot glitch low",
+      before(_qb, "gpio_set_level(g, quiet[i].level)", "gpio_config(&c)"))
+check("...and then HELD through the sleep", "gpio_hold_en(g)" in _qb)
+check("quiet pins run AFTER the panel's last command, which travels over those pins",
+      before(edc, "tft.deepStandby()", "if (pwrOffMode & PWROFF_QUIET_PINS)"))
+check("the QSPI isolate YIELDS to quiet pins rather than floating the levels just held",
+      edc is not None and "if ((pwrOffMode & PWROFF_QSPI_ISOLATE) && !(pwrOffMode & PWROFF_QUIET_PINS))" in edc)
+# SD STANDBY
+_sb = fnbody(POWER, "uint8_t sdStandby()")
+check("SD standby deselects with CMD7 to RCA 0",
+      _sb is not None and "cmd.opcode = MMC_SELECT_CARD;" in _sb and "cmd.arg = MMC_ARG_RCA(0);" in _sb)
+check("...expecting NO response - a deselected card does not answer, and asking for one would "
+      "turn every success into a timeout",
+      _sb is not None and "cmd.flags = SCF_CMD_AC;" in _sb and "SCF_RSP" not in _sb)
+check("...and stops the clock (host deinit) on every path out after the host came up",
+      _sb is not None and strip_comments(_sb).count("sdmmc_host_deinit()") >= 3)
+check("...on the PIN_SD_* constants, not literals",
+      _sb is not None and all(f"PIN_SD_{n}" in _sb for n in ("CLK", "CMD", "D0")))
+check("SD standby runs BEFORE the isolate it implies",
+      before(edc, 'prefs.putUChar("poSd", sdStandby())',
+             "if (pwrOffMode & (PWROFF_SD_ISOLATE | PWROFF_SD_STANDBY))"))
+_rec2 = POWER[POWER.find('prefs.putUChar("poPs", 2)'):POWER.find("if (pwrOffMode & PWROFF_PANEL_SLEEP)")]
+check("poPm/poDs/poSd are reset to 'did not run' at record-first, so a skipped step cannot "
+      "report a stale value",
+      all(k in _rec2 for k in ('putShort("poPm", -2)', 'putUChar("poDs", 2)', 'putUChar("poSd", 0xFF)')))
+check("the receipt prints all three (pm=, dstb=, sd=)",
+      all(f in POWER for f in ("pm=%s", "dstb=%s", "sd=%s")))
+
+# ---- BOTH ENDS OF THE RECEIPT UNDER THE SAME, SMALLEST LOAD (2026-10-11) ----
+# The wake reading used to be twelve EMA samples taken AFTER setBacklight(100) and
+# audioOutBegin() (amp on) - full load - while the off reading was an EMA of samples
+# taken with the screen lit. Unplugging a full board showed the size of it in one
+# sample: 4158 -> 4074 mV. Now both ends are raw averages under the S3's own load.
+_brm = fnbody(POWER, "int batteryRestMv(int n)")
+check("batteryRestMv() averages RAW reads (analogReadMilliVolts), never the EMA",
+      _brm is not None and "analogReadMilliVolts(BAT_ADC_PIN)" in _brm and "batteryMv" not in _brm)
+check("...scaled by the board's divider constant, not a literal",
+      _brm is not None and "* BOARD_BAT_MV_SCALE" in _brm)
+_set = strip_comments(_body(MAIN, "void setup()") or "")
+check("setup() takes the wake reading BEFORE the backlight goes to 100%",
+      before(_set, "bootRestMv = batteryRestMv(", "setBacklight(100)"))
+check("...and BEFORE the amp is switched on",
+      before(_set, "bootRestMv = batteryRestMv(", "audioOutBegin()"))
+_lpr = strip_comments(fnbody(POWER, "void loadPwrOffRecord()") or "")
+check("the receipt's wake end is that boot reading, not samples taken under load",
+      "bootRestMv" in _lpr and "sampleBattery()" not in _lpr and "awakeMv, awakeMv - (int) mv" in _lpr)
+check("the off reading is taken raw and LAST - after the final teardown step, with "
+      "everything already off",
+      before(edc, "if (pwrOffMode & (PWROFF_SD_ISOLATE | PWROFF_SD_STANDBY))",
+             'prefs.putUShort("poMv", (uint16_t) batteryRestMv('))
+check("...while record-first still writes one first, so a hung step leaves a value",
+      before(edc, 'prefs.putUShort("poMv"', "pwrOffMode &"))
+
+# ---- THE DISPLAY ADDS THE LOAD'S SAG BACK, ON BATTERY ONLY (2026-10-11) -----
+# Unplugging a full board read 4158 -> 4074 mV in one sample and showed 95% -> 86%
+# with nothing used: the board's own load seen through ~0.3 ohm. On battery the
+# displayed percentage now reads the curve at the voltage plus the sag that load
+# causes; on the cable the board runs from VBUS and there is none to add.
+_bpt = strip_comments(fnbody(POWER, "int batteryPctTarget()") or "")
+check("the target adds the sag back ONLY when discharging - on the cable the cell "
+      "carries no load", re.search(r"if \(batteryState\(\) == BATT_DISCHARGING\) return "
+      r"pctFromMv\(batteryMv \+ battSagMv\(\)\);", _bpt) is not None)
+_bp = strip_comments(fnbody(POWER, "int batteryPct()") or "")
+check("batteryPct() shows the SLEWED number on board 2 and the raw curve on board 1, as it was",
+      re.search(r"#if !BOARD_USES_TFT_ESPI\s*if \(battShownPct >= 0\) return battShownPct;", _bp) is not None
+      and "return pctFromMv(batteryMv);" in _bp)
+_bst = strip_comments(fnbody(POWER, "void battShownTick()") or "")
+check("the shown number moves at most ONE point per 20 s - a flicker of the cable signal "
+      "swings the target by ~8 points for a few seconds, a real cell a point per minutes",
+      "now - battShownAt < 20000UL" in _bst and "battShownPct += target > battShownPct ? 1 : -1;" in _bst)
+check("...but jumps straight to the target after the board SLEPT (a tick gap), which is not "
+      "a transient", "now - battShownTickAt > 60000UL" in _bst and "if (battShownPct < 0 || slept)" in _bst)
+check("the slew runs in the 1 s battery tick, after the learning",
+      before(strip_comments(MAIN), "battSagLearnTick();", "battShownTick();"))
+_bs = strip_comments(fnbody(POWER, "int battSagMv()") or "")
+check("the backlight term follows the pin's LIVE duty (ledcRead), not brightnessPct - "
+      "dimming, blanking and the voice card all write the pin directly",
+      "blDuty()" in _bs and "ledcRead(TFT_BL_PIN)" in strip_comments(fnbody(POWER, "uint32_t blDuty()") or "")
+      and "brightnessPct" not in _bs)
+check("the sag model starts from the header's values, so a fresh board is not uncompensated",
+      "int sagBaseMv = BOARD_BATT_SAG_BASE_MV;" in POWER and "int sagBlMv   = BOARD_BATT_SAG_BL_MV;" in POWER)
+_lt = strip_comments(fnbody(POWER, "void battSagLearnTick()") or "")
+check("it learns only from an unplug that follows a FINISHED charge - a mid-charge unplug "
+      "carries the charger's push in its drop",
+      "if (st == BATT_FULL)" in _lt and "millis() - sagIdleAt > 20000UL" in _lt)
+check("its 'on the cable' reading is taken only while the USB PHY sees the host AT THAT "
+      "INSTANT - in the 3 s hold the raw voltage has already sagged and the drop reads as zero",
+      re.search(r"if \(st == BATT_FULL\) \{\s*if \(HWCDC::isPlugged\(\)\) \{\s*sagIdleMv = batteryRestMv", _lt) is not None)
+check("...and refuses a drop it cannot trust rather than learning from it",
+      "seen < 15 || seen > 250" in _lt)
+check("a MEASURED backlight term survives the unplug; only the base is re-derived",
+      re.search(r"if \(sagBlMeasured\)\s*\{[^}]*sagBaseMv = base;", _lt) is not None)
+check("the learning runs in the 1 s battery tick, board 2 only",
+      re.search(r"#if !BOARD_USES_TFT_ESPI\s*battSagLearnTick\(\);", strip_comments(MAIN)) is not None)
+check("the model is loaded at boot with the other power settings",
+      before(strip_comments(_body(MAIN, "void setup()") or ""), "loadPwrOffMode();", "loadBattSag();"))
+
+# ---- "ON THE CABLE" IS THE USB PHY'S ANSWER ON BOARD 2 (2026-10-11) ---------
+# usbLinkActive() is "the Mac sent a payload over USB within 10 s", and with Bluetooth
+# up the Mac's traffic goes there: a full board on the cable read state=1 again and
+# again. Board 2 asks its USB PHY instead (HWCDC::isPlugged, the SOF watchdog).
+_bst2 = fnbody(POWER, "BattState batteryState()") or ""
+check("board 2's battery state asks the USB PHY whether a host is attached, not the Mac's traffic",
+      re.search(r"#if !BOARD_USES_TFT_ESPI\s*const bool cabled = usbHostPresent\(\);", _bst2) is not None)
+check("...and board 1 keeps usbLinkActive() - it has a CH340, not the S3's USB PHY",
+      re.search(r"#else\s*const bool cabled = usbLinkActive\(\);", _bst2) is not None)
+_uhp = strip_comments(fnbody(POWER, "bool usbHostPresent()") or "")
+check("usbHostPresent() reads HWCDC::isPlugged() and holds a plug for 3 s across its glitches",
+      "HWCDC::isPlugged()" in _uhp and "millis() - usbHostSeenAt < 3000UL" in _uhp)
 
 # ---- THE POWER-OFF RECEIPT REACHES A HOST THAT IS NOT ON THE CABLE ---------
 # sendLineToHost() fans out to Serial AND BLE, but its BLE half is gated on

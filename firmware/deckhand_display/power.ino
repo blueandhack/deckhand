@@ -266,17 +266,31 @@ void loadPwrOffRecord() {
   // The codec suspend's own readback: what 0x0D and 0x01 held AFTER the writes,
   // which is the only evidence they took. 0x0D:FC/01:00 is fully suspended.
   const uint16_t cd   = prefs.getUShort("poCd", 0xFFFF);
+  // What the panel said after SLPIN, whether deep standby was sent, and where the
+  // SD card was left - each "skipped" when its step did not run this time.
+  const int16_t  pm   = prefs.getShort("poPm", -2);
+  const uint8_t  ds   = prefs.getUChar("poDs", 2);
+  const uint8_t  sd   = prefs.getUChar("poSd", 0xFF);
+  char pmS[10];
+  if (pm == -2)     snprintf(pmS, sizeof(pmS), "skipped");
+  else if (pm < 0)  snprintf(pmS, sizeof(pmS), "UNREAD");
+  else              snprintf(pmS, sizeof(pmS), "0x%02X", (unsigned) pm);
+  const char* sdS = sd == 0xFF ? "skipped" : sd == 0 ? "standby" : sd == 1 ? "nocard"
+                  : sd == 2 ? "DESELECT-FAILED" : "HOST-FAILED";
   char codec[20];
   if (cd == 0xFFFF)      snprintf(codec, sizeof(codec), "skipped");
   else if (cd == 0xFFFE) snprintf(codec, sizeof(codec), "UNREAD");
   else snprintf(codec, sizeof(codec), "0D:%02X/01:%02X", cd >> 8, cd & 0xFF);
-  for (int i = 0; i < 12; i++) sampleBattery();       // settle before comparing
+  // The wake end is setup()'s first reading, taken before anything was switched on
+  // (bootRestMv) - no longer twelve samples taken after the backlight was at 100%.
+  const int awakeMv = bootRestMv > 0 ? bootRestMv : batteryMv;
   snprintf(pwrOffReport, sizeof(pwrOffReport),
-           "PWROFF record: off at %umV mode=0x%lX sleepPanel=%s codec=%s; awake at %dmV "
-           "(%+d mV). Elapsed is the Mac's to supply - a reset takes RTC with it.",
+           "PWROFF record: off at %umV mode=0x%lX sleepPanel=%s pm=%s dstb=%s codec=%s sd=%s; "
+           "awake at %dmV (%+d mV). Elapsed is the Mac's to supply - a reset takes RTC with it.",
            (unsigned) mv, (unsigned long) mode,
-           ps == 2 ? "skipped" : (ps ? "ok" : "FAILED"), codec,
-           batteryMv, batteryMv - (int) mv);
+           ps == 2 ? "skipped" : (ps ? "ok" : "FAILED"), pmS,
+           ds == 2 ? "skipped" : (ds ? "ok" : "FAILED"), codec, sdS,
+           awakeMv, awakeMv - (int) mv);
   prefs.remove("poMv");
 }
 void saveLightIdleSetting() { prefs.putBool("lightIdle", saveLightIdle); }
@@ -368,6 +382,109 @@ void wakeUp() {
   // thing lit is whatever the panel held mid-sequence.
   ledcWrite(TFT_BL_PIN, brightnessPct * 255 / 100);
 }
+#if !BOARD_USES_TFT_ESPI
+// RAW, NOT THE EMA: the average of n reads taken NOW. sampleBattery()'s batteryMv is
+// an EMA of the last eight one-second samples, so at any moment it still carries
+// several seconds of whatever the load WAS - at power-off, the lit screen. The two
+// ends of a power-off receipt are both read with this, each under the smallest load
+// the board ever has while running, so their difference is the cell rather than two
+// different loads.
+int batteryRestMv(int n) {
+  long sum = 0;
+  for (int i = 0; i < n; i++) {
+    sum += analogReadMilliVolts(BAT_ADC_PIN);
+    delayMicroseconds(200);
+  }
+  return (int) (sum / n) * BOARD_BAT_MV_SCALE;
+}
+
+// ---- THE LOAD'S SAG, FOR THE DISPLAY ON BATTERY ----------------------------
+// The percentage comes from the cell's voltage, and on battery the board's own load
+// pulls that voltage down through ~0.3 ohm: unplugging a full board read 4158 -> 4074
+// mV in one sample, 95% -> 86% with nothing used. So on battery the display reads the
+// curve at the voltage PLUS the sag the current load causes. A fixed term for the
+// awake board, and a backlight term scaled by the pin's LIVE duty (ledcRead, not
+// brightnessPct: dimming, blanking and the voice card all write the pin directly) -
+// which is also why blanking the screen no longer moves the number. Board 2 only.
+int sagBaseMv = BOARD_BATT_SAG_BASE_MV;
+int sagBlMv   = BOARD_BATT_SAG_BL_MV;
+bool sagBlMeasured = false;   // set by BATTSAG measure; then an unplug corrects only the base
+// ledcRead() reports full-on as 256 at 8 bits (Arduino writes max+1 for a true 100%),
+// so it is clamped to the 255 the scale is written in.
+uint32_t blDuty() {
+  const uint32_t d = ledcRead(TFT_BL_PIN);
+  return d > 255 ? 255 : d;
+}
+int battSagMv() {
+  const uint32_t duty = blDuty();               // 0..255, ledcRead underneath
+  return sagBaseMv + (int) ((long) sagBlMv * (long) duty / 255);
+}
+void loadBattSag() {
+  sagBaseMv = prefs.getInt("sagBase", sagBaseMv);
+  sagBlMv = prefs.getInt("sagBl", sagBlMv);
+  sagBlMeasured = prefs.getBool("sagBlM", false);
+}
+void saveBattSag() {
+  prefs.putInt("sagBase", sagBaseMv);
+  prefs.putInt("sagBl", sagBlMv);
+  prefs.putBool("sagBlM", sagBlMeasured);
+}
+// LEARNED FROM EVERY UNPLUG THAT FOLLOWS A FINISHED CHARGE. On the cable with the
+// charge done, the cell carries no load and reads its rest voltage; a few seconds
+// after the cable comes out it carries the whole board. That drop IS the sag at this
+// moment's load - the one number the model exists to predict - so the model is
+// corrected to it. Mid-charge unplugs are ignored: the charger's own push is in that
+// drop too. usbLinkActive() notices an unplug up to ten seconds late, so "a finished
+// charge" means a FULL reading within the last 20 s.
+int sagIdleMv = 0;
+unsigned long sagIdleAt = 0;
+bool sagWasCabled = false;
+void battSagLearnTick() {
+  const BattState st = batteryState();
+  if (st == BATT_FULL) {
+    // ONLY WHILE THE PHY SEES THE HOST THIS INSTANT. batteryState() holds a plug for
+    // 3 s and decides FULL on the lagging EMA, so the first tick after an unplug can
+    // still say FULL - and a raw reading taken then is already the SAGGED one. Taken
+    // there, the "idle" voltage equals the loaded one, the drop reads as zero, and the
+    // unplug teaches nothing: measured exactly so on 2026-10-11, the first unplug.
+    if (HWCDC::isPlugged()) {
+      sagIdleMv = batteryRestMv(16);
+      sagIdleAt = millis();
+    }
+    sagWasCabled = true;
+    return;
+  }
+  if (st == BATT_CHARGING) { sagWasCabled = true; return; }
+  if (st != BATT_DISCHARGING || !sagWasCabled) return;
+  sagWasCabled = false;
+  if (!sagIdleAt || millis() - sagIdleAt > 20000UL) return;   // not straight off a finished charge
+  const int seen = sagIdleMv - batteryRestMv(16);
+  const int model = battSagMv();
+  if (seen < 15 || seen > 250 || model <= 0) return;           // not a drop this can trust
+  const uint32_t duty = blDuty();
+  const int was = model;
+  if (sagBlMeasured) {
+    // The backlight term was MEASURED, so it stands; the base is what is left over.
+    const int base = seen - (int) ((long) sagBlMv * (long) duty / 255);
+    if (base < 0 || base > 200) return;
+    sagBaseMv = base;
+  } else {
+    // Neither term measured: keep their ratio and scale both, i.e. assume the
+    // resistance moved and the currents did not.
+    float k = (float) seen / (float) model;
+    if (k < 0.5f) k = 0.5f;
+    if (k > 2.0f) k = 2.0f;
+    sagBaseMv = (int) (sagBaseMv * k + 0.5f);
+    sagBlMv = (int) (sagBlMv * k + 0.5f);
+  }
+  saveBattSag();
+  char line[140];
+  snprintf(line, sizeof(line),
+           "BATTSAG learned from an unplug: the cell dropped %d mV, the model said %d; now "
+           "base %d + backlight %d x duty %u/255", seen, was, sagBaseMv, sagBlMv, (unsigned) duty);
+  sendLineToHost(line);
+}
+#endif
 void sampleBattery() {
   long sum = 0;
   for (int i = 0; i < 4; i++) sum += analogReadMilliVolts(BAT_ADC_PIN);
@@ -389,7 +506,9 @@ bool batteryPresent() { return batteryMv > 2500; }
 // curve. The trend below needs that: the non-linearity lives in this table, so a
 // slope taken in millivolts is not a slope in charge.
 int pctFromMv(int mv) {
-  static const int mvT[] = {3300, 3500, 3600, 3700, 3800, 3900, 4000, 4100, 4200};
+  // The top row is the board's - see BOARD_BATT_TOP_MV: 4200 on board 1, where its
+  // charger stops on board 2. Every other row is the shared generic curve.
+  static const int mvT[] = {3300, 3500, 3600, 3700, 3800, 3900, 4000, 4100, BOARD_BATT_TOP_MV};
   static const int pcT[] = {0, 8, 15, 28, 45, 62, 78, 90, 100};
   const int n = 9;
   if (mv <= mvT[0]) return 0;
@@ -401,7 +520,45 @@ int pctFromMv(int mv) {
   }
   return 100;
 }
-int batteryPct() { return pctFromMv(batteryMv); }
+#if !BOARD_USES_TFT_ESPI
+// What the number SHOULD read right now. ON BATTERY ONLY the sag is added back: on the
+// cable the board runs from VBUS and the cell carries no load - see battSagMv().
+int batteryPctTarget() {
+  if (batteryState() == BATT_DISCHARGING) return pctFromMv(batteryMv + battSagMv());
+  return pctFromMv(batteryMv);
+}
+// THE SHOWN NUMBER MOVES AT MOST ONE POINT PER 20 SECONDS, because the board cannot
+// tell quickly or reliably where its power comes from. There is no VBUS sense pin;
+// "on the cable" is usbLinkActive() - the Mac sent something within 10 s - and the
+// Mac's silence regularly outlasts that (state=1 at 4157 mV with the cable in,
+// 2026-10-11), and a real unplug is only noticed up to 10 s late. Either way the
+// sag term switches on or off for a few seconds where it should not: +8% on a
+// flicker mid-charge, -8% in the seconds after an unplug. A real battery moves far
+// slower - about a point every four minutes at full brightness, every eight on the
+// charger - so a one-point-per-20-s limit follows the cell and swallows those.
+// A gap in the ticks means the board slept (light idle stops loop() dead), which is
+// not a transient, so after one the number jumps straight to the target.
+int battShownPct = -1;
+unsigned long battShownAt = 0;
+unsigned long battShownTickAt = 0;
+void battShownTick() {
+  const int target = batteryPctTarget();
+  const unsigned long now = millis();
+  const bool slept = battShownTickAt && now - battShownTickAt > 60000UL;
+  battShownTickAt = now;
+  if (battShownPct < 0 || slept) { battShownPct = target; battShownAt = now; return; }
+  if (target == battShownPct || now - battShownAt < 20000UL) return;
+  battShownPct += target > battShownPct ? 1 : -1;
+  battShownAt = now;
+}
+#endif
+int batteryPct() {
+#if !BOARD_USES_TFT_ESPI
+  if (battShownPct >= 0) return battShownPct;
+  return batteryPctTarget();
+#endif
+  return pctFromMv(batteryMv);
+}
 // ----- Time remaining on battery -----
 //
 // There is no coulomb counter on this board, so runtime left can only come from
@@ -438,11 +595,32 @@ void battTrendReset() {
   battTrendLast = 0;
 }
 
+#if !BOARD_USES_TFT_ESPI
+// IS A COMPUTER ON THE CABLE - asked of the USB PHY, not of the Mac's traffic. This
+// board has no VBUS sense pin, and usbLinkActive() ("the Mac sent a payload over USB
+// within 10 s") was answering it: MEASURED WRONG, 2026-10-11 - with Bluetooth also up,
+// the Mac's traffic goes there and USB falls silent, so a full board on the cable
+// reported state=1 (on battery) again and again, and a real unplug was noticed up to
+// ten seconds late. HWCDC::isPlugged() is the S3's own USB-Serial-JTAG SOF watchdog:
+// true while a host is sending frames, whatever it is or is not saying. It has
+// millisecond glitches (the core's own note), so a plug is believed for 3 s after the
+// last frame seen. It cannot see a wall charger - nothing on this board can.
+unsigned long usbHostSeenAt = 0;
+bool usbHostPresent() {
+  if (HWCDC::isPlugged()) { usbHostSeenAt = millis(); return true; }
+  return usbHostSeenAt && millis() - usbHostSeenAt < 3000UL;
+}
+#endif
 BattState batteryState() {
   if (!batteryPresent()) return BATT_NONE;
   // While the TP4054 is charging, BAT_ADC reads the charge voltage, which
   // settles at ~4.2V as the cell fills.
-  if (usbLinkActive()) return batteryMv >= BATT_FULL_MV ? BATT_FULL : BATT_CHARGING;
+#if !BOARD_USES_TFT_ESPI
+  const bool cabled = usbHostPresent();   // the PHY, not the Mac's traffic - see above
+#else
+  const bool cabled = usbLinkActive();
+#endif
+  if (cabled) return batteryMv >= BATT_FULL_MV ? BATT_FULL : BATT_CHARGING;
   return BATT_DISCHARGING;
 }
 // Called from the 1s battery tick. Only accumulates while actually on battery:
@@ -647,7 +825,7 @@ const int BATT_CHG_KNEE_MV = 4100;
 // where the cell is "full" - the row says 100% and this is what makes that literal.
 // It sits ABOVE BATT_FULL_MV deliberately, so batteryState() flips to BATT_FULL and
 // the label disappears before the estimate could ever count down to zero.
-const int BATT_CHG_TARGET_MV = 4200;
+const int BATT_CHG_TARGET_MV = BOARD_BATT_TOP_MV;   // 4200 until the top moved to where this charger stops
 // THE SETTLE GUARD, AND IT IS A CORRECTNESS FIX RATHER THAN A TUNING ONE.
 // Plugging in makes the cell voltage snap up **+64 mV in SECONDS** - measured on
 // hardware, 3925 -> 3989 - because what the divider sees is the charger's terminal
@@ -1084,6 +1262,39 @@ void updateBeep() {
 void startBeep() {}
 void updateBeep() {}
 #endif
+#if BOARD_HAS_SD
+// PWROFF_SD_STANDBY's body. Plain IDF rather than SD_MMC: the deselect is a raw
+// CMD7 and SD_MMC keeps its card handle private, and nothing here wants a
+// filesystem - a mount would read the FAT only to throw it away.
+// Returns what the receipt prints: 0 stand-by, 1 no card answered (an empty slot
+// looks exactly like this), 2 the deselect itself failed, 3 the host would not
+// come up.
+uint8_t sdStandby() {
+  sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+  sdmmc_slot_config_t slot = SDMMC_SLOT_CONFIG_DEFAULT();
+  // 1-bit: CLK, CMD and D0 are all a deselect needs, and D1..D3 stay on their
+  // pull-ups - D3 HIGH at CMD0 is what keeps the card in SD mode rather than SPI.
+  slot.width = 1;
+  slot.clk = (gpio_num_t) PIN_SD_CLK;
+  slot.cmd = (gpio_num_t) PIN_SD_CMD;
+  slot.d0  = (gpio_num_t) PIN_SD_D0;
+  slot.d1 = slot.d2 = slot.d3 = GPIO_NUM_NC;
+  if (sdmmc_host_init() != ESP_OK) return 3;
+  if (sdmmc_host_init_slot(host.slot, &slot) != ESP_OK) { sdmmc_host_deinit(); return 3; }
+  sdmmc_card_t card;
+  if (sdmmc_card_init(&host, &card) != ESP_OK) { sdmmc_host_deinit(); return 1; }
+  // CMD7 to RCA 0 deselects every card: transfer -> stand-by. A deselected card
+  // does not answer, so the command carries no response flag - IDF's own
+  // sdmmc_send_cmd_select_card() builds a deselect exactly this way.
+  sdmmc_command_t cmd = {};
+  cmd.opcode = MMC_SELECT_CARD;
+  cmd.arg = MMC_ARG_RCA(0);
+  cmd.flags = SCF_CMD_AC;
+  const esp_err_t e = sdmmc_host_do_transaction(host.slot, &cmd);
+  sdmmc_host_deinit();   // and the clock stops with the host
+  return e == ESP_OK ? 0 : 2;
+}
+#endif
 // The actual teardown into deep sleep, shared by the manual power-off (BOOT
 // hold) and the automatic battery-idle sleep. Assumes a farewell has already
 // been drawn (or not) by the caller.
@@ -1128,13 +1339,31 @@ void enterDeepSleep() {
   prefs.putUInt("poMode", pwrOffMode);
   prefs.putUChar("poPs", 2);   // 2 = the panel step did not run
   prefs.putUShort("poCd", 0xFFFF);   // 0xFFFF = codec suspend did not run
+  prefs.putShort("poPm", -2);        // -2 = the panel was not read back
+  prefs.putUChar("poDs", 2);         // 2 = deep standby did not run
+  prefs.putUChar("poSd", 0xFF);      // 0xFF = SD standby did not run
 
   // 1. SLEEP THE PANEL - and KEEP THE RETURN. sleepPanel() has five paths that
   //    return false, and the first version of this discarded the result, so a
   //    step that silently never ran was indistinguishable from one that ran and
   //    did nothing. That is the same class as esp_pm_configure()'s stub.
-  if (pwrOffMode & PWROFF_PANEL_SLEEP)
-    prefs.putUChar("poPs", tft.sleepPanel(true) ? 1 : 0);
+  if (pwrOffMode & PWROFF_PANEL_SLEEP) {
+    const bool slept = tft.sleepPanel(true);
+    prefs.putUChar("poPs", slept ? 1 : 0);
+    // READ IT BACK, because "the bytes left the pins" is all the last three months
+    // of "sleepPanel=ok" turned out to mean - the panel ignored every one (see
+    // PanelShim::panelCmd). RDDPM (0x0A): bit 4 is sleep-OUT and bit 2 display-ON,
+    // so a panel that obeyed reads both CLEAR. Whether a read works on this bus at
+    // all is PANELPM's question; the receipt just keeps the byte, so a power-off
+    // reports what the panel said rather than what was sent.
+    if (slept) prefs.putShort("poPm", (int16_t) tft.panelRead(0x0A));
+    // 1b. DEEP STANDBY, only from a sleep-in that succeeded and after its 120 ms -
+    //     the datasheet's ">100ms", and 4Fh is "only effect at sleep in mode". See
+    //     PWROFF_PANEL_DSTB for why RESET is a free exit on this board. Set alone,
+    //     without PANEL_SLEEP, this bit does nothing and the receipt says skipped.
+    if (slept && (pwrOffMode & PWROFF_PANEL_DSTB))
+      prefs.putUChar("poDs", tft.deepStandby() ? 1 : 0);
+  }
 
   // 2a. SUSPEND THE CODEC - Espressif's es8311_suspend(), verbatim and in order
   //     (esp-adf components/esp_codec_dev/device/es8311/es8311.c). The single
@@ -1173,7 +1402,10 @@ void enterDeepSleep() {
                                pdMS_TO_TICKS(50));
   }
 
-  // 3. HOLD THE DISPLAY IC IN RESET. Deeper than SLPIN and it reaches what SLPIN
+  // 3. HOLD THE DISPLAY IC IN RESET. (CORRECTED 2026-10-10 from the vendor
+  //    schematic: GPIO48 is the TOUCH reset, TP_RESX, and nothing else - the
+  //    display's RESX is on EN. So this resets the touch controller, which is the
+  //    part the note below is right about: it is what scans.) Deeper than SLPIN and it reaches what SLPIN
   //    cannot: the capacitive TOUCH controller lives INSIDE the ST77922 (I2C
   //    0x55) and scans continuously. Nothing is lost by it here - touch cannot
   //    wake a powered-off board 2, which is the whole reason this board has no
@@ -1193,6 +1425,10 @@ void enterDeepSleep() {
   //    measurement, and it is written down as one; what makes it safe to act on
   //    here is that deep sleep ends in a RESET, so there is no state to restore
   //    and nothing to get wrong on the way out.
+  //    CORRECTED 2026-10-10: that A-B-A was measured while SLPIN NEVER REACHED the
+  //    panel (the shim sent an unframed command - see PWROFF_PANEL_SLEEP), so SLPIN
+  //    cannot have caused it, and this hypothesis explains nothing. The result
+  //    stands unexplained. QUIET_PINS below is the defined-level alternative.
   //    rtc_gpio_isolate() disconnects output, input AND the pull resistors, which
   //    is why it beats driving the pin to a level - a driven level is exactly
   //    what injects. All six are RTC GPIOs (SOC_RTCIO_PIN_COUNT is 22, so 0..21)
@@ -1229,7 +1465,36 @@ void enterDeepSleep() {
   if (pwrOffMode & PWROFF_RTC_OFF)
     esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_OFF);
 
-  if (pwrOffMode & PWROFF_QSPI_ISOLATE)
+  // 5b. QUIET PINS - see PWROFF_QUIET_PINS. AFTER every step that talks over these
+  //     pins (the panel commands above), and each level is set BEFORE its pad
+  //     becomes an output, so the panel's CS never glitches low on the way.
+  //     gpio_config rather than pinMode: Arduino's pinMode would route the pin
+  //     through the peripheral manager (and the I2S driver's own teardown), and
+  //     this needs the INTERNAL pulls explicitly off - a held LOW against an
+  //     internal pull-up is ~73 uA a pin spent on nothing. PIN_I2S_DIN is not in
+  //     the table on purpose: the codec drives it.
+  if (pwrOffMode & PWROFF_QUIET_PINS) {
+    static const struct { uint8_t pin; uint8_t level; } quiet[] = {
+      { PIN_LCD_CS, 1 },   { PIN_LCD_SCK, 0 },  { PIN_LCD_D0, 0 },
+      { PIN_LCD_D1, 0 },   { PIN_LCD_D2, 0 },   { PIN_LCD_D3, 0 },
+      { PIN_I2S_MCLK, 0 }, { PIN_I2S_BCLK, 0 }, { PIN_I2S_LRCK, 0 }, { PIN_I2S_DOUT, 0 },
+    };
+    for (unsigned i = 0; i < sizeof(quiet) / sizeof(quiet[0]); i++) {
+      const gpio_num_t g = (gpio_num_t) quiet[i].pin;
+      gpio_set_level(g, quiet[i].level);
+      gpio_config_t c = {};
+      c.pin_bit_mask = 1ULL << g;
+      c.mode = GPIO_MODE_OUTPUT;
+      c.pull_up_en = GPIO_PULLUP_DISABLE;
+      c.pull_down_en = GPIO_PULLDOWN_DISABLE;
+      c.intr_type = GPIO_INTR_DISABLE;
+      gpio_config(&c);
+      gpio_set_level(g, quiet[i].level);
+      gpio_hold_en(g);
+    }
+  }
+  // Floating the same six pins would undo the levels just held, so it yields.
+  if ((pwrOffMode & PWROFF_QSPI_ISOLATE) && !(pwrOffMode & PWROFF_QUIET_PINS))
     for (unsigned i = 0; i < sizeof(qspi) / sizeof(qspi[0]); i++) rtc_gpio_isolate(qspi[i]);
   // 6. FLOAT THE USB D-/D+ PADS. This core sets CONFIG_USJ_ENABLE_USB_SERIAL_JTAG
   //    and CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG (CDCOnBoot=cdc requires them), so the
@@ -1264,13 +1529,25 @@ void enterDeepSleep() {
     digitalWrite(PIN_AMP_EN, LOW);
     gpio_hold_en((gpio_num_t) PIN_AMP_EN);
   }
-  if (pwrOffMode & PWROFF_SD_ISOLATE) {
+  // 7a. SD STANDBY - see PWROFF_SD_STANDBY. Before the isolate below, which it
+  //     implies: after the deselect the bus is handed to its own 10K pull-ups.
+#if BOARD_HAS_SD
+  if (pwrOffMode & PWROFF_SD_STANDBY) prefs.putUChar("poSd", sdStandby());
+#endif
+  if (pwrOffMode & (PWROFF_SD_ISOLATE | PWROFF_SD_STANDBY)) {
     const gpio_num_t sd[] = {
       (gpio_num_t) PIN_SD_CLK, (gpio_num_t) PIN_SD_CMD, (gpio_num_t) PIN_SD_D0,
       (gpio_num_t) PIN_SD_D1,  (gpio_num_t) PIN_SD_D2,  (gpio_num_t) PIN_SD_D3,
     };
     for (unsigned i = 0; i < sizeof(sd) / sizeof(sd[0]); i++) rtc_gpio_isolate(sd[i]);
   }
+  // 9. THE OFF READING, AGAIN AND LAST. Record-first above keeps a value in case a
+  //    step hangs, but it is the EMA, read seconds after the screen went dark. This
+  //    one is raw and taken after every step - backlight, panel, codec, amp, touch,
+  //    card all off - so the load is the S3 and its radio, matching the wake reading
+  //    setup() now takes before anything is switched on. Same load at both ends is
+  //    what makes a short power-off run measure the cell instead of the load.
+  prefs.putUShort("poMv", (uint16_t) batteryRestMv(32));
   // NOT powering down VDD_SPI here, and that is a REVERSAL of an earlier guess.
   // This core already sets CONFIG_ESP_SLEEP_{PSRAM,FLASH}_LEAKAGE_WORKAROUND and
   // CONFIG_ESP_SLEEP_MSPI_NEED_ALL_IO_PU, and esp_deep_sleep_start() powers the

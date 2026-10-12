@@ -465,7 +465,34 @@ const int BORDER_CTRL = 1;
 // reading, or a lower threshold here. Guessing now would bake one of them in.
 // Leaving 4180 keeps today's behaviour exactly as it is, wrong pill and all,
 // rather than inventing a number - the seam is what this split buys.
-#define BOARD_BATT_FULL_MV 4180
+// DECIDED 2026-10-11, WITHOUT THE METER, FOR THE DISPLAY'S SAKE: whichever cause it
+// is, the TOP OF THE DISPLAY should be where this board's charger actually stops.
+// 5106 collector samples top out at 4167 mV and a finished charge rests at
+// 4157..4162; the owner never once saw 100%. And after the TP4054 stops, a full cell
+// drifts DOWN for hours before it restarts - 4148 mV at rest on the cable the same
+// afternoon - so all of 4140..4167 is a finished charge. So 100% is 4140
+// (BOARD_BATT_TOP_MV) and FULL flips a little below it, keeping "the pill reads full a couple of points
+// before the percentage reaches 100" from board 1. If the divider DOES read ~1% low,
+// the middle of the curve stays ~1% low as it always was - inside the error of a
+// generic Li-ion table that was never this cell's anyway. The open question above
+// stays open; what it no longer does is hide 100% from a full battery.
+#define BOARD_BATT_FULL_MV 4130
+// Where pctFromMv() says 100, per board: board 1's 4200 is its table's own top row.
+#define BOARD_BATT_TOP_MV  4140
+// THE LOAD'S SAG, ADDED BACK FOR THE DISPLAY ON BATTERY (2026-10-11). Unplugging a
+// full board read 4158 -> 4074 mV in one sample - the same charge seen through ~0.3
+// ohm with the awake board now on the cell - and the owner watched 95% become 86%.
+// Two terms, because the backlight is the one big load that moves: a fixed part for
+// the awake board, and a part proportional to the backlight's live duty. MEASURED on
+// this board, 2026-10-11, at full brightness: `BATTSAG measure` stepped the backlight
+// full -> off and the cell rose 4046 -> 4074 mV, so the backlight is 28 mV of it; an
+// unplug from a finished charge dropped the cell 4152 -> 4048 mV, 104 mV in all, so
+// the awake board without its backlight is the other ~76. (The first guess split 84 mV
+// 36/48 by the backlight's nominal 120 mA - the backlight turned out to be the SMALLER
+// share.) Every later unplug from a finished charge corrects these to the drop it saw,
+// and `BATTSAG measure` re-measures the backlight; both are kept in NVS.
+#define BOARD_BATT_SAG_BASE_MV 76
+#define BOARD_BATT_SAG_BL_MV   28
 
 // ============================================================================
 // LAYOUT - DERIVED FOR 320x480, NOT SCALED FROM BOARD 1

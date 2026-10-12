@@ -254,6 +254,10 @@ only) is running instead; hours of ordinary use average over noise a short windo
 
 #### AUTO POWER-OFF: the saving existed and was simply never REACHED
 
+> **CORRECTED 2026-10-10:** the -6.9 below was never light sleep. It is a POWER-OFF leg (4113 ->
+> 3979 mV over 19.4 h, the owner confirmed pressing POWER OFF), first read as light sleep and later
+> reused for it. Light idle has no measurement of its own - see "LIGHT IDLE" below.
+
 Power-off measures at **-3.6 mV/h** and light sleep at **-6.9**, and the everyday pattern - unplug
 and walk away - lands on the WORSE one. A 13-hour absence was measured doing exactly that: no
 `PWROFF` record, so it had light-slept the whole time. **The fix was in a path the device rarely
@@ -266,6 +270,9 @@ entered.** `AUTO_POWEROFF_MS` (2h, board 2) now routes it there on its own.
 > for a device whose owner has not turned light idle on. `AUTO_POWEROFF_MS` is left at two hours
 > rather than shortened: shortening it would save almost nothing and cost touch-to-wake. See
 > "LIGHT IDLE ALREADY COSTS ABOUT WHAT POWER-OFF DOES" below.
+> **WITHDRAWN 2026-10-10:** the -6.9 this compared against was itself a power-off leg, so this box
+> compared power-off with power-off. Whether shortening `AUTO_POWEROFF_MS` saves anything needs a
+> light-idle measurement nobody has made.
 
 **THIS REOPENS A DECISION THAT WAS CLOSED, AND THE OLD REASONING IS KEPT IN PLACE rather than
 deleted.** `BOARD_HAS_TOUCH_SLEEP_WAKE`'s note refuses auto-sleep here because this board cannot
@@ -322,6 +329,11 @@ default**, on this evidence:
 | panel sleep + QSPI isolate | **-6.9 mV/h** | 0.86 | 19.4 h | 4113 -> 3979 mV, shipped blind, NO HELP |
 | **0x7** | **-3.6 mV/h** | **0.43** | 8.9 h | 4077 -> 4045 mV, `sleepPanel=ok` |
 
+> **CORRECTED 2026-10-10:** `sleepPanel=ok` in this leg meant only that the bytes left the pins -
+> the panel ignored them (see "THE PANEL NEVER SLEPT" below). So whatever this halving was, it came
+> from the touch reset and the codec write, with the ST77922 awake throughout; and the legs it
+> compares were on the cell this board had before its replacement around 2026-09-12.
+
 About HALF - roughly 10%/day where it was 17-21%/day. **The comparison errs against the result:**
 this run sat entirely in 4045..4077 where `pctFromMv()`'s curve is STEEPER (8.3 mV per point) than
 the band the references spanned, so equal current would have read a LARGER mV/h here, not smaller.
@@ -354,6 +366,9 @@ blurred those together.
 > controller draws roughly 1mA (datasheet-typical, NOT measured here) whenever it has power, showing
 > black or not, and only losing its supply stops it. The regulator part number is likewise unknown -
 > the vendor page omits it and there is no schematic in this repo.
+>
+> **ANSWERED 2026-10-10:** the vendor's own schematic names every part - two ME6217C33M5G LDOs at
+> ~100 uA each, a TP4054 charger, no power LED. See "WHAT THE BOARD DRAWS WHEN OFF" below.
 >
 > So: the remaining ~10%/day is real and measured. Attributing it to named parts is guesswork until
 > somebody puts a meter in series with the cell, and it should not be written as though it were not.
@@ -402,9 +417,19 @@ The fix is two steps and **the order is load-bearing, because the sleep command 
 pins the second step disconnects**:
 
 1. `tft.sleepPanel(true)` - the shim method that actually emits DISPOFF+SLPIN.
+
+   > **CORRECTED 2026-10-10 - IT DID NOT, AND THE PANEL NEVER SLEPT.** `sleepPanel()` handed the
+   > bare register to a QSPI handle built for 32-bit commands, and the ST77922 decodes only a
+   > framed one (instruction 0x02 in the top byte, register at bits 8..15). So it EMITTED bytes,
+   > the panel ignored them, and `esp_lcd` returned ESP_OK all the same. This section diagnosed
+   > the right part and shipped a fix that was itself a no-op - see "THE PANEL NEVER SLEPT" below.
 2. `rtc_gpio_isolate()` on all six QSPI pins (CS 10, SCK 12, D0 11, D1 13, D2 14, D3 9). All are
    inside the S3's RTC set (`SOC_RTCIO_PIN_COUNT` 22, so 0..21), which is what makes this
    reachable; the backlight on **41 is not**, and keeps its `gpio_hold_en` latch instead.
+
+> **CORRECTED 2026-10-10:** the PANELSLEEP result this paragraph explains was measured while SLPIN
+> never reached the panel, so SLPIN cannot have caused it. The hypothesis below explains nothing and
+> the result stands unexplained.
 
 **STEP 2 IS ALSO THE BEST EXPLANATION FOR THE PANELSLEEP RESULT ABOVE, AND IT IS A HYPOTHESIS,
 NOT A MEASUREMENT.** SLPIN collapses the panel's internal rails; six QSPI pins still driven by an
@@ -558,6 +583,12 @@ curve to 2769 mV. `qspiIsolate` (`0x8`) remains measured-against, as recorded ab
 
 #### LIGHT IDLE ALREADY COSTS ABOUT WHAT POWER-OFF DOES
 
+> **CORRECTED 2026-10-10 - THE -6.9 WAS A POWER-OFF LEG, AND THIS SECTION COMPARES NOTHING.** The
+> figure (4113 -> 3979 mV over 19.4 h) was first attributed to light idle, then the owner confirmed
+> they had pressed POWER OFF - it is the "panel sleep + QSPI isolate" row of the power-off table
+> above - and it was later reused for light idle as well. **Light idle has never been measured on its
+> own.** Kept as written below, because the next reader needs to see what the claim rested on.
+
 Blanked with light idle **-6.9 mV/h** (this file, above) against power-off **-7.4** (the 69-hour
 run). Different-length legs, so "about equal" rather than a tie - but it means that on a device with
 light idle on, shortening `AUTO_POWEROFF_MS` saves almost nothing, at the price of needing RESET to
@@ -592,6 +623,15 @@ Measured 2026-10-09 from the collector, the device awake and on the Mac's cable 
 Consistent with 2026-09-25 (~8 %/h, 22% -> 38% in ~2 h), so it is how this board charges, not a
 fault. Compare in %/h: mV/h falls through the flat middle of the curve at a constant current.
 
+> **CORRECTED 2026-10-10 FROM THE VENDOR SCHEMATIC.** The charger is a **TP4054** with its PROG
+> resistor R12 = 3.3K, which programs about **0.3 A** (the vendor says 290 mA). It charges the cell
+> and nothing else: on USB the board runs from VBUS through the Schottky D8, and the battery's P-FET
+> Q3 is held OFF by VBUS on its gate. So the awake board does NOT take a share of the charge current,
+> and "charging powered off should be faster" is withdrawn - the two should match, bar the TP4054's
+> own thermal limit. 6.5-7 %/h fits the claimed 3000 mAh if about 0.2 A reaches the cell, which a
+> SOT-23 TP4054 dissipating ~0.4 W can be expected to throttle to (INFERENCE, unmeasured). Kept below
+> as written.
+
 Why, as INFERENCE: the charger is small for the cell - this file's heat estimate (`(5V - Vbat) x
 Icharge` ~ half a watt) puts it near **0.4 A**, 7-8 h for 3000 mAh with nothing running - and the
 observed rate implies only **~0.2 A** reaching the cell, consistent with the awake device consuming
@@ -615,3 +655,166 @@ simply drains through zero. **Not built, proposed:** a warning at power-off belo
 hours, charge first"), an immediate power-off below ~3.45 V while awake, and a Mac notification on a
 low reading. After two deep discharges, a loss of capacity would show as a faster %/h drain on the
 next control leg - which is one more reason that leg comes first.
+
+#### THE PANEL NEVER SLEPT - THE COMMAND FRAMING, FOUND 2026-10-10
+
+**Every power-off this board has done ran with the ST77922 fully awake behind a dark backlight**,
+and so did every PANELSLEEP leg. The panel's bus is QSPI with 32-bit commands
+(`ESP_PANEL_BOARD_LCD_QSPI_CMD_BITS` = 32), and the panel decodes only a FRAMED command: an
+instruction in the top byte - 0x02 write, 0x0B read - and the register at bits 8..15. The vendor
+driver builds exactly that (`esp_lcd_st77922_general.c`, its `tx_param()`), and everything the
+LIBRARY sends goes through it. `PanelShim::sleepPanel()` alone went straight to the control handle
+with the bare register, so DISPOFF and SLPIN went out as instruction 0x00 and were ignored - while
+`esp_lcd_panel_io_tx_param()` returned ESP_OK, because the SPI transfer itself succeeded. That is all
+"sleepPanel=ok" in every receipt ever meant.
+
+**Measured on the device, 2026-10-10**, with the new `PANELPM` instrument and the framed path
+(`PanelShim::panelCmd` / `panelRead`):
+
+```
+PANELPM pm=156 id=255/255/255
+PANELPM blink: DISPOFF sent, DISPON sent; pm 156 -> 152 -> 156
+```
+
+156 is 0x9C - booster on, sleep-out, normal mode, display on - and DISPOFF cleared exactly bit 2
+(display on, 0x98) and DISPON set it back. So framed commands reach the panel AND a 0x0B read works
+on this wiring, which no driver in the library had ever done. The three ID bytes read 0xFF and are
+not needed. **NOT shown on hardware:** that the bare form was ignored. That rests on the vendor
+framing and the bus width, both read from the code; no build has sent the old form since.
+
+What it reinterprets: the "POWER OFF LEAKED" diagnosis was right about the part and its fix was a
+no-op; "PANELSLEEP is a COST" cannot have been the panel sleeping and is unexplained; the 0x7 leg's
+halving was the touch reset and the codec write. **How much of the ~1 %/h the awake panel was is
+unknown** - the datasheet's current table is "TBD" for every mode - and the run below measures it.
+
+#### WHAT THE BOARD DRAWS WHEN OFF, FROM THE VENDOR SCHEMATIC (2026-10-10)
+
+The schematic was on disk the whole time, outside this repo: `/Users/yujia/projects/demo/vendor/
+schematic.pdf` (the vendor's: https://www.lcdwiki.com/res/ES3C35P/ESP32-S3%E5%8E%9F%E7%90%86%E5%9B%BE.pdf).
+The power path: USB VBUS reaches "+5" through the Schottky D8; the cell reaches it through Q3, an
+SL2305 P-FET whose gate is VBUS (R13 100K to ground), so it conducts exactly when USB is absent.
+**There is no boost converter, no load switch, no PMIC, no ship mode, and no LED but the WS2812B.**
+Nothing firmware controls can disconnect the battery.
+
+| always powered | part | battery drain (datasheet; not measured here) |
+|---|---|---|
+| 3.3 V for the board | U3 ME6217C33M5G, CE tied to VIN | ~100 uA |
+| 3.3 V for the codec and mic | U4 ME6217C33M5G, CE tied to VIN | ~100 uA |
+| mic | LMA2718B381-OA7 (analog) | ~120 uA (sibling part) |
+| RGB LED | XL-5050RGBC-WS2812B on "+5" | ~0.3-1 mA (rated 4.5-5.5 V, runs at battery voltage) |
+| battery divider | R14/R15 100K | ~20 uA |
+| charger | TP4054, no USB | ~6 uA |
+| amp in shutdown | SC8002B | ~1 uA - IF fully shut down; see below |
+| the SoC | ESP32-S3R8 in deep sleep | ~8 uA |
+| **sum** | | **about 0.7-1.4 mA** |
+
+Two more, with no figure: the ST77922 in its sleep states ("TBD"), and the microSD card, which is on
+VCC3V3 directly and varies tenfold by model (0.1 mA to several mA idle; the SD spec allows 15 mA
+before a card's first command). **A drain of ~1 %/h is tens of times that sum** - if the cell is the
+3000 mAh it is sold as (never measured), it is ~30 mA - so something software can reach was still on.
+
+**One part code cannot fix:** the amp's SHUTDOWN pin has a 10K pull-up to 3.3 V (R26) while the amp
+itself runs at battery voltage, up to 4.2 V. Its LM4871-style input trips near half-supply, and the
+USB result (no gating at ~4.7 V) puts the trip above ~0.7 x VDD - so near full charge, 3.3 V on a
+4.2 V supply (0.79 x VDD) may leave it only partly off. INFERENCE; a GPIO cannot drive above 3.3 V.
+
+**Lines with pull-ups**, so a LOW held on any of them costs ~0.33 mA: the six SD lines, the two I2C
+lines (R29/R30), IO0 (R10) and IO1 (R26), all 10K to 3.3 V. The backlight gate has R32 10K to ground,
+so it is off when floating too. None of the steps below holds a pulled-up line low.
+
+#### THREE MORE STEPS, AND A CONTROL THAT MEANS WHAT IT SAYS (2026-10-10)
+
+| bit | step | status |
+|---|---|---|
+| `0x800` panelDstb | after a SLPIN that succeeded and its 120 ms, `0x4F = 0x01` - deep standby, the panel's lowest state. Its only exit is a RESX low pulse, and RESX is wired to EN: the RESET key that ends this power-off resets the panel too. The constraint it leaves: a future non-reset wake (a timer, a BOOT-key ext1) would find the panel deaf until RESET | built |
+| `0x1000` quietPins | the panel's six QSPI lines (CS high, the rest low) and the codec's MCLK, BCLK, LRCK and our data OUT (low) driven to idle levels with internal pulls off, then held. The codec's data out to us is left alone - it drives it. These lines feed chips on always-on rails and have no pull resistors | built |
+| `0x2000` sdStandby | the card initialised (1-bit, no filesystem), deselected with CMD7 to RCA 0 - stand-by - the clock stopped, and the bus left on its own pull-ups. Implies `0x80` | built |
+
+Each records its outcome in the receipt: `pm=` (what the panel's power-mode register read after
+SLPIN; a panel that obeyed reads sleep-out and display-on CLEAR), `dstb=`, `sd=` (`standby`,
+`nocard`, or which step failed). `batt-trend-check.py` binds all of it and caught 19 of 19
+injected faults, one per claim.
+
+**The comparison, 2026-10-10:** `0x36` against `0x3E37`, same protocol for both - charged full, an hour
+awake on battery near the Mac, power off there, 48 h. `0x36` is every step `0x37` has except the
+panel sleep, which reproduces what the board ACTUALLY did before this fix, since that step never
+reached the panel. `0x3E37` is everything code can do: the panel asleep and in deep standby, the
+codec suspended, the amp held off, the touch in reset, the quiet pins and the card in stand-by.
+
+**MEASURED, 2026-10-10..11** - three receipt-bracketed runs, the same protocol each time: charged on the
+cable, unplugged, powered off with BOOT straight away, RESET near the Mac.
+
+| run | mode | off at | awake at | drop | time off | raw rate |
+|---|---|---|---|---|---|---|
+| 1 | `0x36` (the old behaviour) | 4113 mV | 3898 mV | 215 mV | ~11.6 h | 18.5 mV/h |
+| 2 | `0x3E37` (everything) | 4109 mV | 3990 mV | 119 mV | 7.09 h | 16.8 mV/h |
+| 3 | `0x3E37` (everything) | 4062 mV | 3951 mV | **111 mV** | **14.86 h** | **7.5 mV/h** |
+
+Every `0x3E37` receipt read `sleepPanel=ok pm=0x88 dstb=ok codec=0D:FC/01:00 sd=standby`: the panel
+reported itself asleep with its display off, then took deep standby, the codec was fully suspended,
+and the card was deselected. **Run 3 was off three hours LONGER than run 1 and lost about HALF as
+much**, and that holds with no correction at all. Corrected for a fixed error of roughly 60-120 mV per
+run (below), the power-off drain fell from about 8-13 mV/h to about 1-5 mV/h - **a 60-90% cut, best
+estimate ~75%**, or about 40 mA down to about 10 mA if the cell is the 3000 mAh on its label
+(unverified). A full charge that lasted 3-4 days powered off should now last roughly one to four
+weeks. **The bits were NOT bisected**: which of the five did the work is not known, only that together
+they do. Run 3 started four minutes after unplugging rather than at once, which lowers its `off at`
+and, if anything, flatters run 1.
+
+**THE FIXED ERROR, AND WHERE MOST OF IT COMES FROM.** Unplugging a full board on 2026-10-10 dropped
+its reading from 4158 to 4074 mV in one sample: the same charge, read through ~0.3 ohm with the
+awake board's load now on the cell. And `setup()` sets the backlight to 100% and switches the amp
+on BEFORE `loadPwrOffRecord()` takes its "awake at" reading - so every receipt's wake reading sits
+under full load, tens of mV below the cell's rest voltage, while its "off at" comes from an EMA
+whose samples were taken with the screen lit. Add the post-charge relaxation when the run starts
+straight off the charger, and a 7-hour run's real signal is about the size of its error.
+
+#### THE DEFAULT IS NOW 0x3E37, AND THE RECEIPT READS BOTH ENDS THE SAME WAY (2026-10-11)
+
+**`pwrOffMode` defaults to `0x3E37`** - the measured combination above. A PWROFFMODE stored in NVS still
+wins, and `0` still reproduces the original teardown for a future A/B on the same cell. The five new
+bits were measured together and never bisected, so the default credits the combination.
+
+**Both ends of a receipt are now `batteryRestMv(32)`**, a raw average taken under the S3's own load:
+the wake end is the FIRST thing `setup()` does, before the backlight, the amp, the radio or the panel
+draw anything; the off end is the LAST thing the teardown does, after every step. Before this the
+wake end sat under full brightness and the amp, and the off end was a one-second EMA still carrying
+the lit screen - the unplug step below is the size of that error. What it does not remove: the
+post-charge relaxation when a run starts straight off the charger. **Runs taken before 2026-10-11 and
+after it are not directly comparable**; the old figures stand as measured, with the old instrument.
+
+#### THE BATTERY NUMBER ON BATTERY ADDS THE LOAD'S SAG BACK, AND 100% IS REACHABLE (2026-10-11)
+
+**Measured 2026-10-10, the owner watching:** unplugging a full board took the reading from **4158 to
+4074 mV in one sample, 95% to 86%**, with nothing used. On the cable the board runs from VBUS and the
+cell carries no load; off it, the whole awake board - full backlight, radio, amp - is drawn through
+roughly 0.3 ohm of cell, protection and connector. The percentage was the voltage on a curve, so it
+read the load, not the charge.
+
+On battery (`batteryState() == BATT_DISCHARGING`), `batteryPct()` now reads the curve at **the voltage
+plus the sag** the load causes: `sagBaseMv` for the awake board plus `sagBlMv` scaled by the
+backlight's LIVE duty (`ledcRead`, clamped to 255 - dimming, blanking and the voice card all write the
+pin directly). So unplugging no longer drops the number, and blanking the screen no longer lifts it.
+On the cable nothing is added. Board 2 only; board 1's percentage is the raw curve as before.
+
+**The model calibrates itself.** Its starting values are this board's own, measured 2026-10-11 at full
+brightness: `BATTSAG measure` put the backlight at **28 mV** (4046 -> 4074 mV, full to off), and an
+unplug from a finished charge dropped the cell **104 mV** (4152 -> 4048), leaving **~76 mV** for the
+awake board without its backlight - the backlight is the SMALLER share, against a first guess of
+36/48. On that same unplug the old uncorrected number would have read **83%**; the corrected one
+read 98-99%.
+`BATTSAG measure` replaces the backlight term with a measurement - the backlight to full and to off for
+1.5 s each, visibly - and every unplug that follows a FINISHED charge corrects the model to the drop it
+actually saw (the base alone once the backlight term is measured; both in proportion before that). A
+mid-charge unplug is ignored, since the charger's own push is in that drop. Both terms live in NVS.
+**Known limit:** the board has no VBUS sense pin, and "on the cable" is `usbLinkActive()` - a data
+link to the Mac. On a wall charger the board believes it is on battery and adds the sag anyway, so
+the number reads high there.
+
+**100% and FULL now happen on board 2.** `BOARD_BATT_TOP_MV` puts the curve's top row where each
+board's charger stops - 4200 on board 1, **4140** on board 2, whose finished charges read 4157-4167 mV
+and then drift down for hours (4148 mV at rest the same afternoon) before the TP4054 restarts - and
+`BOARD_BATT_FULL_MV` drops to **4130**, so the full pill appears a point or two before 100%,
+as on board 1. The charge estimator's target follows the top. Which of the two explanations for the
+low top is right (a ~1% low divider or a charger at the low end of its 4.2 V +/-1%) is still open;
+either way the display now shows a finished charge as 100%.
