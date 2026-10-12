@@ -705,26 +705,26 @@ static int16_t beepTone[BEEP_TONE_FRAMES * 2];
 // beeper. Must run AFTER the I2C bus exists, since the codec shares the port
 // touch installed; asserted rather than assumed, because a silent failure here
 // would present as "the beep does not work" a long way from its cause.
-bool audioOutBegin() {
-  if (audioOutReady) return true;
+// THE CHAIN'S STATE, separate from audioOutReady: Ready says the codec answered at
+// boot and the chain CAN run; Awake says it is running NOW - I2S clocking, codec
+// initialised, amp enabled. See AUDIO_IDLE_SLEEP_MS for why it is not always on.
+static bool audioAwake = false;
+static unsigned long audioAwakeSince = 0;   // when the amp was enabled: its ramp starts here
+static unsigned long audioLastUseAt = 0;    // the idle clock - see audioIdleTick() in power.ino
 
-  // I2S FIRST so MCLK is running before the codec computes its dividers off it -
-  // the order Espressif's own i2s_es8311 example uses.
+// UP: I2S FIRST so MCLK is running before the codec computes its dividers off it -
+// the order Espressif's own i2s_es8311 example uses - then the codec exactly as boot
+// always set it, then the amp. es8311_init() resets every register, so the volume
+// is re-applied here rather than trusted to survive. Boot and every later wake run
+// this same function, so the two can never configure the codec differently.
+static bool audioChainUp() {
   I2SClass& i2s = audioI2s();
   i2s.setPins(PIN_I2S_BCLK, PIN_I2S_LRCK, PIN_I2S_DOUT, PIN_I2S_DIN, PIN_I2S_MCLK);
   if (!i2s.begin(I2S_MODE_STD, TONE_SAMPLE_HZ, I2S_DATA_BIT_WIDTH_16BIT,
                  I2S_SLOT_MODE_STEREO)) {
-    Serial.printf("AUDIO OUT: I2SClass::begin() failed - bclk=%d lrck=%d dout=%d "
-                  "din=%d mclk=%d. No beeper this boot.\n", PIN_I2S_BCLK,
-                  PIN_I2S_LRCK, PIN_I2S_DOUT, PIN_I2S_DIN, PIN_I2S_MCLK);
-    return false;
-  }
-
-  audioCodec = es8311_create(I2C_NUM_0, ES8311_ADDRESS_0);
-  if (audioCodec == NULL) {
-    Serial.println("AUDIO OUT: es8311_create() returned NULL (out of heap). "
-                   "No beeper this boot.");
-    i2s.end();
+    Serial.printf("AUDIO: I2SClass::begin() failed - bclk=%d lrck=%d dout=%d din=%d "
+                  "mclk=%d.\n", PIN_I2S_BCLK, PIN_I2S_LRCK, PIN_I2S_DOUT, PIN_I2S_DIN,
+                  PIN_I2S_MCLK);
     return false;
   }
   const es8311_clock_config_t clk = {
@@ -732,55 +732,103 @@ bool audioOutBegin() {
     .mclk_from_mclk_pin = true, .mclk_frequency = TONE_MCLK_HZ,
     .sample_frequency = TONE_SAMPLE_HZ,
   };
-  esp_err_t e = es8311_init(audioCodec, &clk, ES8311_RESOLUTION_16,
-                            ES8311_RESOLUTION_16);
+  const esp_err_t e = es8311_init(audioCodec, &clk, ES8311_RESOLUTION_16,
+                                  ES8311_RESOLUTION_16);
   if (e != ESP_OK) {
-    Serial.printf("AUDIO OUT: es8311_init() = %s (0x%x). No beeper this boot.\n",
-                  esp_err_to_name(e), e);
-    es8311_delete(audioCodec);
-    audioCodec = NULL;
+    Serial.printf("AUDIO: es8311_init() = %s (0x%x).\n", esp_err_to_name(e), e);
     i2s.end();
     return false;
   }
   es8311_sample_frequency_config(audioCodec, TONE_MCLK_HZ, TONE_SAMPLE_HZ);
   es8311_voice_mute(audioCodec, true);   // the idle state IS muted
-
 #if BOARD_HAS_MIC
-  // CAPTURE, configured here because es8311_init() already set up both directions
-  // and these two calls only select WHICH input and how much gain. digital_mic is
-  // false and that is a schematic reading rather than a default: the capsule is
-  // analog into MIC1P/MIC1N with no clock line - see the note in the board header.
-  // Both return codes are reported, because a mic that was never configured
-  // records digital silence, which is indistinguishable from a dead capsule.
-  const esp_err_t me = es8311_microphone_config(audioCodec, false);
-  const esp_err_t ge = es8311_microphone_gain_set(audioCodec, MIC_GAIN);
-  Serial.printf("AUDIO IN: analog mic configured (%s), gain set (%s).\n",
-                esp_err_to_name(me), esp_err_to_name(ge));
+  es8311_microphone_config(audioCodec, false);
+  es8311_microphone_gain_set(audioCodec, MIC_GAIN);
 #endif
+  es8311_voice_volume_set(audioCodec, beepDuty, NULL);   // init reset it
+  pinMode(PIN_AMP_EN, OUTPUT);
+  digitalWrite(PIN_AMP_EN, AMP_EN_ENABLE_LEVEL);
+  audioAwake = true;
+  audioAwakeSince = audioLastUseAt = millis();
+  return true;
+}
 
-  // sinf rather than a square wave: a square's harmonics run past the codec's
-  // reconstruction filter, and its ringing would be part of every beep.
+// DOWN: silence first, then the amp to its OFF level (HIGH on battery, heard
+// 2026-10-05; on USB a 3.3 V high cannot reach it, which costs the cable nothing),
+// then Espressif's own suspend, then the I2S clocks. The four lines the ESP drives
+// into the codec are then held LOW rather than left floating into a chip whose rail
+// is always on - PWROFF_QUIET_PINS's reasoning, applied while awake.
+static void audioChainDown() {
+  if (!audioAwake) return;
+  es8311_voice_mute(audioCodec, true);
+  digitalWrite(PIN_AMP_EN, AMP_EN_ENABLE_LEVEL == LOW ? HIGH : LOW);
+  codecSuspendRegs();
+  audioI2s().end();
+  static const uint8_t outPins[] = { PIN_I2S_MCLK, PIN_I2S_BCLK, PIN_I2S_LRCK, PIN_I2S_DOUT };
+  for (unsigned i = 0; i < sizeof(outPins); i++) {
+    const gpio_num_t g = (gpio_num_t) outPins[i];
+    gpio_set_level(g, 0);
+    gpio_config_t c = {};
+    c.pin_bit_mask = 1ULL << g;
+    c.mode = GPIO_MODE_OUTPUT;
+    c.pull_up_en = GPIO_PULLUP_DISABLE;
+    c.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    c.intr_type = GPIO_INTR_DISABLE;
+    gpio_config(&c);
+    gpio_set_level(g, 0);
+  }
+  audioAwake = false;
+}
+
+// EVERY USER OF THE CHAIN CALLS THIS FIRST. waitForAmp blocks for whatever is left of
+// the amp's ramp - right for the blocking paths (the mic captures, TONETEST, the
+// power-off blip); a beep from loop() passes false and schedules its start instead
+// (audioAmpRampLeftMs()), so the UI never stalls for it.
+bool audioWake(bool waitForAmp) {
+  if (!audioOutReady) return false;
+  if (!audioAwake && !audioChainUp()) return false;
+  audioLastUseAt = millis();
+  const unsigned long left = audioAmpRampLeftMs();
+  if (waitForAmp && left) delay(left);
+  return true;
+}
+bool audioIsAwake() { return audioAwake; }   // for BATTSAG, which sits earlier in the unit
+unsigned long audioAmpRampLeftMs() {
+  const unsigned long up = millis() - audioAwakeSince;
+  return up < AUDIO_AMP_RAMP_MS ? AUDIO_AMP_RAMP_MS - up : 0;
+}
+
+bool audioOutBegin() {
+  if (audioOutReady) return true;
+
+  audioCodec = es8311_create(I2C_NUM_0, ES8311_ADDRESS_0);
+  if (audioCodec == NULL) {
+    Serial.println("AUDIO OUT: es8311_create() returned NULL (out of heap). "
+                   "No beeper this boot.");
+    return false;
+  }
   for (int i = 0; i < BEEP_TONE_FRAMES; i++) {
     const int16_t v = (int16_t) (TONE_AMPLITUDE *
                                  sinf(2.0f * PI * BEEP_TONE_HZ * i / TONE_SAMPLE_HZ));
     beepTone[i * 2]     = v;
     beepTone[i * 2 + 1] = v;
   }
-
-  // The amp cannot be gated, so this is set once and left - see the board header.
-  pinMode(PIN_AMP_EN, OUTPUT);
-  digitalWrite(PIN_AMP_EN, AMP_EN_ENABLE_LEVEL);
-
+  if (!audioChainUp()) {
+    Serial.println("AUDIO OUT: the chain did not come up - see the line above. "
+                   "No beeper this boot.");
+    es8311_delete(audioCodec);
+    audioCodec = NULL;
+    return false;
+  }
   audioOutReady = true;
   Serial.printf("AUDIO OUT: ES8311 up at %d Hz, MCLK %d Hz, beep tone %d Hz "
-                "(%d frames = %dms), muted until something plays.\n",
+                "(%d frames = %dms), muted until something plays; the chain sleeps "
+                "after %lu ms of quiet.\n",
                 TONE_SAMPLE_HZ, TONE_MCLK_HZ, BEEP_TONE_HZ, BEEP_TONE_FRAMES,
-                BEEP_TONE_FRAMES * 1000 / TONE_SAMPLE_HZ);
+                BEEP_TONE_FRAMES * 1000 / TONE_SAMPLE_HZ, AUDIO_IDLE_SLEEP_MS);
   return true;
 }
 
-// One 20ms buffer of tone into the DMA. Callers keep their own model of how much
-// is queued (see startBeep/updateBeep) because I2SClass offers no way to ask.
 static void audioFeedBeepChunk() {
   audioI2s().write((const uint8_t*) beepTone, sizeof(beepTone));
 }
@@ -1582,6 +1630,12 @@ void micStream() {
                    "from boot. Nothing streamed.");
     return;
   }
+  // The chain sleeps between uses (AUDIO_IDLE_SLEEP_MS): wake it, and let the amp
+  // and the codec's own analog settle before anything is captured or played.
+  if (!audioWake(true)) {
+    Serial.println("AUDIO: the audio chain would not come back up - see the AUDIO line above.");
+    return;
+  }
   uint8_t* ring = (uint8_t*) heap_caps_malloc(MIC2_STREAM_RING_BYTES, MALLOC_CAP_SPIRAM);
   if (ring == NULL) {
     Serial.printf("AUDIO error: PSRAM would not give %d bytes for the stream ring. "
@@ -1778,6 +1832,12 @@ void micRecord() {
                    "from boot. Nothing recorded.");
     return;
   }
+  // The chain sleeps between uses (AUDIO_IDLE_SLEEP_MS): wake it, and let the amp
+  // and the codec's own analog settle before anything is captured or played.
+  if (!audioWake(true)) {
+    Serial.println("AUDIO: the audio chain would not come back up - see the AUDIO line above.");
+    return;
+  }
   const size_t bytes = MIC2_REC_FRAMES * sizeof(int16_t);
   // PSRAM, not the internal heap: 320KB is far past anything the internal heap
   // would give up, and this is exactly what the 8MB is for. The framebuffer's
@@ -1880,6 +1940,12 @@ void micMonitor() {
                    "from boot. No meter.");
     return;
   }
+  // The chain sleeps between uses (AUDIO_IDLE_SLEEP_MS): wake it, and let the amp
+  // and the codec's own analog settle before anything is captured or played.
+  if (!audioWake(true)) {
+    Serial.println("AUDIO: the audio chain would not come back up - see the AUDIO line above.");
+    return;
+  }
 
   tft.fillScreen(COLOR_BG);
   setUIFont(T_HEAD);
@@ -1979,6 +2045,12 @@ void micLevelTest() {
   if (!audioOutReady) {
     Serial.println("MIC: the shared audio path never came up - see the AUDIO OUT line "
                    "from boot. No probe run.");
+    return;
+  }
+  // The chain sleeps between uses (AUDIO_IDLE_SLEEP_MS): wake it, and let the amp
+  // and the codec's own analog settle before anything is captured or played.
+  if (!audioWake(true)) {
+    Serial.println("AUDIO: the audio chain would not come back up - see the AUDIO line above.");
     return;
   }
 
@@ -2209,6 +2281,12 @@ void toneTest(int volume, bool ladder) {
     Serial.println("TONETEST FAILED: the shared audio path never came up - look for "
                    "the AUDIO OUT line from boot, which names the call that failed. "
                    "Nothing was played.");
+    return;
+  }
+  // The chain sleeps between uses (AUDIO_IDLE_SLEEP_MS): wake it, and let the amp
+  // and the codec's own analog settle before anything is captured or played.
+  if (!audioWake(true)) {
+    Serial.println("AUDIO: the audio chain would not come back up - see the AUDIO line above.");
     return;
   }
   es8311_handle_t codec = audioCodec;

@@ -1427,6 +1427,70 @@ _uhp = strip_comments(fnbody(POWER, "bool usbHostPresent()") or "")
 check("usbHostPresent() reads HWCDC::isPlugged() and holds a plug for 3 s across its glitches",
       "HWCDC::isPlugged()" in _uhp and "millis() - usbHostSeenAt < 3000UL" in _uhp)
 
+# ---- THE AUDIO CHAIN SLEEPS BETWEEN SOUNDS (2026-10-11) ----------------------
+# Awake, the amp was enabled and the ES8311 powered and clocked (I2S TX+RX running)
+# from boot to power-off; on battery that is the amp's ~6.5 mA plus the codec's ~8 mA
+# for a speaker that is silent nearly all the time. Now: up on demand, down after
+# AUDIO_IDLE_SLEEP_MS of quiet or at once when the screen blanks.
+AUDIO = pathlib.Path(__file__).with_name("audio.ino").read_text()
+_down = strip_comments(fnbody(AUDIO, "static void audioChainDown()") or "")
+check("going down mutes FIRST, then the amp to its OFF level, then the codec, then I2S",
+      before(_down, "es8311_voice_mute(audioCodec, true);", "digitalWrite(PIN_AMP_EN, AMP_EN_ENABLE_LEVEL == LOW ? HIGH : LOW);")
+      and before(_down, "digitalWrite(PIN_AMP_EN", "codecSuspendRegs();")
+      and before(_down, "codecSuspendRegs();", "audioI2s().end();"))
+check("...with the codec suspend being the ONE shared copy the power-off step also runs",
+      "void codecSuspendRegs()" in POWER and "codecSuspendRegs();" in (edc or ""))
+_op = re.search(r"outPins\[\] = \{([^}]*)\}", _down)
+check("...and the four lines the ESP drives into the codec held LOW, never the codec's own "
+      "output (PIN_I2S_DIN)",
+      _op is not None and all(f"PIN_I2S_{n}" in _op.group(1) for n in ("MCLK", "BCLK", "LRCK", "DOUT"))
+      and "PIN_I2S_DIN" not in _op.group(1) and "GPIO_PULLUP_DISABLE" in _down)
+_up = strip_comments(fnbody(AUDIO, "static bool audioChainUp()") or "")
+check("coming up starts I2S BEFORE the codec (its MCLK must run first) and re-applies the "
+      "volume es8311_init() just reset",
+      before(_up, "i2s.begin(", "es8311_init(") and "es8311_voice_volume_set(audioCodec, beepDuty, NULL);" in _up
+      and "digitalWrite(PIN_AMP_EN, AMP_EN_ENABLE_LEVEL);" in _up)
+_aob = strip_comments(fnbody(AUDIO, "bool audioOutBegin()") or "")
+check("boot brings the chain up through the SAME function a wake does - no second copy of "
+      "the init to drift", "audioChainUp()" in _aob and "es8311_init(" not in _aob and "i2s.begin(" not in _aob)
+# Board 2's pair, AFTER its own beepStepIsTone(): power.ino defines startBeep() and
+# updateBeep() once per board, and board 1's copies come first in the file.
+_B2BEEP = POWER[POWER.index("static inline bool beepStepIsTone"):] if "static inline bool beepStepIsTone" in POWER else ""
+_sb2 = strip_comments(fnbody(_B2BEEP, "void startBeep()") or "")
+check("a beep wakes the chain WITHOUT blocking loop() and starts when the amp is up",
+      "audioWake(false)" in _sb2 and "beepStepStart = millis() + audioAmpRampLeftMs();" in _sb2)
+_ub = strip_comments(fnbody(_B2BEEP, "void updateBeep()") or "")
+check("updateBeep() compares time SIGNED and feeds nothing before the scheduled start - "
+      "unsigned, a future start reads as a huge elapsed time and skips the pattern",
+      "if ((long) (now - beepStepStart) < 0) return;" in _ub
+      and "(long) (now - beepStepStart) >= (long) BEEP_PATTERN_MS[beepStep]" in _ub)
+check("...and restarts the idle clock when the pattern ENDS", "audioLastUseAt = now;" in _ub)
+_ait = strip_comments(fnbody(POWER, "void audioIdleTick()") or "")
+check("the idle sleep never cuts a sound off and waits AUDIO_IDLE_SLEEP_MS from the last use",
+      "beepStep >= 0" in _ait and "millis() - audioLastUseAt < AUDIO_IDLE_SLEEP_MS" in _ait)
+check("...and runs in the 1 s battery tick", "audioIdleTick();" in strip_comments(MAIN))
+check("blanking the screen puts the chain to sleep at once (light idle follows the blank)",
+      "audioSleepNow();" in strip_comments(fnbody(POWER, "void enterSleep()") or ""))
+_paths = ["void micStream()", "void micRecord()", "void micMonitor()", "void micLevelTest()",
+          "void toneTest(int volume, bool ladder)"]
+_b2 = AUDIO.index("static int micReadChunk()") if "static int micReadChunk()" in AUDIO else 0
+_woken = []
+for sig in _paths:
+    i = AUDIO.find(sig, _b2 if "mic" in sig else 0)
+    body = AUDIO[i:AUDIO.find("\n}", i)] if i >= 0 else ""
+    _woken.append(before(body, "if (!audioOutReady)", "if (!audioWake(true))"))
+check(f"every blocking user wakes the chain first (micStream, micRecord, micMonitor, "
+      f"micLevelTest, toneTest): {_woken}", all(_woken))
+check("the power-off blip wakes the chain before it plays",
+      "if (beepEnabled && audioWake(true)) {" in POWER)
+_ramp = board_const(B2H, "AUDIO_AMP_RAMP_MS", "board_es3c35p.h") if re.search(r"#define\s+AUDIO_AMP_RAMP_MS", B2H) else -1
+check(f"a sound waits at least the amp's worst-case 220 ms ramp (AUDIO_AMP_RAMP_MS {_ramp})", _ramp >= 220)
+_setup2 = strip_comments(_body(MAIN, "void setup()") or "")
+check("the SD card is put in stand-by at BOOT, not only at power-off, and its bus handed back",
+      re.search(r"#if BOARD_HAS_SD && !BOARD_USES_TFT_ESPI\s*\{\s*const uint8_t r = sdStandby\(\);\s*sdBusRelease\(\);", _setup2) is not None)
+check("...with a short command timeout, so an empty slot costs boot a fraction of a second",
+      "host.command_timeout_ms = 100;" in (fnbody(POWER, "uint8_t sdStandby()") or ""))
+
 # ---- THE POWER-OFF RECEIPT REACHES A HOST THAT IS NOT ON THE CABLE ---------
 # sendLineToHost() fans out to Serial AND BLE, but its BLE half is gated on
 # bleConnected - and at boot no central has connected yet. So the receipt for a

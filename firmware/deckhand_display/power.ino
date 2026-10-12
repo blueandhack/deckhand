@@ -361,6 +361,9 @@ void tickScreenIdle() {
 
 void enterSleep() {
   isAsleep = true;
+#if !BOARD_USES_TFT_ESPI
+  audioSleepNow();   // the audio chain, at once - see audioSleepNow()
+#endif
 #if BOARD_HAS_WIRELESS_PAIR
   // A blanked screen cannot be showing a pairing code, and a window that
   // outlives the screen is the "someone wandered off" state the whole presence
@@ -1221,10 +1224,13 @@ void startBeep() {
   if (!beepEnabled) return;
   if (beepStep >= 0) return; // pattern already playing
   if (!audioOutReady) return; // codec never came up; stay silent, never crash
+  // The chain sleeps between sounds, so wake it - WITHOUT blocking loop() for the
+  // amp's ramp: the pattern is scheduled to start when the amp is up instead. A
+  // chain that was already awake has no ramp left and starts at once, as before.
+  if (!audioWake(false)) return;
   beepStep = 0;
-  beepStepStart = millis();
+  beepStepStart = millis() + audioAmpRampLeftMs();
   beepFedUntil = beepStepStart;
-  // Unmuting is the "amp on" of this board. The amp itself cannot be gated.
   es8311_voice_mute(audioCodec, false);
   updateBeep();               // prime the DMA now rather than a loop() later
 }
@@ -1232,14 +1238,20 @@ void startBeep() {
 void updateBeep() {
   if (beepStep < 0) return;
   const unsigned long now = millis();
+  // SIGNED, because a pattern that waits for the amp starts in the FUTURE: as an
+  // unsigned difference, "not yet" reads as a huge elapsed time and the whole
+  // pattern would be skipped in one call. Nothing is fed before the start either -
+  // auto_clear keeps the line silent while the amp comes up.
+  if ((long) (now - beepStepStart) < 0) return;
 
   // Advance the pattern first, so a step boundary is never fed with the previous
   // step's material.
-  if (now - beepStepStart >= BEEP_PATTERN_MS[beepStep]) {
+  if ((long) (now - beepStepStart) >= (long) BEEP_PATTERN_MS[beepStep]) {
     beepStep++;
     beepStepStart = now;
     if (beepStep >= BEEP_STEPS) {
       beepStep = -1;
+      audioLastUseAt = now;   // the idle clock runs from the END of a sound
       es8311_voice_mute(audioCodec, true);
       // Deliberately NOT waiting for the DMA to drain: what is still queued is
       // at most BEEP_QUEUE_MAX_MS of tone, and the mute lands on the codec's
@@ -1258,6 +1270,22 @@ void updateBeep() {
     beepFedUntil += BEEP_TONE_FRAMES * 1000UL / TONE_SAMPLE_HZ;
   }
 }
+// THE CHAIN GOES TO SLEEP AFTER AUDIO_IDLE_SLEEP_MS OF QUIET - from the 1 s battery
+// tick. Never mid-sound: a pattern in flight keeps it up, and the blocking mic and
+// tone paths cannot be interrupted by a tick at all.
+void audioIdleTick() {
+  if (!audioAwake || beepStep >= 0) return;
+  if (millis() - audioLastUseAt < AUDIO_IDLE_SLEEP_MS) return;
+  audioChainDown();
+}
+// At once, for the screen blanking: nobody is listening for a beep's reply to a tap
+// that cannot happen, and light idle - which follows the blank - would otherwise
+// light-sleep with the amp enabled and the codec clocked, a held output pin keeping
+// its level through it.
+void audioSleepNow() {
+  if (beepStep >= 0) return;
+  audioChainDown();
+}
 #else
 void startBeep() {}
 void updateBeep() {}
@@ -1269,8 +1297,14 @@ void updateBeep() {}
 // Returns what the receipt prints: 0 stand-by, 1 no card answered (an empty slot
 // looks exactly like this), 2 the deselect itself failed, 3 the host would not
 // come up.
+esp_err_t sdStandbyErr = ESP_OK;   // the failing step's own error, for the line that reports it
+unsigned long sdStandbyMs = 0;     // how long the deselect itself took
 uint8_t sdStandby() {
+  sdStandbyErr = ESP_OK;
   sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+  // 100 ms a command: a seated card answers in microseconds, and an EMPTY slot would
+  // otherwise wait out the default ~1 s per command - at boot, where this now runs.
+  host.command_timeout_ms = 100;
   sdmmc_slot_config_t slot = SDMMC_SLOT_CONFIG_DEFAULT();
   // 1-bit: CLK, CMD and D0 are all a deselect needs, and D1..D3 stay on their
   // pull-ups - D3 HIGH at CMD0 is what keeps the card in SD mode rather than SPI.
@@ -1279,10 +1313,10 @@ uint8_t sdStandby() {
   slot.cmd = (gpio_num_t) PIN_SD_CMD;
   slot.d0  = (gpio_num_t) PIN_SD_D0;
   slot.d1 = slot.d2 = slot.d3 = GPIO_NUM_NC;
-  if (sdmmc_host_init() != ESP_OK) return 3;
-  if (sdmmc_host_init_slot(host.slot, &slot) != ESP_OK) { sdmmc_host_deinit(); return 3; }
+  if ((sdStandbyErr = sdmmc_host_init()) != ESP_OK) return 3;
+  if ((sdStandbyErr = sdmmc_host_init_slot(host.slot, &slot)) != ESP_OK) { sdmmc_host_deinit(); return 3; }
   sdmmc_card_t card;
-  if (sdmmc_card_init(&host, &card) != ESP_OK) { sdmmc_host_deinit(); return 1; }
+  if ((sdStandbyErr = sdmmc_card_init(&host, &card)) != ESP_OK) { sdmmc_host_deinit(); return 1; }
   // CMD7 to RCA 0 deselects every card: transfer -> stand-by. A deselected card
   // does not answer, so the command carries no response flag - IDF's own
   // sdmmc_send_cmd_select_card() builds a deselect exactly this way.
@@ -1290,9 +1324,44 @@ uint8_t sdStandby() {
   cmd.opcode = MMC_SELECT_CARD;
   cmd.arg = MMC_ARG_RCA(0);
   cmd.flags = SCF_CMD_AC;
+  // ITS OWN TIMEOUT, EXPLICITLY. The card layer (sdmmc_send_cmd) fills timeout_ms in
+  // before it reaches the host; calling the host directly skips that, and a zero here
+  // timed out at boot (2026-10-11: ESP_ERR_TIMEOUT, the card already initialised).
+  cmd.timeout_ms = 1000;
+  const unsigned long t0 = millis();
   const esp_err_t e = sdmmc_host_do_transaction(host.slot, &cmd);
+  sdStandbyMs = millis() - t0;
+  sdStandbyErr = e;
   sdmmc_host_deinit();   // and the clock stops with the host
   return e == ESP_OK ? 0 : 2;
+}
+// Hands the six SD lines back after an AWAKE sdStandby(): plain inputs, so the bus
+// sits on its own 10K pull-ups and SDPROBE/SDPERF can claim it later. Power-off does
+// the opposite - isolates and holds them (step 7) - because nothing follows it.
+void sdBusRelease() {
+  const gpio_num_t sd[] = {
+    (gpio_num_t) PIN_SD_CLK, (gpio_num_t) PIN_SD_CMD, (gpio_num_t) PIN_SD_D0,
+    (gpio_num_t) PIN_SD_D1,  (gpio_num_t) PIN_SD_D2,  (gpio_num_t) PIN_SD_D3,
+  };
+  for (unsigned i = 0; i < sizeof(sd) / sizeof(sd[0]); i++) gpio_reset_pin(sd[i]);
+}
+#endif
+#if !BOARD_USES_TFT_ESPI   // board 2's codec; board 1 has a GPIO beeper and no ES8311
+// ESPRESSIF'S es8311_suspend(), verbatim and in order (esp-adf
+// components/esp_codec_dev/device/es8311/es8311.c): analog, ADC, DAC and every clock
+// off. ONE copy, run by both the power-off teardown (PWROFF_CODEC_SUSPEND) and the
+// awake chain going to sleep between sounds (audioChainDown() in audio.ino) - see
+// PWROFF_CODEC_SUSPEND for why each register is safe to undo: es8311_init() rewrites
+// all of them on the way back up.
+void codecSuspendRegs() {
+  static const uint8_t esSuspend[][2] = {
+    {0x32, 0x00}, {0x17, 0x00}, {0x0E, 0xFF}, {0x12, 0x02}, {0x14, 0x00},
+    {0x0D, 0xFA}, {0x15, 0x00}, {0x02, 0x10}, {0x00, 0x00}, {0x00, 0x1F},
+    {0x01, 0x30}, {0x01, 0x00}, {0x45, 0x00}, {0x0D, 0xFC}, {0x02, 0x00},
+  };
+  for (unsigned i = 0; i < sizeof(esSuspend) / sizeof(esSuspend[0]); i++)
+    i2c_master_write_to_device(I2C_NUM_0, ES8311_ADDRESS_0, esSuspend[i], 2,
+                               pdMS_TO_TICKS(50));
 }
 #endif
 // The actual teardown into deep sleep, shared by the manual power-off (BOOT
@@ -1374,14 +1443,7 @@ void enterDeepSleep() {
   //     the same failure class as a sleepPanel() that returned false, and the
   //     receipt is where it shows.
   if (pwrOffMode & PWROFF_CODEC_SUSPEND) {
-    static const uint8_t esSuspend[][2] = {
-      {0x32, 0x00}, {0x17, 0x00}, {0x0E, 0xFF}, {0x12, 0x02}, {0x14, 0x00},
-      {0x0D, 0xFA}, {0x15, 0x00}, {0x02, 0x10}, {0x00, 0x00}, {0x00, 0x1F},
-      {0x01, 0x30}, {0x01, 0x00}, {0x45, 0x00}, {0x0D, 0xFC}, {0x02, 0x00},
-    };
-    for (unsigned i = 0; i < sizeof(esSuspend) / sizeof(esSuspend[0]); i++)
-      i2c_master_write_to_device(I2C_NUM_0, ES8311_ADDRESS_0, esSuspend[i], 2,
-                                 pdMS_TO_TICKS(50));
+    codecSuspendRegs();
     uint8_t r0D = 0xFF, r01 = 0xFF;
     const uint8_t a0D = 0x0D, a01 = 0x01;
     const bool okA = i2c_master_write_read_device(I2C_NUM_0, ES8311_ADDRESS_0, &a0D, 1,
@@ -1638,7 +1700,7 @@ void powerOff() {
   // wait has to be slightly longer than the audio, because write() returns when
   // the DMA has ACCEPTED the bytes, not when the codec has clocked them out.
   // Muting before they finish playing would cut the blip off mid-note.
-  if (beepEnabled && audioOutReady) {
+  if (beepEnabled && audioWake(true)) {
     es8311_voice_mute(audioCodec, false);
     const int chunks = 90 / (BEEP_TONE_FRAMES * 1000 / TONE_SAMPLE_HZ);
     for (int i = 0; i < chunks; i++) audioFeedBeepChunk();

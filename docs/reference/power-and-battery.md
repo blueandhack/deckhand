@@ -818,3 +818,35 @@ and then drift down for hours (4148 mV at rest the same afternoon) before the TP
 as on board 1. The charge estimator's target follows the top. Which of the two explanations for the
 low top is right (a ~1% low divider or a charger at the low end of its 4.2 V +/-1%) is still open;
 either way the display now shows a finished charge as 100%.
+
+#### WHILE AWAKE: THE AUDIO CHAIN SLEEPS BETWEEN SOUNDS, AND THE SD CARD STANDS BY (2026-10-11)
+
+**The audio chain was on from boot to power-off.** `audioOutBegin()` enabled the amp (on battery LOW
+is ON) and left the ES8311 powered and clocked - I2S TX and RX running, MCLK 4.096 MHz, the RX DMA
+interrupting - for a speaker that is silent nearly all of the time; the code said the amp "cannot be
+gated", which was measured on USB and is false on battery. Now `audioChainUp()` (I2S, then
+`es8311_init()`, then the volume it reset, then the amp) runs on demand and `audioChainDown()` (mute,
+amp to its OFF level, the shared `codecSuspendRegs()`, I2S stopped, the four lines the ESP drives into
+the codec held low) after `AUDIO_IDLE_SLEEP_MS` (10 s) of quiet, or at once when the screen blanks -
+so light idle never sleeps with it up. A sound after a wake waits `AUDIO_AMP_RAMP_MS` (250 ms) for the
+amp; a beep from `loop()` is scheduled past it rather than blocking, and the blocking paths (the mic
+captures, `TONETEST`, the power-off blip) wait. Boot and every wake run the SAME bring-up function.
+
+**Measured 2026-10-11, on battery, with `BATTSAG audio`** (the chain up for 1.5 s, then asleep for
+1.5 s, raw averages): **4, 6 and 4 mV** - about 5 mV, a sixth of the backlight's 28 mV at full, ~4-5% of
+the 104 mV the whole awake board pulls at full brightness, and a larger share with the screen dark.
+In current that is roughly 10-20 mA depending on what the backlight really draws (unmeasured), in
+line with the datasheets' amp ~6.5-10 mA plus codec ~8 mA. **Verified working after a sleep:** the
+needs-input beep ("beeped normally", the owner listening), `MICTEST` (heard, 0 read timeouts), the
+chain going to sleep 10 s after boot and after each use (`BATTSAG` reports `audio=UP`/`asleep`).
+**Not measured:** the share in light idle, which has never been measured on its own.
+
+**The SD card is put in stand-by at boot**, the same `sdStandby()` power-off uses, then its bus is
+handed back to its pull-ups (`sdBusRelease()`). From the moment the battery is connected the card sat
+in its power-up state - the SD spec lets that draw up to 15 mA - and nothing initialised it but
+SDPROBE. **Not measured**: boot had already done it by the time `BATTSAG sd` could look, and only
+disconnecting the battery resets a card. **Found while wiring it: the deselect never had a
+timeout.** Calling the host's transaction function directly skips the card layer that fills one in,
+and with zero it TIMED OUT at boot (`sdStandby=2, ESP_ERR_TIMEOUT`) - the three power-off receipts that
+read `sd=standby` were luck. It now carries 1000 ms and completes in under 1 ms; the init's own
+commands get 100 ms, so an empty slot costs boot a fraction of a second.

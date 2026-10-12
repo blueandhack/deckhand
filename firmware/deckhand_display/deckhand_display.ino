@@ -2207,6 +2207,10 @@ extern uint8_t scrollProjHost;
 // The display's sag model lives in power.ino, which is concatenated AFTER this file;
 // BATTSAG below reads and writes it.
 extern int sagBaseMv, sagBlMv;
+#if BOARD_HAS_SD
+extern esp_err_t sdStandbyErr;
+extern unsigned long sdStandbyMs;
+#endif
 extern bool sagBlMeasured;
 #endif
 extern uint8_t projOpenHost;
@@ -7042,6 +7046,21 @@ void setup() {
   // A failure logs and leaves the device silent rather than stopping the boot.
   audioOutBegin();
 #endif
+#if BOARD_HAS_SD && !BOARD_USES_TFT_ESPI
+  // THE SD CARD TO STAND-BY AT BOOT. Its VDD is VCC3V3 directly, so from the moment
+  // the battery is connected the card sits in its power-up state - which the SD spec
+  // lets draw up to 15 mA - until something initialises it, and nothing here ever did
+  // except SDPROBE. PWROFF_SD_STANDBY already does this at power-off; this is the same
+  // step for the whole time the board is awake. With no card seated it fails in a
+  // fraction of a second (sdStandby's 100 ms command timeout).
+  {
+    const uint8_t r = sdStandby();
+    sdBusRelease();
+    Serial.printf("SD: %s at boot (sdStandby=%u, %s, deselect %lu ms)\n",
+                  r == 0 ? "card put in stand-by" : r == 1 ? "no card answered"
+                  : "stand-by FAILED", (unsigned) r, esp_err_to_name(sdStandbyErr), sdStandbyMs);
+  }
+#endif
 
 #if !BOARD_USES_TFT_ESPI
   // The S3 die temperature sensor. Order-independent - it shares no bus with
@@ -9101,6 +9120,49 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
                    "corrects the base", vFull, vOff, bl, was, sagBaseMv);
         }
       }
+    } else if (arg == "audio") {
+      // WHAT THE AUDIO CHAIN COSTS WHILE IT IS UP, as a voltage step on battery: woken
+      // (amp enabled, codec running, I2S clocking) for 1.5 s, then put to sleep for
+      // 1.5 s. The difference is what sleeping it between sounds saves. Audible: the
+      // amp's turn-on, nothing else - no sound is played.
+      if (batteryState() != BATT_DISCHARGING) {
+        snprintf(line, sizeof(line),
+                 "BATTSAG audio refused: the board is on the cable (state %d), where the cell "
+                 "carries no load - unplug it and measure on battery", (int) batteryState());
+      } else if (!audioWake(true)) {
+        snprintf(line, sizeof(line), "BATTSAG audio refused: the audio chain would not come up");
+      } else {
+        delay(1500);
+        const int vOn = batteryRestMv(64);
+        audioSleepNow();
+        delay(1500);
+        const int vOff = batteryRestMv(64);
+        snprintf(line, sizeof(line),
+                 "BATTSAG audio: chain up %d mV, asleep %d mV -> %d mV saved by sleeping it "
+                 "(the backlight at full is 28 mV, for scale); chain now %s",
+                 vOn, vOff, vOff - vOn, audioIsAwake() ? "UP" : "asleep");
+      }
+#if BOARD_HAS_SD
+    } else if (arg == "sd") {
+      // WHAT PUTTING THE CARD IN STAND-BY SAVED, once: before and after sdStandby().
+      // A card already in stand-by (boot does it now) shows ~0 - the measurement is
+      // only meaningful on a card that has not been through it since power-up.
+      if (batteryState() != BATT_DISCHARGING) {
+        snprintf(line, sizeof(line),
+                 "BATTSAG sd refused: the board is on the cable (state %d), where the cell "
+                 "carries no load - unplug it and measure on battery", (int) batteryState());
+      } else {
+        const int vBefore = batteryRestMv(64);
+        const uint8_t r = sdStandby();
+        sdBusRelease();
+        delay(1000);
+        const int vAfter = batteryRestMv(64);
+        snprintf(line, sizeof(line),
+                 "BATTSAG sd: before %d mV, after stand-by %d mV -> %d mV (sdStandby=%u: "
+                 "0 stand-by, 1 no card, 2 deselect failed, 3 host failed)",
+                 vBefore, vAfter, vAfter - vBefore, (unsigned) r);
+      }
+#endif
     } else if (arg == "reset") {
       sagBaseMv = BOARD_BATT_SAG_BASE_MV;
       sagBlMv = BOARD_BATT_SAG_BL_MV;
@@ -9111,15 +9173,17 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     } else if (arg.length()) {
       snprintf(line, sizeof(line),
                "BATTSAG refused: unknown argument '%.40s' - bare BATTSAG reports, 'measure' "
-               "calibrates the backlight term, 'reset' restores the starting values", arg.c_str());
+               "calibrates the backlight term, 'audio' and 'sd' measure those savings, "
+               "'reset' restores the starting values", arg.c_str());
     } else {
       const uint32_t duty = blDuty();
       snprintf(line, sizeof(line),
                "BATTSAG raw=%d mV sag=%d mV (base %d + backlight %d x duty %u/255, backlight "
-               "term %s) state=%d shown=%d%% target=%d%% raw-curve=%d%%",
+               "term %s) state=%d shown=%d%% target=%d%% raw-curve=%d%% audio=%s",
                batteryMv, battSagMv(), sagBaseMv, sagBlMv, (unsigned) duty,
                sagBlMeasured ? "measured" : "starting value", (int) batteryState(),
-               batteryPct(), batteryPctTarget(), pctFromMv(batteryMv));
+               batteryPct(), batteryPctTarget(), pctFromMv(batteryMv),
+               audioIsAwake() ? "UP" : "asleep");
     }
     sendLineToHost(line);
   } else if (buf == "PANELPM" || buf.startsWith("PANELPM ")) {
@@ -10170,6 +10234,7 @@ void loop() {
 #if !BOARD_USES_TFT_ESPI
     battSagLearnTick();   // the display's sag model, corrected at each unplug - see power.ino
     battShownTick();      // the shown battery number, one point per 20 s at most - see power.ino
+    audioIdleTick();      // the audio chain sleeps after AUDIO_IDLE_SLEEP_MS of quiet - see power.ino
     // The charging counterpart, BOARD 2 ONLY. Each returns immediately unless the
     // battery is in ITS state, so the two rings can never both be accumulating -
     // see battChargeSample(). Guarded so board 1 never links the estimator at all.
