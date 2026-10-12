@@ -768,3 +768,53 @@ on BEFORE `loadPwrOffRecord()` takes its "awake at" reading - so every receipt's
 under full load, tens of mV below the cell's rest voltage, while its "off at" comes from an EMA
 whose samples were taken with the screen lit. Add the post-charge relaxation when the run starts
 straight off the charger, and a 7-hour run's real signal is about the size of its error.
+
+#### THE DEFAULT IS NOW 0x3E37, AND THE RECEIPT READS BOTH ENDS THE SAME WAY (2026-10-11)
+
+**`pwrOffMode` defaults to `0x3E37`** - the measured combination above. A PWROFFMODE stored in NVS still
+wins, and `0` still reproduces the original teardown for a future A/B on the same cell. The five new
+bits were measured together and never bisected, so the default credits the combination.
+
+**Both ends of a receipt are now `batteryRestMv(32)`**, a raw average taken under the S3's own load:
+the wake end is the FIRST thing `setup()` does, before the backlight, the amp, the radio or the panel
+draw anything; the off end is the LAST thing the teardown does, after every step. Before this the
+wake end sat under full brightness and the amp, and the off end was a one-second EMA still carrying
+the lit screen - the unplug step below is the size of that error. What it does not remove: the
+post-charge relaxation when a run starts straight off the charger. **Runs taken before 2026-10-11 and
+after it are not directly comparable**; the old figures stand as measured, with the old instrument.
+
+#### THE BATTERY NUMBER ON BATTERY ADDS THE LOAD'S SAG BACK, AND 100% IS REACHABLE (2026-10-11)
+
+**Measured 2026-10-10, the owner watching:** unplugging a full board took the reading from **4158 to
+4074 mV in one sample, 95% to 86%**, with nothing used. On the cable the board runs from VBUS and the
+cell carries no load; off it, the whole awake board - full backlight, radio, amp - is drawn through
+roughly 0.3 ohm of cell, protection and connector. The percentage was the voltage on a curve, so it
+read the load, not the charge.
+
+On battery (`batteryState() == BATT_DISCHARGING`), `batteryPct()` now reads the curve at **the voltage
+plus the sag** the load causes: `sagBaseMv` for the awake board plus `sagBlMv` scaled by the
+backlight's LIVE duty (`ledcRead`, clamped to 255 - dimming, blanking and the voice card all write the
+pin directly). So unplugging no longer drops the number, and blanking the screen no longer lifts it.
+On the cable nothing is added. Board 2 only; board 1's percentage is the raw curve as before.
+
+**The model calibrates itself.** Its starting values are this board's own, measured 2026-10-11 at full
+brightness: `BATTSAG measure` put the backlight at **28 mV** (4046 -> 4074 mV, full to off), and an
+unplug from a finished charge dropped the cell **104 mV** (4152 -> 4048), leaving **~76 mV** for the
+awake board without its backlight - the backlight is the SMALLER share, against a first guess of
+36/48. On that same unplug the old uncorrected number would have read **83%**; the corrected one
+read 98-99%.
+`BATTSAG measure` replaces the backlight term with a measurement - the backlight to full and to off for
+1.5 s each, visibly - and every unplug that follows a FINISHED charge corrects the model to the drop it
+actually saw (the base alone once the backlight term is measured; both in proportion before that). A
+mid-charge unplug is ignored, since the charger's own push is in that drop. Both terms live in NVS.
+**Known limit:** the board has no VBUS sense pin, and "on the cable" is `usbLinkActive()` - a data
+link to the Mac. On a wall charger the board believes it is on battery and adds the sag anyway, so
+the number reads high there.
+
+**100% and FULL now happen on board 2.** `BOARD_BATT_TOP_MV` puts the curve's top row where each
+board's charger stops - 4200 on board 1, **4140** on board 2, whose finished charges read 4157-4167 mV
+and then drift down for hours (4148 mV at rest the same afternoon) before the TP4054 restarts - and
+`BOARD_BATT_FULL_MV` drops to **4130**, so the full pill appears a point or two before 100%,
+as on board 1. The charge estimator's target follows the top. Which of the two explanations for the
+low top is right (a ~1% low divider or a charger at the low end of its 4.2 V +/-1%) is still open;
+either way the display now shows a finished charge as 100%.

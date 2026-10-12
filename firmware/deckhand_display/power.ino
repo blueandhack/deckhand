@@ -397,6 +397,93 @@ int batteryRestMv(int n) {
   }
   return (int) (sum / n) * BOARD_BAT_MV_SCALE;
 }
+
+// ---- THE LOAD'S SAG, FOR THE DISPLAY ON BATTERY ----------------------------
+// The percentage comes from the cell's voltage, and on battery the board's own load
+// pulls that voltage down through ~0.3 ohm: unplugging a full board read 4158 -> 4074
+// mV in one sample, 95% -> 86% with nothing used. So on battery the display reads the
+// curve at the voltage PLUS the sag the current load causes. A fixed term for the
+// awake board, and a backlight term scaled by the pin's LIVE duty (ledcRead, not
+// brightnessPct: dimming, blanking and the voice card all write the pin directly) -
+// which is also why blanking the screen no longer moves the number. Board 2 only.
+int sagBaseMv = BOARD_BATT_SAG_BASE_MV;
+int sagBlMv   = BOARD_BATT_SAG_BL_MV;
+bool sagBlMeasured = false;   // set by BATTSAG measure; then an unplug corrects only the base
+// ledcRead() reports full-on as 256 at 8 bits (Arduino writes max+1 for a true 100%),
+// so it is clamped to the 255 the scale is written in.
+uint32_t blDuty() {
+  const uint32_t d = ledcRead(TFT_BL_PIN);
+  return d > 255 ? 255 : d;
+}
+int battSagMv() {
+  const uint32_t duty = blDuty();               // 0..255, ledcRead underneath
+  return sagBaseMv + (int) ((long) sagBlMv * (long) duty / 255);
+}
+void loadBattSag() {
+  sagBaseMv = prefs.getInt("sagBase", sagBaseMv);
+  sagBlMv = prefs.getInt("sagBl", sagBlMv);
+  sagBlMeasured = prefs.getBool("sagBlM", false);
+}
+void saveBattSag() {
+  prefs.putInt("sagBase", sagBaseMv);
+  prefs.putInt("sagBl", sagBlMv);
+  prefs.putBool("sagBlM", sagBlMeasured);
+}
+// LEARNED FROM EVERY UNPLUG THAT FOLLOWS A FINISHED CHARGE. On the cable with the
+// charge done, the cell carries no load and reads its rest voltage; a few seconds
+// after the cable comes out it carries the whole board. That drop IS the sag at this
+// moment's load - the one number the model exists to predict - so the model is
+// corrected to it. Mid-charge unplugs are ignored: the charger's own push is in that
+// drop too. usbLinkActive() notices an unplug up to ten seconds late, so "a finished
+// charge" means a FULL reading within the last 20 s.
+int sagIdleMv = 0;
+unsigned long sagIdleAt = 0;
+bool sagWasCabled = false;
+void battSagLearnTick() {
+  const BattState st = batteryState();
+  if (st == BATT_FULL) {
+    // ONLY WHILE THE PHY SEES THE HOST THIS INSTANT. batteryState() holds a plug for
+    // 3 s and decides FULL on the lagging EMA, so the first tick after an unplug can
+    // still say FULL - and a raw reading taken then is already the SAGGED one. Taken
+    // there, the "idle" voltage equals the loaded one, the drop reads as zero, and the
+    // unplug teaches nothing: measured exactly so on 2026-10-11, the first unplug.
+    if (HWCDC::isPlugged()) {
+      sagIdleMv = batteryRestMv(16);
+      sagIdleAt = millis();
+    }
+    sagWasCabled = true;
+    return;
+  }
+  if (st == BATT_CHARGING) { sagWasCabled = true; return; }
+  if (st != BATT_DISCHARGING || !sagWasCabled) return;
+  sagWasCabled = false;
+  if (!sagIdleAt || millis() - sagIdleAt > 20000UL) return;   // not straight off a finished charge
+  const int seen = sagIdleMv - batteryRestMv(16);
+  const int model = battSagMv();
+  if (seen < 15 || seen > 250 || model <= 0) return;           // not a drop this can trust
+  const uint32_t duty = blDuty();
+  const int was = model;
+  if (sagBlMeasured) {
+    // The backlight term was MEASURED, so it stands; the base is what is left over.
+    const int base = seen - (int) ((long) sagBlMv * (long) duty / 255);
+    if (base < 0 || base > 200) return;
+    sagBaseMv = base;
+  } else {
+    // Neither term measured: keep their ratio and scale both, i.e. assume the
+    // resistance moved and the currents did not.
+    float k = (float) seen / (float) model;
+    if (k < 0.5f) k = 0.5f;
+    if (k > 2.0f) k = 2.0f;
+    sagBaseMv = (int) (sagBaseMv * k + 0.5f);
+    sagBlMv = (int) (sagBlMv * k + 0.5f);
+  }
+  saveBattSag();
+  char line[140];
+  snprintf(line, sizeof(line),
+           "BATTSAG learned from an unplug: the cell dropped %d mV, the model said %d; now "
+           "base %d + backlight %d x duty %u/255", seen, was, sagBaseMv, sagBlMv, (unsigned) duty);
+  sendLineToHost(line);
+}
 #endif
 void sampleBattery() {
   long sum = 0;
@@ -419,7 +506,9 @@ bool batteryPresent() { return batteryMv > 2500; }
 // curve. The trend below needs that: the non-linearity lives in this table, so a
 // slope taken in millivolts is not a slope in charge.
 int pctFromMv(int mv) {
-  static const int mvT[] = {3300, 3500, 3600, 3700, 3800, 3900, 4000, 4100, 4200};
+  // The top row is the board's - see BOARD_BATT_TOP_MV: 4200 on board 1, where its
+  // charger stops on board 2. Every other row is the shared generic curve.
+  static const int mvT[] = {3300, 3500, 3600, 3700, 3800, 3900, 4000, 4100, BOARD_BATT_TOP_MV};
   static const int pcT[] = {0, 8, 15, 28, 45, 62, 78, 90, 100};
   const int n = 9;
   if (mv <= mvT[0]) return 0;
@@ -431,7 +520,45 @@ int pctFromMv(int mv) {
   }
   return 100;
 }
-int batteryPct() { return pctFromMv(batteryMv); }
+#if !BOARD_USES_TFT_ESPI
+// What the number SHOULD read right now. ON BATTERY ONLY the sag is added back: on the
+// cable the board runs from VBUS and the cell carries no load - see battSagMv().
+int batteryPctTarget() {
+  if (batteryState() == BATT_DISCHARGING) return pctFromMv(batteryMv + battSagMv());
+  return pctFromMv(batteryMv);
+}
+// THE SHOWN NUMBER MOVES AT MOST ONE POINT PER 20 SECONDS, because the board cannot
+// tell quickly or reliably where its power comes from. There is no VBUS sense pin;
+// "on the cable" is usbLinkActive() - the Mac sent something within 10 s - and the
+// Mac's silence regularly outlasts that (state=1 at 4157 mV with the cable in,
+// 2026-10-11), and a real unplug is only noticed up to 10 s late. Either way the
+// sag term switches on or off for a few seconds where it should not: +8% on a
+// flicker mid-charge, -8% in the seconds after an unplug. A real battery moves far
+// slower - about a point every four minutes at full brightness, every eight on the
+// charger - so a one-point-per-20-s limit follows the cell and swallows those.
+// A gap in the ticks means the board slept (light idle stops loop() dead), which is
+// not a transient, so after one the number jumps straight to the target.
+int battShownPct = -1;
+unsigned long battShownAt = 0;
+unsigned long battShownTickAt = 0;
+void battShownTick() {
+  const int target = batteryPctTarget();
+  const unsigned long now = millis();
+  const bool slept = battShownTickAt && now - battShownTickAt > 60000UL;
+  battShownTickAt = now;
+  if (battShownPct < 0 || slept) { battShownPct = target; battShownAt = now; return; }
+  if (target == battShownPct || now - battShownAt < 20000UL) return;
+  battShownPct += target > battShownPct ? 1 : -1;
+  battShownAt = now;
+}
+#endif
+int batteryPct() {
+#if !BOARD_USES_TFT_ESPI
+  if (battShownPct >= 0) return battShownPct;
+  return batteryPctTarget();
+#endif
+  return pctFromMv(batteryMv);
+}
 // ----- Time remaining on battery -----
 //
 // There is no coulomb counter on this board, so runtime left can only come from
@@ -468,11 +595,32 @@ void battTrendReset() {
   battTrendLast = 0;
 }
 
+#if !BOARD_USES_TFT_ESPI
+// IS A COMPUTER ON THE CABLE - asked of the USB PHY, not of the Mac's traffic. This
+// board has no VBUS sense pin, and usbLinkActive() ("the Mac sent a payload over USB
+// within 10 s") was answering it: MEASURED WRONG, 2026-10-11 - with Bluetooth also up,
+// the Mac's traffic goes there and USB falls silent, so a full board on the cable
+// reported state=1 (on battery) again and again, and a real unplug was noticed up to
+// ten seconds late. HWCDC::isPlugged() is the S3's own USB-Serial-JTAG SOF watchdog:
+// true while a host is sending frames, whatever it is or is not saying. It has
+// millisecond glitches (the core's own note), so a plug is believed for 3 s after the
+// last frame seen. It cannot see a wall charger - nothing on this board can.
+unsigned long usbHostSeenAt = 0;
+bool usbHostPresent() {
+  if (HWCDC::isPlugged()) { usbHostSeenAt = millis(); return true; }
+  return usbHostSeenAt && millis() - usbHostSeenAt < 3000UL;
+}
+#endif
 BattState batteryState() {
   if (!batteryPresent()) return BATT_NONE;
   // While the TP4054 is charging, BAT_ADC reads the charge voltage, which
   // settles at ~4.2V as the cell fills.
-  if (usbLinkActive()) return batteryMv >= BATT_FULL_MV ? BATT_FULL : BATT_CHARGING;
+#if !BOARD_USES_TFT_ESPI
+  const bool cabled = usbHostPresent();   // the PHY, not the Mac's traffic - see above
+#else
+  const bool cabled = usbLinkActive();
+#endif
+  if (cabled) return batteryMv >= BATT_FULL_MV ? BATT_FULL : BATT_CHARGING;
   return BATT_DISCHARGING;
 }
 // Called from the 1s battery tick. Only accumulates while actually on battery:
@@ -677,7 +825,7 @@ const int BATT_CHG_KNEE_MV = 4100;
 // where the cell is "full" - the row says 100% and this is what makes that literal.
 // It sits ABOVE BATT_FULL_MV deliberately, so batteryState() flips to BATT_FULL and
 // the label disappears before the estimate could ever count down to zero.
-const int BATT_CHG_TARGET_MV = 4200;
+const int BATT_CHG_TARGET_MV = BOARD_BATT_TOP_MV;   // 4200 until the top moved to where this charger stops
 // THE SETTLE GUARD, AND IT IS A CORRECTNESS FIX RATHER THAN A TUNING ONE.
 // Plugging in makes the cell voltage snap up **+64 mV in SECONDS** - measured on
 // hardware, 3925 -> 3989 - because what the divider sees is the charger's terminal

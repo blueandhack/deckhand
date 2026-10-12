@@ -52,6 +52,22 @@ print(f"  thresholds read from power.ino: span={MIN_SPAN_MS // 60000}min "
 
 mvT = [3300,3500,3600,3700,3800,3900,4000,4100,4200]
 pcT = [0,8,15,28,45,62,78,90,100]
+# THE FIRMWARE'S OWN TABLE, PARSED, with its top row resolved through each board's
+# header (BOARD_BATT_TOP_MV) - so the mirror above is checked against board 1's
+# resolved table rather than trusted, and board 2's top is the one its estimator uses.
+_tbl = re.search(r"static const int mvT\[\] = \{([^}]*)\};", POWER)
+def _resolve(tok, hdr, where):
+    tok = tok.strip()
+    return int(tok) if tok.isdigit() else board_const(hdr, tok, where)
+MVT_B1 = [_resolve(t, B1H, "board_e32r28t.h") for t in _tbl.group(1).split(",")] if _tbl else []
+MVT_B2 = [_resolve(t, B2H, "board_es3c35p.h") for t in _tbl.group(1).split(",")] if _tbl else []
+def pctFromTable(mv, table):
+    if mv <= table[0]: return 0
+    if mv >= table[-1]: return 100
+    for i in range(1, len(table)):
+        if mv < table[i]:
+            return pcT[i-1] + (pcT[i]-pcT[i-1])*(mv-table[i-1])//(table[i]-table[i-1])
+    return 100
 def pctFromMv(mv):
     if mv <= mvT[0]: return 0
     if mv >= mvT[-1]: return 100
@@ -138,7 +154,14 @@ print(f"  {'PASS' if ok else 'FAIL'}  sagged window gives the same rate as a cle
 CHG_MIN_SPAN_MS = firmware_const("BATT_CHG_MIN_SPAN_MS")
 CHG_MIN_RISE_MV = firmware_const("BATT_CHG_MIN_RISE_MV")
 CHG_KNEE_MV     = firmware_const("BATT_CHG_KNEE_MV")
-CHG_TARGET_MV   = firmware_const("BATT_CHG_TARGET_MV")
+# The target is now the board's own top of the display (BOARD_BATT_TOP_MV), so it is
+# RESOLVED through board 2's header rather than read as a literal - a literal here
+# would have to be retyped every time the top moved.
+_ctm = re.search(r"BATT_CHG_TARGET_MV\s*=\s*(\w+)", POWER)
+if not _ctm:
+    sys.exit("FAIL: BATT_CHG_TARGET_MV not found in power.ino - was it renamed?")
+CHG_TARGET_MV = (int(_ctm.group(1)) if _ctm.group(1).isdigit()
+                 else board_const(B2H, _ctm.group(1), "board_es3c35p.h"))
 # BOARD 2's, because every charge-estimator invariant below is board 2's: the
 # whole estimator is behind !BOARD_USES_TFT_ESPI.
 CHG_FULL_MV     = board_const(B2H, "BOARD_BATT_FULL_MV", "board_es3c35p.h")
@@ -203,13 +226,21 @@ for name, cond in [
      re.search(r"BATT_FULL_MV\s*=\s*BOARD_BATT_FULL_MV", POWER) is not None
      and re.search(r"BATT_FULL_MV\s*=\s*\d", POWER) is None),
     ("board 1's FULL threshold sits above the charge knee", FULL_MV_B1 > CHG_KNEE_MV),
-    ("board 1's FULL threshold is at or below the 100% point",
-     FULL_MV_B1 <= CHG_TARGET_MV),
+    ("the mirror's curve IS board 1's resolved firmware table, row for row",
+     MVT_B1 == mvT),
+    ("board 1's FULL threshold is at or below ITS 100% point (its own top row)",
+     bool(MVT_B1) and FULL_MV_B1 <= MVT_B1[-1]),
     ("board 2's FULL threshold sits above the charge knee", CHG_FULL_MV > CHG_KNEE_MV),
     ("board 2's FULL threshold is at or below the 100% point",
      CHG_FULL_MV <= CHG_TARGET_MV),
-    ("BATT_CHG_TARGET_MV is the mv at which pctFromMv() actually reads 100%",
-     pctFromMv(CHG_TARGET_MV) == 100 and pctFromMv(CHG_TARGET_MV - 1) < 100),
+    ("BATT_CHG_TARGET_MV is the mv at which board 2's curve actually reads 100%",
+     bool(MVT_B2) and pctFromTable(CHG_TARGET_MV, MVT_B2) == 100
+     and pctFromTable(CHG_TARGET_MV - 1, MVT_B2) < 100),
+    ("board 2's 100% sits at or below where its charger is measured to stop (4157 mV), "
+     "so a finished charge can show it",
+     bool(MVT_B2) and MVT_B2[-1] <= 4157),
+    ("...and above the 90% row, so the curve stays monotonic",
+     bool(MVT_B2) and MVT_B2[-1] > MVT_B2[-2]),
     ("the knee sits below the target, so the refusal band is non-empty",
      CHG_KNEE_MV < CHG_TARGET_MV),
     ("the target is at or above the FULL threshold, so the estimate cannot read 0 "
@@ -301,10 +332,14 @@ good = chgMinsToFull(chgRing(contaminated), 4047)       # what the guard gives
 # The truth, computed independently: a least-squares fit over the settled samples
 # only. 65 min was the figure derived by hand from this same series during the
 # investigation; the tolerance covers the few samples added since.
-ok = good > bad and abs(good - 65) <= 15
+# 65 min was for the old 4200 target. The estimator is a straight-line extrapolation
+# with this series' slope, so the truth scales with the distance to whatever the
+# target is now - derived, not retyped when the target moves.
+_truth = 65.0 * (CHG_TARGET_MV - 4047) / (4200 - 4047)
+ok = good > bad and abs(good - _truth) <= 15.0 * _truth / 65.0
 fails += 0 if ok else 1
 print(f"  {'PASS' if ok else 'FAIL'}  the measured rebound case: contaminated={bad} min "
-      f"(optimistic, breaks the >= floor), settled={good} min (true ~65)")
+      f"(optimistic, breaks the >= floor), settled={good} min (true ~{_truth:.0f})")
 
 # The direction is the whole point: the guard must never make the estimate SHORTER.
 ok = good >= bad
@@ -1334,6 +1369,63 @@ check("the off reading is taken raw and LAST - after the final teardown step, wi
              'prefs.putUShort("poMv", (uint16_t) batteryRestMv('))
 check("...while record-first still writes one first, so a hung step leaves a value",
       before(edc, 'prefs.putUShort("poMv"', "pwrOffMode &"))
+
+# ---- THE DISPLAY ADDS THE LOAD'S SAG BACK, ON BATTERY ONLY (2026-10-11) -----
+# Unplugging a full board read 4158 -> 4074 mV in one sample and showed 95% -> 86%
+# with nothing used: the board's own load seen through ~0.3 ohm. On battery the
+# displayed percentage now reads the curve at the voltage plus the sag that load
+# causes; on the cable the board runs from VBUS and there is none to add.
+_bpt = strip_comments(fnbody(POWER, "int batteryPctTarget()") or "")
+check("the target adds the sag back ONLY when discharging - on the cable the cell "
+      "carries no load", re.search(r"if \(batteryState\(\) == BATT_DISCHARGING\) return "
+      r"pctFromMv\(batteryMv \+ battSagMv\(\)\);", _bpt) is not None)
+_bp = strip_comments(fnbody(POWER, "int batteryPct()") or "")
+check("batteryPct() shows the SLEWED number on board 2 and the raw curve on board 1, as it was",
+      re.search(r"#if !BOARD_USES_TFT_ESPI\s*if \(battShownPct >= 0\) return battShownPct;", _bp) is not None
+      and "return pctFromMv(batteryMv);" in _bp)
+_bst = strip_comments(fnbody(POWER, "void battShownTick()") or "")
+check("the shown number moves at most ONE point per 20 s - a flicker of the cable signal "
+      "swings the target by ~8 points for a few seconds, a real cell a point per minutes",
+      "now - battShownAt < 20000UL" in _bst and "battShownPct += target > battShownPct ? 1 : -1;" in _bst)
+check("...but jumps straight to the target after the board SLEPT (a tick gap), which is not "
+      "a transient", "now - battShownTickAt > 60000UL" in _bst and "if (battShownPct < 0 || slept)" in _bst)
+check("the slew runs in the 1 s battery tick, after the learning",
+      before(strip_comments(MAIN), "battSagLearnTick();", "battShownTick();"))
+_bs = strip_comments(fnbody(POWER, "int battSagMv()") or "")
+check("the backlight term follows the pin's LIVE duty (ledcRead), not brightnessPct - "
+      "dimming, blanking and the voice card all write the pin directly",
+      "blDuty()" in _bs and "ledcRead(TFT_BL_PIN)" in strip_comments(fnbody(POWER, "uint32_t blDuty()") or "")
+      and "brightnessPct" not in _bs)
+check("the sag model starts from the header's values, so a fresh board is not uncompensated",
+      "int sagBaseMv = BOARD_BATT_SAG_BASE_MV;" in POWER and "int sagBlMv   = BOARD_BATT_SAG_BL_MV;" in POWER)
+_lt = strip_comments(fnbody(POWER, "void battSagLearnTick()") or "")
+check("it learns only from an unplug that follows a FINISHED charge - a mid-charge unplug "
+      "carries the charger's push in its drop",
+      "if (st == BATT_FULL)" in _lt and "millis() - sagIdleAt > 20000UL" in _lt)
+check("its 'on the cable' reading is taken only while the USB PHY sees the host AT THAT "
+      "INSTANT - in the 3 s hold the raw voltage has already sagged and the drop reads as zero",
+      re.search(r"if \(st == BATT_FULL\) \{\s*if \(HWCDC::isPlugged\(\)\) \{\s*sagIdleMv = batteryRestMv", _lt) is not None)
+check("...and refuses a drop it cannot trust rather than learning from it",
+      "seen < 15 || seen > 250" in _lt)
+check("a MEASURED backlight term survives the unplug; only the base is re-derived",
+      re.search(r"if \(sagBlMeasured\)\s*\{[^}]*sagBaseMv = base;", _lt) is not None)
+check("the learning runs in the 1 s battery tick, board 2 only",
+      re.search(r"#if !BOARD_USES_TFT_ESPI\s*battSagLearnTick\(\);", strip_comments(MAIN)) is not None)
+check("the model is loaded at boot with the other power settings",
+      before(strip_comments(_body(MAIN, "void setup()") or ""), "loadPwrOffMode();", "loadBattSag();"))
+
+# ---- "ON THE CABLE" IS THE USB PHY'S ANSWER ON BOARD 2 (2026-10-11) ---------
+# usbLinkActive() is "the Mac sent a payload over USB within 10 s", and with Bluetooth
+# up the Mac's traffic goes there: a full board on the cable read state=1 again and
+# again. Board 2 asks its USB PHY instead (HWCDC::isPlugged, the SOF watchdog).
+_bst2 = fnbody(POWER, "BattState batteryState()") or ""
+check("board 2's battery state asks the USB PHY whether a host is attached, not the Mac's traffic",
+      re.search(r"#if !BOARD_USES_TFT_ESPI\s*const bool cabled = usbHostPresent\(\);", _bst2) is not None)
+check("...and board 1 keeps usbLinkActive() - it has a CH340, not the S3's USB PHY",
+      re.search(r"#else\s*const bool cabled = usbLinkActive\(\);", _bst2) is not None)
+_uhp = strip_comments(fnbody(POWER, "bool usbHostPresent()") or "")
+check("usbHostPresent() reads HWCDC::isPlugged() and holds a plug for 3 s across its glitches",
+      "HWCDC::isPlugged()" in _uhp and "millis() - usbHostSeenAt < 3000UL" in _uhp)
 
 # ---- THE POWER-OFF RECEIPT REACHES A HOST THAT IS NOT ON THE CABLE ---------
 # sendLineToHost() fans out to Serial AND BLE, but its BLE half is gated on

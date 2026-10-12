@@ -185,6 +185,8 @@ const int BORDER_CTRL = 1;   // buttons, list rows, pills, chips, pager keys
 // at, which is itself the evidence that this divider reads slightly HIGH - so the
 // number below is reached comfortably here, and that is not proof it is correct.
 #define BOARD_BATT_FULL_MV 4180
+// Where pctFromMv() says 100 - this board's charger does reach it (4221..4226 mV).
+#define BOARD_BATT_TOP_MV  4200
 
 // Onboard FM8002E 1W amplifier -> JP1 speaker terminals. IO26 is the
 // amplifier's audio input (AUDIO_IN net); IO4 is its shutdown pin

@@ -2203,6 +2203,12 @@ extern char scrollLoadedId[16];
 extern bool scrollFromProjects;
 extern bool scrollProjLive;
 extern uint8_t scrollProjHost;
+#if !BOARD_USES_TFT_ESPI
+// The display's sag model lives in power.ino, which is concatenated AFTER this file;
+// BATTSAG below reads and writes it.
+extern int sagBaseMv, sagBlMv;
+extern bool sagBlMeasured;
+#endif
 extern uint8_t projOpenHost;
 // This task's own addition to the same forward-declared set, for the same
 // reason: the hist parser's chunk arm below reads scrollLoadedId (already
@@ -7065,6 +7071,7 @@ void setup() {
 #if !BOARD_USES_TFT_ESPI
   loadLightIdle();
   loadPwrOffMode();
+  loadBattSag();
   loadCpuMode();
   loadFwCommit();
   loadPwrOffRecord();
@@ -7234,6 +7241,11 @@ static const UnavailableCommand UNAVAILABLE_COMMANDS[] = {
   { "TONELADDER",
     "it is TONETEST's five-volume ladder for finding the audible floor of the ES8311's dB "
     "volume scale. This board has no codec and no volume scale; its beeper is on or off." },
+  { "BATTSAG",
+    "it reports and calibrates board 2's load-sag model, which adds the board's own voltage "
+    "sag back to the displayed battery percentage on battery. This board has no such model: "
+    "its percentage is the ADC reading through BOARD_BAT_MV_SCALE on the curve, unchanged, and "
+    "its charger reaches its BOARD_BATT_TOP_MV of 4200, so 100% was never hidden here." },
   { "PANELPM",
     "it reads the ST77922's power-mode register over QSPI and blinks DISPOFF/DISPON, to prove "
     "board 2's framed panel commands reach the glass. This board's ILI9341 is driven by "
@@ -9045,6 +9057,71 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     if (arg == "off") powerProbeStop("stopped");
     else powerProbeStart(arg.c_str());
 #if !BOARD_USES_TFT_ESPI
+  } else if (buf == "BATTSAG" || buf.startsWith("BATTSAG ")) {
+    // THE DISPLAY'S SAG MODEL, READ AND CALIBRATED. On battery the percentage is the
+    // curve at the voltage PLUS the sag the board's own load causes (battSagMv() in
+    // power.ino); this shows both terms and what they add up to now. `measure` steps
+    // the backlight to full and to off for 1.5 s each - VISIBLY - and takes the
+    // difference as the backlight term; `reset` returns both terms to the header's
+    // starting values. Refused on the cable BY NAME: there the board runs from VBUS
+    // and the cell carries no load, so there is nothing to measure. Not deduped: a
+    // second measure is a second, equally valid measurement.
+    char line[220];
+    String arg = buf.length() > 7 ? buf.substring(7) : String("");
+    arg.trim();
+    if (arg == "measure") {
+      if (batteryState() != BATT_DISCHARGING) {
+        snprintf(line, sizeof(line),
+                 "BATTSAG measure refused: the board is on the cable (state %d), where it runs "
+                 "from USB and the cell carries no load - unplug it and measure on battery",
+                 (int) batteryState());
+      } else {
+        const uint32_t d0 = ledcRead(TFT_BL_PIN);
+        ledcWrite(TFT_BL_PIN, 255);
+        delay(1500);
+        const int vFull = batteryRestMv(64);
+        ledcWrite(TFT_BL_PIN, 0);
+        delay(1500);
+        const int vOff = batteryRestMv(64);
+        ledcWrite(TFT_BL_PIN, d0);
+        const int bl = vOff - vFull;
+        if (bl < 5 || bl > 200) {
+          snprintf(line, sizeof(line),
+                   "BATTSAG measure: backlight full %d mV, off %d mV - a %d mV step is not "
+                   "plausible for the backlight, so the model is unchanged (base %d, backlight %d)",
+                   vFull, vOff, bl, sagBaseMv, sagBlMv);
+        } else {
+          const int was = sagBlMv;
+          sagBlMv = bl;
+          sagBlMeasured = true;
+          saveBattSag();
+          snprintf(line, sizeof(line),
+                   "BATTSAG measure: backlight full %d mV, off %d mV -> backlight term %d mV "
+                   "at full duty (was %d); base %d; the next unplug from a full charge "
+                   "corrects the base", vFull, vOff, bl, was, sagBaseMv);
+        }
+      }
+    } else if (arg == "reset") {
+      sagBaseMv = BOARD_BATT_SAG_BASE_MV;
+      sagBlMv = BOARD_BATT_SAG_BL_MV;
+      sagBlMeasured = false;
+      saveBattSag();
+      snprintf(line, sizeof(line), "BATTSAG reset to the header's starting values: base %d, "
+               "backlight %d at full duty", sagBaseMv, sagBlMv);
+    } else if (arg.length()) {
+      snprintf(line, sizeof(line),
+               "BATTSAG refused: unknown argument '%.40s' - bare BATTSAG reports, 'measure' "
+               "calibrates the backlight term, 'reset' restores the starting values", arg.c_str());
+    } else {
+      const uint32_t duty = blDuty();
+      snprintf(line, sizeof(line),
+               "BATTSAG raw=%d mV sag=%d mV (base %d + backlight %d x duty %u/255, backlight "
+               "term %s) state=%d shown=%d%% target=%d%% raw-curve=%d%%",
+               batteryMv, battSagMv(), sagBaseMv, sagBlMv, (unsigned) duty,
+               sagBlMeasured ? "measured" : "starting value", (int) batteryState(),
+               batteryPct(), batteryPctTarget(), pctFromMv(batteryMv));
+    }
+    sendLineToHost(line);
   } else if (buf == "PANELPM" || buf.startsWith("PANELPM ")) {
     // THE INSTRUMENT FOR THE BUG IT WAS WRITTEN AFTER. For three months the shim
     // sent the panel unframed commands that it ignored (PanelShim::panelCmd), and
@@ -10091,6 +10168,8 @@ void loop() {
                              // USAGE_RING_STEP_MS by its own r.last; 1s is a chance to look
 #endif
 #if !BOARD_USES_TFT_ESPI
+    battSagLearnTick();   // the display's sag model, corrected at each unplug - see power.ino
+    battShownTick();      // the shown battery number, one point per 20 s at most - see power.ino
     // The charging counterpart, BOARD 2 ONLY. Each returns immediately unless the
     // battery is in ITS state, so the two rings can never both be accumulating -
     // see battChargeSample(). Guarded so board 1 never links the estimator at all.
