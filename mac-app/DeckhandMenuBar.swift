@@ -485,32 +485,51 @@ enum BarRole { case fill, track, tick }
 /// differ in INK, not in shape (that is why `▰`/`▱` were rejected), and ink alone
 /// is not enough separation when both are the same colour. `--pace-check` now
 /// asserts by name that no run carries both.
+///
+/// THE FILL IS MEASURED IN EIGHTHS OF A CELL, not whole cells. With whole cells
+/// the "any usage shows ink" rule below had to round 1% up to a full cell, so 1%
+/// and 4% both drew exactly what 10% draws - a bar that overstated light usage by
+/// up to ten times, and the first thing a person noticed on looking at it. The
+/// last, partial cell is a LEFT eighth-block (U+258F..U+2589), the same family as
+/// the full block, so 1% is a hairline and 5% half a cell. Resolution is 1.25%.
+let BAR_EIGHTHS = ["", "\u{258F}", "\u{258E}", "\u{258D}", "\u{258C}", "\u{258B}", "\u{258A}", "\u{2589}"]
+
 func quotaBarRuns(_ pct: Int, pace: Int? = nil) -> [(text: String, role: BarRole)] {
-    var filled = Int((Double(pct) / 100 * Double(BAR_CELLS)).rounded())
-    // Any usage at all must show a cell: 1% rounding to an empty bar would read
-    // as "none used", which is a different claim than "barely any".
-    if pct > 0 && filled == 0 { filled = 1 }
-    filled = max(0, min(BAR_CELLS, filled))
+    var eighths = Int((Double(pct) / 100 * Double(BAR_CELLS * 8)).rounded())
+    // Any usage at all must show ink: 1% rounding to an empty bar would read as
+    // "none used", which is a different claim than "barely any". One EIGHTH is
+    // enough to say it; a whole cell said 10%.
+    if pct > 0 && eighths == 0 { eighths = 1 }
+    eighths = max(0, min(BAR_CELLS * 8, eighths))
 
     // FULL BLOCK against LIGHT SHADE, not ▰/▱. The geometric pair renders at 11pt
     // as a faint dashed line where filled and empty are barely distinguishable -
     // checked against a render, not assumed. These two differ in ink, not shape,
     // which is why the colours above are load-bearing rather than decorative.
-    func run(_ n: Int, _ role: BarRole) -> [(text: String, role: BarRole)] {
-        n > 0 ? [(String(repeating: role == .fill ? "\u{2588}" : "\u{2591}", count: n), role)] : []
-    }
-    guard let pace else { return run(filled, .fill) + run(BAR_CELLS - filled, .track) }
+    var cells: [(text: String, role: BarRole)] =
+        Array(repeating: ("\u{2588}", .fill), count: eighths / 8)
+    if eighths % 8 > 0 { cells.append((BAR_EIGHTHS[eighths % 8], .fill)) }
+    cells += Array(repeating: ("\u{2591}", .track), count: BAR_CELLS - cells.count)
 
     // A BOUNDARY, not a cell: 0% goes before the first and 100% after the last,
-    // which is what makes the two ends of the window reachable at all.
-    let at = max(0, min(BAR_CELLS, (pace * BAR_CELLS + 50) / 100))
-    let tick = [(text: "\u{2502}", role: BarRole.tick)]
-    // The tick can land inside the fill or inside the track, so each side is
-    // emitted as up-to-two runs and the empty ones drop out. Splitting this way
-    // rather than slicing a pre-joined string is what keeps a run from spanning
-    // the fill boundary at all, instead of relying on nobody re-joining them.
-    return run(min(at, filled), .fill) + run(max(0, at - filled), .track) + tick
-         + run(max(0, filled - at), .fill) + run(BAR_CELLS - max(at, filled), .track)
+    // which is what makes the two ends of the window reachable at all. INSERTED
+    // between cells, never written over one (see above).
+    if let pace {
+        let at = max(0, min(BAR_CELLS, (pace * BAR_CELLS + 50) / 100))
+        cells.insert(("\u{2502}", .tick), at: at)
+    }
+    // Coalesce adjacent cells of one role. Grouping by ROLE, never by glyph, is
+    // what keeps a run from spanning the fill boundary - and the tick is its own
+    // role, so it always splits whatever it lands in.
+    var out: [(text: String, role: BarRole)] = []
+    for c in cells {
+        if let last = out.last, last.role == c.role, c.role != .tick {
+            out[out.count - 1].text += c.text
+        } else {
+            out.append(c)
+        }
+    }
+    return out
 }
 
 // Menu text styling.
@@ -3313,8 +3332,21 @@ if CommandLine.arguments.contains("--pace-check") {
     // as nothing used - the exact claim the filled-at-least-one rule exists to
     // stop. Assert the INK, not the arithmetic that produced it.
     let barely = quotaBarRuns(1, pace: 4)
-    eq(barely.filter { $0.role == .fill }.map(\.text).joined().contains("\u{2588}"), true,
-       "1% used keeps a filled cell even with the tick on top of it")
+    eq(barely.filter { $0.role == .fill }.map(\.text).joined().isEmpty, false,
+       "1% used keeps its fill ink even with the tick on top of it")
+    // THE OVERSTATEMENT, by name: whole cells rounded 1% up to a full cell, so 1%
+    // and 4% drew exactly what 10% draws. The fill is in eighths now - assert the
+    // GLYPH each one gets, which is what a person actually sees.
+    func fillInk(_ p: Int) -> String {
+        quotaBarRuns(p).filter { $0.role == .fill }.map(\.text).joined()
+    }
+    eq(fillInk(1), "\u{258F}", "1% is a one-eighth hairline, not a whole cell")
+    eq(fillInk(4), "\u{258D}", "4% is three eighths of a cell")
+    eq(fillInk(5), "\u{258C}", "5% is half a cell")
+    eq(fillInk(10), "\u{2588}", "10% is exactly one whole cell")
+    eq(fillInk(0), "", "0% draws no fill at all")
+    eq(fillInk(1) != fillInk(10), true, "1% and 10% no longer draw the same bar")
+    eq(width(quotaBarRuns(37)), BAR_CELLS, "a partial cell is still one cell wide")
     // And the other one: a boundary at 100% is BAR_CELLS, one past the last
     // index, which an array write would have trapped on.
     let full = quotaBarRuns(100, pace: 100)
@@ -3335,8 +3367,14 @@ if CommandLine.arguments.contains("--pace-check") {
     for pct in 0...100 {
         for pace in 0...100 {
             for r in quotaBarRuns(pct, pace: pace) where r.role != .tick {
+                // A fill run is full blocks, optionally ENDED by one eighth-block:
+                // the partial cell is fill ink, but only ever at the fill's edge.
+                var body = Array(r.text).map(String.init)
+                if r.role == .fill, let l = body.last, BAR_EIGHTHS.dropFirst().contains(l) {
+                    body.removeLast()
+                }
                 let want = r.role == .fill ? "\u{2588}" : "\u{2591}"
-                if r.text.contains(where: { String($0) != want }), mixedAt.isEmpty {
+                if body.contains(where: { $0 != want }), mixedAt.isEmpty {
                     mixedAt = "pct \(pct) pace \(pace) run \"\(r.text)\" as \(r.role)"
                 }
             }
