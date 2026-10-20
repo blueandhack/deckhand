@@ -176,6 +176,16 @@ Four things are load-bearing:
     Inserting costs one character of width and loses no fill at any percentage; a bar with a pace
     is 11 cells and one without is 10, deliberately, because padding the pace-less case with a
     blank would put a blank exactly where a 0% tick goes.
+  - **THE "1% MUST ALWAYS SHOW A CELL" RULE OVERSTATED LIGHT USAGE BY UP TO TEN TIMES, and a
+    person reported it on 2026-10-20 ("at 1% the bar shows over 1%").** With whole cells, 1% and
+    4% both rounded up to one full block, which is exactly what 10% draws. The rule's intent (any
+    usage shows ink) was right, but its unit was too coarse. The fill is now counted in EIGHTHS of a cell
+    (`BAR_EIGHTHS`, U+258F..U+2589, the full block's own family), so the final partial cell is a
+    left eighth-block: 1% is a one-eighth hairline `▏`, 4% is `▍`, 5% is `▌`, and the resolution is
+    1.25%. The bar stays 10 cells wide. The cost, accepted after a `--menu-preview` render: the
+    unused part of the partial cell is blank rather than `░`, so a small gap sits between the fill
+    and the track. It reads as the fill's edge rather than as a break. `--pace-check` asserts each
+    of those glyphs by name, and that 1% and 10% no longer draw the same bar.
   - **A DISABLED MENU ROW IS DRAWN AT ~31% OF FULL STRENGTH, WHICH MADE EVERY READING GREY — AND
     BOTH INSTRUMENTS SAID IT WAS FINE.** This is the most important entry on this page about the
     menu, because the defect was reported by a person looking at the glass after two instruments
