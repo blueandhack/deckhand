@@ -4,6 +4,31 @@
 
 ---
 
+## The app (alpha)
+
+Download `Deckhand-<version>.dmg` from the
+[Releases page](https://github.com/blueandhack/deckhand/releases) (Apple Silicon, macOS
+14+), drag Deckhand to **Applications**, and open it from there — opened straight from the
+DMG it says so and quits, because its hooks would point into a disk image that goes away.
+Its setup window then walks through:
+
+1. **A Deckhand already running from this repo** (`install.sh`'s host, or the menu app built
+   by `mac-app/build.sh`) — it offers to stop it, moving its launch agent to
+   `~/Deckhand-backups` rather than deleting it, since two hosts fight over the USB port.
+2. **Claude Code hooks, with consent** — it lists every change first, backs up, and runs the
+   hooks on its own Node, so nothing depends on a `node` on your PATH. Entries `install.sh`
+   wrote are converted in place, never duplicated. Codex hooks can be switched off in
+   Settings › Claude Code.
+3. **Start** — macOS asks once whether Deckhand Host may use Bluetooth (refuse it and USB
+   still works), and the host then runs in the background, starting at login.
+
+Settings (⌘, from the menu) holds every preference, and **Settings › About › Uninstall**
+removes the app's hooks, its background host and the app itself, keeping your pairing keys
+and backups. Updates arrive by themselves. The firmware is still flashed from this repo
+with `./flash.sh`, which knows how to pause the app's host for the upload.
+
+---
+
 ## Backing out (uninstall and restore)
 
 ```

@@ -4928,7 +4928,9 @@ struct AboutPane: View {
         let v = (i["CFBundleShortVersionString"] as? String) ?? "?"
         let b = (i["CFBundleVersion"] as? String) ?? "?"
         let c = (i["DeckhandCommit"] as? String).map { ", \($0)" } ?? ""
-        return "Version \(v) (\(b)\(c))"
+        // A pre-release says so beside its version (build-release.sh --channel).
+        let ch = (i["DeckhandChannel"] as? String).flatMap { $0.isEmpty ? nil : " \($0)" } ?? ""
+        return "Version \(v)\(ch) (\(b)\(c))"
     }
 
     var body: some View {
