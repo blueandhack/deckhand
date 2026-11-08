@@ -60,7 +60,7 @@ fi
 echo "Will remove:"
 echo "  - Deckhand's entries in $CLAUDE_DIR/settings.json (surgically; yours are kept)"
 echo "  - Deckhand's entries in ~/.codex/hooks.json (if Codex is installed)"
-echo "  - $CLAUDE_DIR/deckhand-session-hook.mjs, deckhand-statusline.mjs"
+echo "  - $CLAUDE_DIR/deckhand-session-hook.mjs, deckhand-statusline.mjs, deckhand-node (the app's runner link)"
 echo "  - $CLAUDE_DIR/deckhand-sessions/, deckhand-answers/, deckhand-device-command"
 echo "  - $CLAUDE_DIR/deckhand-session-hook-debug.log (and .1)"
 echo "  - $DECK_TMP/deckhand-* (heartbeat, host log, OAuth throttle state)"
@@ -118,7 +118,9 @@ else
 fi
 
 echo "[4/5] Removing hook scripts and per-session state"
-run rm -f "$CLAUDE_DIR/deckhand-session-hook.mjs" "$CLAUDE_DIR/deckhand-statusline.mjs"
+# deckhand-node is the released app's link to its bundled Node, which its hooks run
+# through (claude-hooks/hook-command.mjs). Harmless when absent.
+run rm -f "$CLAUDE_DIR/deckhand-session-hook.mjs" "$CLAUDE_DIR/deckhand-statusline.mjs" "$CLAUDE_DIR/deckhand-node"
 run rm -rf "$CLAUDE_DIR/deckhand-sessions" "$CLAUDE_DIR/deckhand-answers"
 run rm -f "$CLAUDE_DIR/deckhand-device-command" \
           "$CLAUDE_DIR/deckhand-session-hook-debug.log" \

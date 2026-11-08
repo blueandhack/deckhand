@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // Merge Deckhand's statusLine + hooks into ~/.claude/settings.json.
 //
-//   node install-hooks.mjs            # register
-//   node install-hooks.mjs --remove   # un-register (used by uninstall.sh)
+//   node install-hooks.mjs                  # register, run by `node` (install.sh)
+//   node install-hooks.mjs --node <path>    # register, run by <path> (the released app)
+//   node install-hooks.mjs --remove         # un-register either form (uninstall.sh, the app)
 //
 // Safe to run repeatedly: it backs up the existing settings.json, preserves
 // everything already there (other hooks, permissions, theme, ...), and only
@@ -14,14 +15,38 @@
 // STATUSLINE command strings below. Duplicating those constants in a second file is
 // precisely how the two drift apart and an uninstall silently leaves a dead hook
 // behind - which would make every Claude Code event spawn a node process that errors.
+// The matching itself now lives in hook-command.mjs, shared with the Codex installer,
+// and goes by the SCRIPT a command runs rather than the exact string - see there.
+//
+// It only writes (and only backs up) when something actually changes: the released
+// app re-runs it after every update, and a backup per no-op run would bury the one
+// backup that matters, the one taken before the first change.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { hookCommand, isDeckhandCommand, normalizeEvent, removeFromEvent, runnerFromArgv } from "./hook-command.mjs";
 
 const CLAUDE_DIR = path.join(os.homedir(), ".claude");
 const SETTINGS = path.join(CLAUDE_DIR, "settings.json");
-const HOOK = `node ${path.join(CLAUDE_DIR, "deckhand-session-hook.mjs")}`;
-const STATUSLINE = `node ${path.join(CLAUDE_DIR, "deckhand-statusline.mjs")}`;
+const HOOK_NAME = "deckhand-session-hook.mjs";
+const STATUSLINE_NAME = "deckhand-statusline.mjs";
+// A bad --node is reported in one line, not as a stack trace: the app shows this
+// output to a person.
+let HOOK, STATUSLINE;
+try {
+  const runner = runnerFromArgv(process.argv);
+  HOOK = hookCommand(runner, path.join(CLAUDE_DIR, HOOK_NAME));
+  STATUSLINE = hookCommand(runner, path.join(CLAUDE_DIR, STATUSLINE_NAME));
+} catch (e) {
+  console.error(`install-hooks: ${e.message}`);
+  process.exit(2);
+}
+// MUST stay larger than the hook's REMOTE_WAIT_MS, which defaults to "forever" (24h
+// minus a minute). Claude Code kills a hook that outlives this, and a killed
+// PermissionRequest hook is an untested state - so the hook is written to always
+// self-exit first, and these two numbers are a PAIR. Raising the wait without
+// raising this silently reintroduces the kill.
+const HOOK_TIMEOUT = 86_400;
 
 // event -> extra fields on the hook group (matcher, where applicable)
 const HOOK_EVENTS = {
@@ -48,16 +73,32 @@ if (REMOVE && !fs.existsSync(SETTINGS)) {
 fs.mkdirSync(CLAUDE_DIR, { recursive: true });
 
 let settings = {};
+let original = "";
 if (fs.existsSync(SETTINGS)) {
+  original = fs.readFileSync(SETTINGS, "utf8");
   try {
-    settings = JSON.parse(fs.readFileSync(SETTINGS, "utf8"));
+    settings = JSON.parse(original);
   } catch (e) {
     console.error(`Refusing to touch ${SETTINGS}: it isn't valid JSON (${e.message}).`);
     process.exit(1);
   }
-  const backup = `${SETTINGS}.bak-${Date.now()}`;
-  fs.copyFileSync(SETTINGS, backup);
-  console.log(`Backed up existing settings to ${backup}`);
+}
+
+// Back up and write only on a real change. Compared as the text we WOULD write, so a
+// file that differs only in formatting is rewritten once, not on every run.
+function save(summary) {
+  const next = JSON.stringify(settings, null, 2) + "\n";
+  if (next === original) {
+    console.log(`${SETTINGS} already up to date - nothing written.`);
+    return;
+  }
+  if (original) {
+    const backup = `${SETTINGS}.bak-${Date.now()}`;
+    fs.writeFileSync(backup, original);
+    console.log(`Backed up existing settings to ${backup}`);
+  }
+  fs.writeFileSync(SETTINGS, next);
+  console.log(`Wrote ${SETTINGS} (${summary}).`);
 }
 
 if (REMOVE) {
@@ -65,8 +106,9 @@ if (REMOVE) {
   // settings since installing, and those must survive.
   let removed = 0;
 
-  // Only OUR statusLine. If you have since pointed it somewhere else, that's yours.
-  if (settings.statusLine?.command === STATUSLINE) {
+  // Only OUR statusLine, in either form. If you have since pointed it somewhere
+  // else, that's yours.
+  if (isDeckhandCommand(settings.statusLine?.command, STATUSLINE_NAME)) {
     delete settings.statusLine;
     console.log("Removed statusLine.");
   } else if (settings.statusLine) {
@@ -76,54 +118,42 @@ if (REMOVE) {
   for (const event of Object.keys(settings.hooks ?? {})) {
     const groups = settings.hooks[event];
     if (!Array.isArray(groups)) continue; // hand-edited into a different shape - leave it
-    const kept = [];
-    for (const g of groups) {
-      const hooks = (g.hooks ?? []).filter((h) => h.command !== HOOK);
-      if (hooks.length !== (g.hooks ?? []).length) removed++;
-      // A group whose only hook was ours has nothing left to do - drop the group
-      // rather than leaving an empty matcher behind.
-      if (hooks.length) kept.push({ ...g, hooks });
-    }
-    if (kept.length) settings.hooks[event] = kept;
-    else delete settings.hooks[event];
+    removed += removeFromEvent(groups, HOOK_NAME);
+    if (!groups.length) delete settings.hooks[event];
   }
   // Leave the file the shape it had before we ever touched it, so an install/uninstall
   // round trip is a no-op rather than an accumulation of empty containers.
   if (settings.hooks && Object.keys(settings.hooks).length === 0) delete settings.hooks;
 
-  fs.writeFileSync(SETTINGS, JSON.stringify(settings, null, 2) + "\n");
-  console.log(`Wrote ${SETTINGS} (${removed} hook entr${removed === 1 ? "y" : "ies"} removed).`);
+  save(`${removed} hook entr${removed === 1 ? "y" : "ies"} removed`);
   console.log("Restart the Claude Code app/CLI so it stops running the hook.");
   process.exit(0);
 }
 
-// statusLine: only set it if you don't already have one (yours wins).
+// statusLine: set it if you have none, update it if it is OURS in another form
+// (the from-source install moving to the released app), and otherwise leave yours.
 if (!settings.statusLine) {
   settings.statusLine = { type: "command", command: STATUSLINE, refreshInterval: 15 };
   console.log("Added statusLine.");
+} else if (isDeckhandCommand(settings.statusLine.command, STATUSLINE_NAME)) {
+  if (settings.statusLine.command !== STATUSLINE) {
+    settings.statusLine = { ...settings.statusLine, command: STATUSLINE };
+    console.log("Updated Deckhand's statusLine to the new runner.");
+  }
 } else {
   console.log("Kept your existing statusLine (Deckhand's is optional - it's only a fallback quota source).");
 }
 
 settings.hooks ??= {};
-let added = 0;
+let touched = 0;
 for (const [event, extra] of Object.entries(HOOK_EVENTS)) {
-  settings.hooks[event] ??= [];
-  const groups = settings.hooks[event];
-  const already = groups.some((g) => (g.hooks ?? []).some((h) => h.command === HOOK));
-  if (!already) {
-    // timeout must exceed the hook's REMOTE_WAIT_MS (90s) so Claude Code
-    // doesn't kill it mid-wait while a prompt is answerable from the device.
-    // MUST stay larger than the hook's REMOTE_WAIT_MS, which now defaults to
-    // "forever" (24h minus a minute). Claude Code kills a hook that outlives this,
-    // and a killed PermissionRequest hook is an untested state - so the hook is
-    // written to always self-exit first, and these two numbers are a PAIR. Raising
-    // the wait without raising this silently reintroduces the kill.
-    groups.push({ ...extra, hooks: [{ type: "command", command: HOOK, timeout: 86_400 }] });
-    added++;
+  if (settings.hooks[event] !== undefined && !Array.isArray(settings.hooks[event])) {
+    console.log(`Left ${event} alone: it isn't a list (hand-edited?).`);
+    continue;
   }
+  settings.hooks[event] ??= [];
+  if (normalizeEvent(settings.hooks[event], HOOK_NAME, HOOK, HOOK_TIMEOUT, extra)) touched++;
 }
 
-fs.writeFileSync(SETTINGS, JSON.stringify(settings, null, 2) + "\n");
-console.log(`Wrote ${SETTINGS} (${added} hook event(s) added).`);
+save(`${touched} hook event(s) added or updated`);
 console.log("Restart the Claude Code app/CLI (or start a new session) for the hooks to take effect.");
