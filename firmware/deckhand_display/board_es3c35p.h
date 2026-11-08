@@ -39,6 +39,9 @@
 // declared-but-unwired global (macEmojiId) whose comments implied it was live,
 // and an unread flag that does NOT say so is the same trap: the next reader
 // cannot tell "gates nothing yet" from "gates something I have not found".
+// Serial is the ESP32-S3's own USB CDC (FQBN USBMode=hwcdc, CDCOnBoot=cdc), whose
+// writes can DISCARD queued bytes when its link watchdog flaps - see shotWaitRoom.
+#define BOARD_SERIAL_NATIVE_USB 1
 #define BOARD_HAS_SD         1   // microSD slot on the SDMMC bus; no SD code exists
 #define BOARD_HAS_RGBLED     1   // WS2812 on GPIO40; nothing drives it
 #define BOARD_TOUCH_NEEDS_CAL 0  // capacitive, factory-aligned

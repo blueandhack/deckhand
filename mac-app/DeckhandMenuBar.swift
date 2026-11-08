@@ -3723,6 +3723,27 @@ func heartbeatDate() -> Date? {
 /// and what is yours are exactly install.sh's - see hook-command.mjs.
 enum Hooks {
     static let scripts = ["deckhand-session-hook.mjs", "deckhand-statusline.mjs"]
+    /// The person's choice for Codex's hooks, REMEMBERED - default on, as before. It
+    /// has to be a stored choice and not just a removal: install() runs again after
+    /// every update and on Reinstall, and used to add Codex's hooks back whenever
+    /// ~/.codex exists, so removing them by hand lasted until the next update.
+    static var codexWanted: Bool {
+        get { UserDefaults.standard.object(forKey: "codexHooks") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "codexHooks") }
+    }
+
+    /// Add or take out ONLY Codex's hooks, and remember the choice. Backs up first,
+    /// like every other change to the user's files. nil on success.
+    static func setCodex(_ on: Bool) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        codexWanted = on
+        guard codexPresent else { return nil }
+        _ = node("deckhand-backup.mjs", ["backup"])
+        if on { try? pointRunner() }
+        let r = node("install-codex-hooks.mjs", on ? ["--node", runnerLink] : ["--remove"])
+        return r.status == 0 ? nil : r.out
+    }
+
     static var codexPresent: Bool {
         FileManager.default.fileExists(atPath: (NSHomeDirectory() as NSString).appendingPathComponent(".codex"))
     }
@@ -3774,7 +3795,7 @@ enum Hooks {
         }
         let r = node("install-hooks.mjs", ["--node", runnerLink])
         if r.status != 0 { return "Installing the Claude Code hooks failed.\n\n\(r.out)" }
-        if codexPresent {
+        if codexPresent && codexWanted {
             let c = node("install-codex-hooks.mjs", ["--node", runnerLink])
             if c.status != 0 { return "The Claude Code hooks are installed, but the Codex hooks failed.\n\n\(c.out)" }
         }
@@ -3904,6 +3925,19 @@ extension AppDelegate {
                 if let err = err { self?.alert("Couldn't install the hooks", err) }
                 self?.settingsWindow?.model.pullServices()
                 self?.refresh()
+            }
+        }
+    }
+
+    func setCodexHooks(_ on: Bool) {
+        settingsWindow?.model.busy = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            let err = Hooks.setCodex(on)
+            ServiceState.shared.refreshNow()
+            DispatchQueue.main.async { [weak self] in
+                self?.settingsWindow?.model.busy = false
+                if let err = err { self?.alert(on ? "Couldn't add the Codex hooks" : "Couldn't remove the Codex hooks", err) }
+                self?.settingsWindow?.model.pullServices()
             }
         }
     }
@@ -4257,7 +4291,7 @@ final class SetupFlow: NSObject {
                     ? "\u{2022} leave your status line as it is (the quota then comes from the usage endpoint alone)"
                     : "\u{2022} set the status line, which is how Claude Code reports your quota",
             ]
-            if Hooks.codexPresent { lines.append("\u{2022} add hooks to ~/.codex/hooks.json; Codex asks you to trust them the next time it starts") }
+            if Hooks.codexPresent && Hooks.codexWanted { lines.append("\u{2022} add hooks to ~/.codex/hooks.json; Codex asks you to trust them the next time it starts (Settings \u{203A} Claude Code can turn these off)") }
             lines.append("\nEverything else in those files stays as it is. Remove in Deckhand's Settings \u{203A} Claude Code takes them out again.")
             m.detail = lines.joined(separator: "\n")
             m.primary = "Install Hooks"
@@ -4865,7 +4899,15 @@ struct ClaudePane: View {
                             .disabled(m.busy)
                     }
                 }
-                LabeledContent("Codex", value: m.codexHooks ? "Hooks installed" : (Hooks.codexPresent ? "No hooks" : "Not on this Mac"))
+                if isBundled && Hooks.codexPresent && m.hooks != .notInstalled {
+                    DescribedToggle(
+                        title: "Codex hooks",
+                        detail: "Shows when a Codex session is waiting for your approval, and lets the display answer it. Without them Codex sessions still appear, as working or waiting.",
+                        isOn: Binding(get: { m.codexHooks }, set: { m.app?.setCodexHooks($0) }))
+                        .disabled(m.busy)
+                } else {
+                    LabeledContent("Codex", value: m.codexHooks ? "Hooks installed" : (Hooks.codexPresent ? "No hooks" : "Not on this Mac"))
+                }
             } header: {
                 Text("Hooks")
             } footer: {
@@ -5138,6 +5180,37 @@ if let i = CommandLine.arguments.firstIndex(of: "--bar-preview"), CommandLine.ar
     try? NSBitmapImageRep(data: out.tiffRepresentation!)!.representation(using: .png, properties: [:])!
         .write(to: URL(fileURLWithPath: CommandLine.arguments[i + 1]))
     exit(0)
+}
+
+/// `--host stop|start|status`: the released app's background host, from a script.
+/// flash.sh needs the USB port free for the upload, and the host is a launchd agent
+/// with KeepAlive - a pkill is undone within seconds - so this goes through the same
+/// SMAppService unregister/register the menu's Stop and Start use, the supported way
+/// to stop and start it. Exits non-zero when the agent did not end up as asked.
+if let i = CommandLine.arguments.firstIndex(of: "--host"), CommandLine.arguments.count > i + 1 {
+    guard isBundled else { print("--host: not the released app (no bundled host here)"); exit(2) }
+    let svc = hostAgent()
+    let hostRunning = { runCapture("/usr/bin/pgrep", ["-f", bundledHostScript]).status == 0 }
+    switch CommandLine.arguments[i + 1] {
+    case "stop":
+        try? svc.unregister()
+        _ = runCapture("/usr/bin/pkill", ["-f", bundledHostScript])
+        for _ in 0..<40 where hostRunning() { usleep(250_000) }
+        let ok = svc.status != .enabled && !hostRunning()
+        print(ok ? "host stopped" : "host NOT stopped (agent \(svc.status.rawValue), process \(hostRunning() ? "still running" : "gone"))")
+        exit(ok ? 0 : 1)
+    case "start":
+        _ = runCapture("/usr/bin/pkill", ["-f", bundledHostScript])
+        do { try svc.register() } catch { print("host NOT started: \(error.localizedDescription)"); exit(1) }
+        for _ in 0..<40 where !hostRunning() { usleep(250_000) }
+        print(hostRunning() ? "host started" : "host registered but not running yet (agent \(svc.status.rawValue))")
+        exit(svc.status == .enabled ? 0 : 1)
+    case "status":
+        print("agent \(svc.status == .enabled ? "enabled" : "not enabled (\(svc.status.rawValue))"), process \(hostRunning() ? "running" : "not running")")
+        exit(0)
+    default:
+        print("--host: stop, start or status"); exit(2)
+    }
 }
 
 /// `--setup-do <conflict|hooks|skip-hooks|start|done>`: run ONE setup step's action,

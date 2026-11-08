@@ -99,9 +99,21 @@ esac
 
 LABEL="com.deckhand.host"
 DOMAIN="gui/$(id -u)"
+# The RELEASED app's host (docs/reference/release.md): a launch agent registered by
+# Deckhand.app. Stopped and restarted through the app's own `--host stop|start`
+# (SMAppService), because a pkill is undone by KeepAlive within seconds.
+APP_LABEL="io.github.blueandhack.deckhand.host"
 
 WAS_SUPERVISED=0
 WAS_MANUAL=0
+WAS_APP=0
+APP_BIN=""
+# The repo host's process ONLY. This was `MacOS/Deckhand`, which also matches the
+# released app's menu-bar app and its host - so with Deckhand.app installed it killed
+# the menu app, raced launchd for the port, and then "restored" the repo's
+# DeckhandBLE.app. The released host has a pattern of its own.
+REPO_HOST_PAT="DeckhandBLE.app/Contents/MacOS/Deckhand"
+APP_HOST_PAT="Deckhand Host.app/Contents/MacOS/Deckhand Host"
 # Set only by a SUCCESSFUL upload. The commit stamp below is gated on it because
 # stamping after a failed upload would attribute this commit to the firmware
 # still running - and "the About page shows a commit it is not running" is the
@@ -109,7 +121,10 @@ WAS_MANUAL=0
 UPLOAD_OK=0
 
 restore() {
-  if [ "$WAS_SUPERVISED" = "1" ]; then
+  if [ "$WAS_APP" = "1" ]; then
+    echo "==> restarting Deckhand.app's background host"
+    "$APP_BIN" --host start || echo "    WARNING: could not restart it - choose Start Deckhand in its menu"
+  elif [ "$WAS_SUPERVISED" = "1" ]; then
     echo "==> restarting supervised host"
     ./host/deckhand-service.sh start >/dev/null 2>&1 || \
       echo "    WARNING: could not restart the service - run ./host/deckhand-service.sh start"
@@ -135,7 +150,7 @@ restore() {
       # says the flashed code was not exactly that commit, which is precisely
       # what you need to know when a build behaves unexpectedly.
       git diff --quiet HEAD 2>/dev/null || SHA="$SHA+"
-      for _ in $(seq 1 20); do pgrep -f 'MacOS/Deckhand' >/dev/null && break; sleep 0.5; done
+      for _ in $(seq 1 20); do pgrep -f "$REPO_HOST_PAT|$APP_HOST_PAT" >/dev/null && break; sleep 0.5; done
       sleep 2   # the host has to open the port before a command can reach it
       echo "FWSTAMP $SHA" > "$HOME/.claude/deckhand-device-command"
       echo "==> stamped commit $SHA"
@@ -146,19 +161,34 @@ restore() {
 # upload failed would be a worse bug than the one this script prevents.
 trap restore EXIT
 
-if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+# The released app's host: find the app from the running host's own command line
+# (launchd reports only the bundle-relative program), else /Applications.
+if launchctl print "$DOMAIN/$APP_LABEL" >/dev/null 2>&1; then
+  HOST_PID=$(launchctl print "$DOMAIN/$APP_LABEL" 2>/dev/null | awk '$1 == "pid" {print $3; exit}')
+  HOST_CMD=""
+  [ -n "$HOST_PID" ] && HOST_CMD=$(ps -o command= -p "$HOST_PID" 2>/dev/null)
+  case "$HOST_CMD" in
+    */Contents/Helpers/*) APP_BIN="${HOST_CMD%%/Contents/Helpers/*}/Contents/MacOS/Deckhand" ;;
+    *) APP_BIN="/Applications/Deckhand.app/Contents/MacOS/Deckhand" ;;
+  esac
+fi
+if [ -n "$APP_BIN" ] && [ -x "$APP_BIN" ]; then
+  WAS_APP=1
+  echo "==> stopping Deckhand.app's background host (launchd would otherwise re-grab the port)"
+  "$APP_BIN" --host stop || { echo "    could not stop it - choose Stop Deckhand in its menu and retry" >&2; exit 1; }
+elif launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
   WAS_SUPERVISED=1
   echo "==> stopping supervised host (launchd would otherwise re-grab the port)"
   ./host/deckhand-service.sh stop >/dev/null
-elif pgrep -f 'MacOS/Deckhand' >/dev/null; then
+elif pgrep -f "$REPO_HOST_PAT" >/dev/null; then
   WAS_MANUAL=1
   echo "==> stopping hand-started host"
-  pkill -f 'MacOS/Deckhand'
+  pkill -f "$REPO_HOST_PAT"
 fi
 # Wait for the port to actually be released rather than assuming it: the process
 # can outlive the signal by a moment, and a race here is exactly the confusing
 # "busy port" failure this script exists to avoid.
-for _ in $(seq 1 20); do pgrep -f 'MacOS/Deckhand' >/dev/null || break; sleep 0.5; done
+for _ in $(seq 1 20); do pgrep -f "$REPO_HOST_PAT|$APP_HOST_PAT" >/dev/null || break; sleep 0.5; done
 
 if [ "$NO_COMPILE" != "1" ]; then
   echo "==> compiling (board $BOARD)"
