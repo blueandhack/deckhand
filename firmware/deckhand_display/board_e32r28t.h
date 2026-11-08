@@ -20,6 +20,8 @@
 #define BOARD_HAS_BEEPER     1
 // Informational only on both boards - see board_es3c35p.h. Neither is read.
 #define BOARD_HAS_SD         0
+// Serial is the CH340 UART: a full TX buffer BLOCKS, it never drops (shotWaitRoom).
+#define BOARD_SERIAL_NATIVE_USB 0
 #define BOARD_HAS_RGBLED     0
 #define BOARD_TOUCH_NEEDS_CAL 1
 // TWO SETTINGS FLAGS STOOD HERE AND TASK 4 DELETED BOTH. The record is kept

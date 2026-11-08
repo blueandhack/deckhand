@@ -53,7 +53,7 @@ panel, which reads as a layout bug rather than a build mistake.
 | mic / beeper | both fitted and working | both work, via the ES8311 |
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64 |
-| size today | flash 1429584, RAM 72284 | flash 1187024, RAM 66924 |
+| size today | flash 1429808, RAM 72292 | flash 1187296, RAM 66924 |
 
 **FOUR of the six numbers this file quotes about the binaries are BOUND and two are not.**
 `node firmware/board-baseline.mjs --doc-check` asserts the two **hashes** and the two **sizes**
@@ -243,7 +243,21 @@ on 2026-10-11** (66,908 -> 66,924, branch `power-awake`): the audio chain sleeps
 (`audioAwake`, `audioAwakeSince`, `audioLastUseAt`) and the SD card is put in stand-by at boot
 (`sdStandbyErr`, `sdStandbyMs` report its deselect). Flash 1,185,056 -> 1,187,024 (+1,968).
 **Board 1 measured byte-identical**: every line of it is behind `!BOARD_USES_TFT_ESPI` or
-`BOARD_HAS_SD`, both 0 there. `arduino-cli`'s
+`BOARD_HAS_SD`, both 0 there. **Then 2026-11-08 (branch `screenshot-fix`), both boards moved, on
+purpose, and the TOOLCHAIN had to be re-established first.** This Mac had drifted: core 3.3.10
+installed (every doc names 3.3.11) and board 2's libraries gone. Restored: core 3.3.11 and
+`ESP32_Display_Panel` 1.0.4 (pulling `ESP32_IO_Expander` 1.1.1, `esp-lib-utils` 0.2.3). The
+UNCHANGED source at the last commit then rebuilt with RAM exactly as recorded on both boards
+(72,284 / 66,924), board 1's size identical and board 2's 32 bytes under (16 of it the build-date
+pooling flip) - as close as a later day can get, so the change below is measured against those
+same-day builds, not against the October hashes. The change: `SCREENSHOT` refuses its own
+double-delivered copy (shared - `shotEndedAt`), and board 2 waits for TX room before each `SHOT`
+line (`shotWaitRoom`, behind the new `BOARD_SERIAL_NATIVE_USB`, 0 on board 1). **Board 1: flash
++224 (1,429,584 -> 1,429,808), RAM +8 (72,284 -> 72,292)** - the guard's timestamp and its
+refusal string. **Board 2: flash +304 against its same-day build (1,186,992 -> 1,187,296), RAM
+unchanged at 66,924** (the timestamp lands in padding). Board 2 was flashed and measured: three
+captures with USB and BLE both live, all 480 rows each, where before every capture lost 40-53
+rows; board 1 was not cabled and not looked at. `arduino-cli`'s
 "Sketch uses N" is a
 slightly smaller number than the `.bin` - the same image without its trailing padding - so do
 not expect the compile summary to print these.
@@ -257,7 +271,9 @@ must be sized from `BOARD_W`/`BOARD_H`.
 
 **`./flash.sh` from the repo root is the whole procedure** - it compiles, resolves the port
 (it renumbers), stops the supervised host so the port is free, uploads, and restores the host
-even if the upload fails or you Ctrl-C. `--board 2` for board 2. `--no-compile` skips the
+even if the upload fails or you Ctrl-C. With the released `Deckhand.app` installed, the host is
+ITS launch agent, and flash.sh stops and restarts it through `Deckhand --host stop|start`
+(SMAppService) - its old `pkill -f 'MacOS/Deckhand'` also matched the app's menu-bar process. `--board 2` for board 2. `--no-compile` skips the
 ~3 minute build.
 
 ```
@@ -306,7 +322,7 @@ arduino-cli compile --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app" \
 node firmware/board-baseline.mjs /tmp/b1/deckhand_display.ino.bin --check 1
 ```
 
-Today: `fa504ef952dd9ef2...`, size 1429584 (board 2: `979dc55c862f4b70...`, size 1187024).
+Today: `5009cd28bc55bc69...`, size 1429808 (board 2: `bf4ac58f2e6afaad...`, size 1187296).
 
 It compares **BYTES, not sizes**, and that matters: a default argument on a shared function
 once changed board 1's codegen with **no size change whatsoever** - invisible to a size
@@ -450,7 +466,7 @@ one is neither handled nor refused.
 | `THEME dark\|light` | which palette is live, so "confirm this reads in both themes" stops needing a person at the device. NOT persisted - a reboot restores the stored setting |
 | `KBPROBE` / `KBPROBE off` | per keystroke: the key the press ARMED, the key the lift COMMITTED, the pixel delta. Measures where fingers land versus where they lift; says NOTHING about whether the text was right |
 | `KBBUBBLE [r c]` / `KBBUBBLE off` | draws the magnified key bubble so a capture can see it - it otherwise exists only while a finger is down. Arms, never commits; declines DEL, which commits on press |
-| `SCREENSHOT` | PNG to `~/Deckhand-shots/` (0.4s on board 2, ~18s on board 1) |
+| `SCREENSHOT` | PNG to `~/Deckhand-shots/` (0.5s on board 2, ~18s on board 1). A copy arriving within 3s of a capture's end is the double delivery and is refused by name (`SCREENSHOT skipped: ...`) - it used to run a second full capture. On board 2 each row waits for TX room first: the native USB CDC DISCARDS queued bytes when its link watchdog flaps, and with BLE also live every capture lost 40-53 of 480 rows until it did |
 | `COLORTEST` / `SWAP 0\|1` / `INV 0\|1` | board 2: the only instruments that can see the panel's colour pipeline |
 | `PERF` / `TEMP` / `TEXTPROBE` | flush timing; SoC DIE temperature; the text-width table |
 | `POWERPROBE <label>` | mV/h in the current state; **battery only**, refuses on USB with the cause |

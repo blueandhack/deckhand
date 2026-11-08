@@ -2378,6 +2378,27 @@ const int MIC_CUE_DUTY = 18;
 // the wire format stays obvious when reading the host log by hand.
 static const char B64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
+// WAIT FOR ROOM before each SHOT line, on the native USB CDC only (board 2). A
+// capture pushes ~410KB as fast as the panel reads back, so the 8KB TX ring is
+// nearly always full - and arduino-esp32's HWCDC decides "connected" partly from a
+// start-of-frame watchdog that its own source says "is known to flap even on a
+// healthy link". On a flap, write() takes the not-connected path, which makes room
+// by DISCARDING THE OLDEST QUEUED BYTES. MEASURED 2026-11-08 with USB and BLE both
+// live: every capture lost 40-53 of 480 rows, one row arrived with bytes missing
+// mid-line ("SHOT MQYx..." - its "d " gone), and with BLE disconnected the same
+// capture completed. Waiting until the whole line fits means a flap has nothing to
+// discard. Bounded at 2s, so a host that has really stopped reading costs the
+// capture, never a hang. Board 1's CH340 UART blocks on a full buffer instead and
+// never drops, so this compiles to nothing there.
+static inline void shotWaitRoom(size_t need) {
+#if BOARD_SERIAL_NATIVE_USB
+  unsigned long t0 = millis();
+  while (Serial.availableForWrite() < (int) need && millis() - t0 < 2000) delay(1);
+#else
+  (void) need;
+#endif
+}
+
 // One screenshot row (480 bytes) as base64 on a single "SHOT d" line. Kept
 // separate from micDumpBase64 because that one drives a progress meter and
 // chunks to 144 bytes; here a row IS the natural unit, so the host can rebuild
@@ -2402,6 +2423,7 @@ void shotDumpBase64(const uint8_t* data, size_t n) {
     line[o++] = (i + 2 < n) ? B64[v & 63] : '=';
   }
   line[o] = '\0';
+  shotWaitRoom(o + 8);
   Serial.printf("SHOT d %s\n", line);
 }
 
@@ -9676,6 +9698,18 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
                   (int) panelSwapBytes, BOARD_PANEL_SWAP_BYTES);
 #endif
   } else if (buf == "SCREENSHOT") {
+    // THE HOST SENDS EVERY COMMAND OVER EVERY LINK, so a board on USB and BLE gets
+    // SCREENSHOT twice. A capture blocks the loop, so the BLE copy waited and then
+    // ran a SECOND full capture straight after the first - 410KB more on board 2,
+    // another ~18s on board 1. A copy arriving within 3s of a capture's end is that
+    // echo, and is refused by name; a deliberate second shot just waits 3s.
+    static unsigned long shotEndedAt = 0;
+    if (shotEndedAt != 0 && millis() - shotEndedAt < 3000) {
+      Serial.printf("SCREENSHOT skipped: a capture finished %lums ago - the host sends each command over every link, so this is its second copy\n",
+                    millis() - shotEndedAt);
+      buf = "";
+      return;
+    }
     // Reads the panel back and ships it as base64 RGB565. Readback was assumed
     // impossible here - the FAB note says so, because per-pixel reads for
     // transparency would be far too slow - but that is a SPEED argument, not a
@@ -9717,7 +9751,9 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
       }
       shotDumpBase64(rowBytes, tft.width() * 2);
     }
+    shotWaitRoom(16);
     Serial.println("SHOT end");
+    shotEndedAt = millis();
   } else if (buf == "MICTEST") {
     if (micSurfaceBusy("MICTEST")) { buf = ""; return; }
     micLevelTest();
