@@ -248,6 +248,34 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
   satisfied. `process.execPath` is the node inside the bundle, so it always exists - the
   same reason the mic decoder is spawned that way. This is also a class the restart ledger
   cannot catch: a healthy process doing no useful work.
+  - **"The bundle's node always exists" turned out to be false, on 2026-11-06.** The copy of
+    Homebrew's node exists, but only `libnode` is bundled (`build-app.sh`'s `@rpath` loop).
+    The ~90 other Homebrew libraries are linked by ABSOLUTE path, so `brew upgrade simdjson`
+    (34 -> 36, at 01:48 on Nov 6) broke every NEW launch of the bundle without touching node
+    at all: `dyld: Library not loaded: .../libsimdjson.34.dylib`, terminated at launch. The
+    host that was already running had the old library mapped and kept going. So the visible
+    symptom was only `ccusage` failing on every tick: frozen token counts, 25 crash reports
+    named `Deckhand` before macOS stopped writing them, and ~2.6MB of dyld text in the log.
+    **The next host launch would fail the same way**, whether from a reboot, a crash or a
+    Stop/Start, and launchd's KeepAlive would retry it every 10s. Re-running `build-app.sh`
+    fixes it for as long as Homebrew's libraries stay put. **Not yet done** at the time of
+    writing.
+- **`ccusage` runs beside the tick, not inside it (`kickCcusage`), because waiting for it made
+  the menu bar look like the host was restarting.** The tick used to await both calls. The
+  timeout no longer cost the tick its payload (`tryCcusage`), but the tick still WAITED up to
+  `CCUSAGE_TIMEOUT_MS` (20s). The heartbeat is written at the top of each tick, so the next
+  write came up to 25s after the last. The menu bar treats a heartbeat older than 12s as a
+  dead host: hollow boat, no figures, "Stopped", then back. **Measured, not inferred**, off
+  `~/Library/Logs/deckhand-launchd.out`. Each tick line's `qage=`/`cxage=` is a reading's age
+  in seconds, so consecutive lines give the true tick interval. That covered 210,770 ticks:
+  132 gaps of 12s or more. 80 came with the Bluetooth adapter going off and on (sleep and
+  wake). The 49 with nothing logged between them came in clusters and were **capped at exactly
+  25s**, which is 5s plus the 20s timeout. In the 34.8h after `ccusage` began failing
+  instantly (the dylib above) there were **zero** gaps, against seven in the 34.8h before.
+  Single-flight: a tick starts a run only when none is in flight and uses the latest FINISHED
+  result, so a slow `ccusage` costs token freshness and not the tick. The first tick still
+  waits, so a fresh host does not log "nothing measured yet". **Not yet observed live**: it
+  needs a host restart, which needs the rebuild above first.
 
 - **Housekeeping: the host's own files are capped, because both grew forever.** Measured:
   the log appends a ~700-byte tick line every 5s = **4.4MB/day, ~131MB/month**, and audio

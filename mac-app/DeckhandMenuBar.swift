@@ -226,11 +226,14 @@ func pctReset(_ line: Substring, _ key: String) -> (Int, Int?)? {
     return (pct, reset)
 }
 
-/// Codex's window length in MINUTES, out of the `/7d` the host appends to its
-/// percentage (`codex=44%/7d (resets 8021m)`). Days, because that is the unit the
-/// host rounds to on the way out (`Math.round(usage.cxWin / 1440)`), so nothing
-/// finer than a day is recoverable here - which is fine for placing a tick in a
-/// ten-cell bar.
+/// Codex's window length in MINUTES, out of the `/7d` or `/5h` the host appends to
+/// its percentage (`codex=44%/7d (resets 8021m)`). Whole days at a day or more,
+/// whole hours below one, because those are the units the host rounds to on the
+/// way out - which is fine for placing a tick in a ten-cell bar.
+///
+/// HOURS ARE NEW, and their absence was a live defect: the host used to print days
+/// only, so Codex's 300-minute window came out as `/0d`, which this read as "no
+/// window" - the Codex row drew with no pace on a Mac where the window was known.
 ///
 /// Absent whenever the field is: the host omits it when Codex has published no
 /// rate_limits at all, and the row must then draw its fill with NO tick rather
@@ -241,10 +244,17 @@ func codexWindowMin(_ line: Substring) -> Int? {
     let rest = line[r.upperBound...]
     guard let pctEnd = rest.firstIndex(of: "%") else { return nil }
     let after = rest[rest.index(after: pctEnd)...]
-    guard after.hasPrefix("/"), let dEnd = after.firstIndex(of: "d"),
-          let days = Int(after[after.index(after: after.startIndex)..<dEnd]), days > 0
-    else { return nil }
-    return days * 1440
+    guard after.hasPrefix("/") else { return nil }
+    // The digits, then exactly one unit letter. Read as a run of digits rather
+    // than "up to the first d", which would happily swallow a `h` into the number.
+    let body = after.dropFirst()
+    let digits = body.prefix { $0.isNumber }
+    guard let n = Int(digits), n > 0, let unit = body.dropFirst(digits.count).first else { return nil }
+    switch unit {
+    case "d": return n * 1440
+    case "h": return n * 60
+    default: return nil
+    }
 }
 
 /// The sessions array out of `sessions(N)=[{...}]` in a tick line.
@@ -565,6 +575,11 @@ let F_MONO_BOLD = NSFont.monospacedSystemFont(ofSize: 11, weight: .semibold)
 /// the device is there to say it too.
 enum BarPref: String, CaseIterable {
     case usage = "barShowUsage"
+    // Its own switch, not folded into `usage`: someone who never runs Codex should
+    // not have to give up Claude's figures to keep a third one out of the bar, and
+    // the reverse. Defaults ON like the rest - a Mac with no Codex reading draws
+    // nothing for it anyway (`cxPct` nil), so ON costs a non-Codex user no width.
+    case codex = "barShowCodex"
     case sessions = "barShowSessions"
     case asking = "barShowAsking"
     case onlyOffline = "barOnlyWhenOffline"
@@ -572,6 +587,7 @@ enum BarPref: String, CaseIterable {
     var label: String {
         switch self {
         case .usage: return "Quota usage"
+        case .codex: return "Codex usage"
         case .sessions: return "Waiting / working counts"
         case .asking: return "Needs-input count"
         case .onlyOffline: return "Only while no device is connected"
@@ -671,8 +687,29 @@ func barBoatStyle(_ s: HostStatus) -> BoatStyle { s.deviceConnected ? .solid : .
 /// A dropped figure leaves no gap: the separator only appears between two figures
 /// that both exist, since a leading or trailing "·" reads as something missing
 /// rather than as something absent.
+///
+/// CODEX COMES LAST, AND NAMED. The two Claude figures go unlabelled because their
+/// order is fixed and the menu says which is which. A third bare percentage would
+/// be guesswork, though: with 5h missing, `50% · 17%` could be 7d and Codex or 5h
+/// and 7d. So Codex carries the device's own `CX` tag, in secondary colour, and the
+/// tag replaces the `·`. The tag already separates it, and it is a different
+/// agent's quota rather than a third window of the same one. Its staleness and its
+/// window are its OWN (`cxAgeSec`, `cxWinMin`), for the reason the menu row gives:
+/// a rollout file goes stale independently of the OAuth poller.
 func barUsageParts(_ s: HostStatus) -> [(String, NSFont, NSColor)] {
-    guard barMirrorAllowed(.usage, s) else { return [] }
+    var out: [(String, NSFont, NSColor)] = []
+    if barMirrorAllowed(.usage, s) { out += barClaudeParts(s) }
+    if barMirrorAllowed(.codex, s), let pct = s.cxPct {
+        let stale = (s.cxAgeSec ?? 0) > QUOTA_STALE_SEC
+        let pace = stale ? nil : pacePct(resetInMin: s.cxReset, windowMin: s.cxWinMin)
+        out.append((out.isEmpty ? " CX " : "   CX ", F_BAR, .secondaryLabelColor))
+        out.append(("\(pct)%" + paceGlyph(pct: pct, pace: pace), F_BAR, quotaColour(pct: pct, stale: stale)))
+    }
+    return out
+}
+
+/// The 5h and 7d figures, separated by a dot. See `barUsageParts` above.
+func barClaudeParts(_ s: HostStatus) -> [(String, NSFont, NSColor)] {
     let stale = (s.quotaAgeSec ?? 0) > QUOTA_STALE_SEC
     var out: [(String, NSFont, NSColor)] = []
     for (pct, reset, win) in [(s.pct5h, s.reset5h, WINDOW_5H_MIN), (s.pct7d, s.reset7d, WINDOW_7D_MIN)] {
@@ -696,7 +733,26 @@ func barUsageParts(_ s: HostStatus) -> [(String, NSFont, NSColor)] {
 /// sentence. Empty when the bar is showing no usage, so there is no tooltip
 /// promising to explain something that is not on screen.
 func barTooltip(_ s: HostStatus) -> String {
-    guard barMirrorAllowed(.usage, s) else { return "" }
+    var lines: [String] = []
+    if barMirrorAllowed(.usage, s) { lines += barClaudeTooltip(s) }
+    if barMirrorAllowed(.codex, s), let pct = s.cxPct {
+        let age = s.cxAgeSec ?? 0
+        // Each reason named, for the reason given in barClaudeTooltip: a missing
+        // WINDOW is a different cause from a missing reset time, and paceWords
+        // alone would blame the reset time for both.
+        if age > QUOTA_STALE_SEC {
+            lines.append("CX (Codex): \(pct)% used, no pace: this reading is \(humanMinutes(age / 60)) old")
+        } else if s.cxWinMin == nil {
+            lines.append("CX (Codex): \(pct)% used, no pace: Codex published no window length")
+        } else {
+            lines.append("CX (Codex): " + paceWords(pct: pct, pace: pacePct(resetInMin: s.cxReset, windowMin: s.cxWinMin)))
+        }
+    }
+    return lines.joined(separator: "\n")
+}
+
+/// The 5h and 7d lines of `barTooltip`, with their shared staleness sentence.
+func barClaudeTooltip(_ s: HostStatus) -> [String] {
     let stale = (s.quotaAgeSec ?? 0) > QUOTA_STALE_SEC
     var lines: [String] = []
     for (name, pct, reset, win) in [("5h", s.pct5h, s.reset5h, WINDOW_5H_MIN),
@@ -712,9 +768,11 @@ func barTooltip(_ s: HostStatus) -> String {
         lines.append(stale ? "\(name): \(pct)% used"
                            : "\(name): " + paceWords(pct: pct, pace: pacePct(resetInMin: reset, windowMin: win)))
     }
-    if lines.isEmpty { return "" }
-    if stale { lines.append("No pace: these readings are \(humanMinutes((s.quotaAgeSec ?? 0) / 60)) old, so the clock has moved and they have not.") }
-    return lines.joined(separator: "\n")
+    if lines.isEmpty { return [] }
+    // "5h/7d" named now that a Codex line can follow this one, which would
+    // otherwise read as included in "these readings".
+    if stale { lines.append("No 5h/7d pace: these readings are \(humanMinutes((s.quotaAgeSec ?? 0) / 60)) old, so the clock has moved and they have not.") }
+    return lines
 }
 
 /// Everything to the right of the boat, left to right: usage, then what needs
@@ -1974,11 +2032,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             iconMenu.addItem(it)
             iconItems.append((name, it))
         }
-        // The two device-mirroring badges, then the restriction that governs
-        // them, then - past a separator - the one that stands on its own. The
+        // The three device-mirroring badges (Claude usage, Codex usage, sessions),
+        // then the restriction that governs them, then - past a separator - the
+        // one that stands on its own. The
         // grouping is what says which items "only while no device is connected"
         // applies to, so it cannot be reordered without saying it another way.
-        for pref in [BarPref.usage, .sessions, .onlyOffline, .asking] {
+        for pref in [BarPref.usage, .codex, .sessions, .onlyOffline, .asking] {
             if pref == .asking { barMenu.addItem(.separator()) }
             let it = NSMenuItem(title: pref.label, action: #selector(toggleBarPref(_:)), keyEquivalent: "")
             it.target = self
@@ -1987,7 +2046,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 it.toolTip = "\u{25CB} waiting on you, \u{25CF} working. Sessions needing input are counted by the row below."
             }
             if pref == .onlyOffline {
-                it.toolTip = "Applies to the two above. The needs-input count is unaffected."
+                it.toolTip = "Applies to the three above. The needs-input count is unaffected."
             }
             barMenu.addItem(it)
             barPrefItems.append((pref, it))
@@ -2220,7 +2279,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             // The restriction is meaningless with nothing left for it to
             // restrict, and a live checkbox that changes nothing is worse than a
             // dimmed one that explains itself.
-            if pref == .onlyOffline { it.isEnabled = BarPref.usage.on || BarPref.sessions.on }
+            if pref == .onlyOffline { it.isEnabled = BarPref.usage.on || BarPref.codex.on || BarPref.sessions.on }
         }
 
         // Watchdog: if syncing is meant to be on but the host has been down or
@@ -3464,6 +3523,11 @@ if CommandLine.arguments.contains("--pace-check") {
     eq(codexWindowMin(withWin), 10080, "codex=44%/7d is seven days of minutes")
     eq(codexWindowMin(noWin), nil, "no /Nd means no window")
     eq(codexWindowMin(unknown), nil, "an unmeasured codex has no window")
+    // The live defect: a 300-minute window printed as `/0d` and read as absent.
+    eq(codexWindowMin("codex=17%/5h (resets 273m) via=none"), 300, "codex=17%/5h is five hours of minutes")
+    eq(codexWindowMin("codex=17%/0d (resets 273m) via=none"), nil, "an old host's /0d is still no window, not zero")
+    eq(codexWindowMin("codex=17%/5x (resets 273m)"), nil, "an unknown unit is no window")
+    eq(pctReset("codex=17%/5h (resets 273m)", "codex=")?.1, 273, "an hours window keeps its reset")
 
     // A float percentage must still parse - it once blanked the 5h figure.
     let floaty: Substring = "5h=28.000000000000004% (resets 0m) 7d=3% (resets 5174m) via=ble"
@@ -3482,6 +3546,33 @@ if CommandLine.arguments.contains("--pace-check") {
     eq(quotaBarRuns(96, pace: pacePct(resetInMin: 30, windowMin: WINDOW_5H_MIN))
         .contains { $0.role == .tick }, true,
        "and the tick is what the row loses with it")
+
+    // Codex in the bar: named, on its OWN age and window. These read the real
+    // switches, like the two above, so they only run with both left on. (The
+    // offline-only switch cannot bite: a fresh HostStatus has no device.)
+    if BarPref.usage.on && BarPref.codex.on {
+        var cx = HostStatus()
+        cx.running = true; cx.pct5h = 13; cx.reset5h = 200; cx.quotaAgeSec = 1
+        cx.cxPct = 96; cx.cxReset = 30; cx.cxWinMin = 300; cx.cxAgeSec = 1
+        let fresh = barUsageParts(cx).map(\.0).joined()
+        eq(fresh.contains("CX 96%\u{25B2}"), true, "Codex is tagged CX and carries its own pace")
+        eq(fresh.hasPrefix(" 13%"), true, "Claude's figure stays first")
+        cx.quotaAgeSec = QUOTA_STALE_SEC + 1
+        eq(barUsageParts(cx).map(\.0).joined().contains("CX 96%\u{25B2}"), true,
+           "a stale CLAUDE reading does not take Codex's pace with it")
+        cx.quotaAgeSec = 1; cx.cxAgeSec = QUOTA_STALE_SEC + 1
+        let cxStale = barUsageParts(cx).map(\.0).joined()
+        eq(cxStale.contains("CX 96%") && !cxStale.contains("CX 96%\u{25B2}"), true, "a stale Codex reading keeps digits, loses pace")
+        cx.cxAgeSec = 1; cx.cxWinMin = nil
+        eq(barUsageParts(cx).map(\.0).joined().hasSuffix("CX 96%"), true, "no window, no glyph - never an assumed 7d")
+        eq(barTooltip(cx).contains("Codex published no window length"), true, "and the tooltip names that cause")
+        cx.pct5h = nil
+        eq(barUsageParts(cx).map(\.0).joined(), " CX 96%", "Codex alone has no leading gap or separator")
+        cx.cxPct = nil; cx.pct5h = 13
+        eq(barUsageParts(cx).map(\.0).joined().contains("CX"), false, "no Codex reading, no CX tag")
+    } else {
+        print("note: Codex bar checks skipped - Quota usage or Codex usage is switched off in Menu bar shows")
+    }
 
     print(failed == 0 ? "pace: all \(ran) checks passed" : "pace: \(failed) of \(ran) FAILED")
     exit(failed == 0 ? 0 : 1)

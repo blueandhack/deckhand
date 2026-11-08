@@ -53,7 +53,22 @@ Four things are load-bearing:
 - **Monospaced DIGITS (`F_BAR`), not cosmetic.** These percentages are rewritten every
   few seconds and a proportional font shifts the item's width on every digit change,
   nudging every other menu-bar icon sideways on a timer.
-- **The four toggles under `Menu bar shows` read `object(forKey:) as? Bool ?? true`, not
+- **CODEX'S QUOTA IS IN THE BAR TOO, tagged `CX`, behind its own toggle (`Codex usage`,
+  `barShowCodex`).** Added 2026-11-07. It sits after Claude's two figures:
+  `54%▲ · 72%▲  CX 20%`. The tag is the device's own `CX`, in secondary colour, and it
+  replaces the `·`. A third bare percentage would be ambiguous whenever one of the other two
+  was missing, and Codex is a different agent's quota rather than a third window of the same
+  one. Its staleness and window are its OWN (`cxAgeSec`, `cxWinMin`), so a stale Claude reading
+  does not cost Codex its pace and the reverse. `--pace-check` asserts both directions by name,
+  and both fail when the code is reverted to Claude's age (verified by mutation). The toggle has
+  its own switch, not a share of `Quota usage`, because a user who wants one figure should not
+  have to accept the other. Like the other mirror badges it obeys `Only while no device is
+  connected`, since the device's USAGE tab draws a Codex card too. Defaults ON. That costs a
+  Mac that never runs Codex nothing, because no reading means no `CX` at all. The tooltip gets
+  a `CX (Codex):` line that names the reason when there is no pace: the reading is stale, or
+  Codex published no window length. `paceWords` would otherwise blame a missing reset time for
+  both. Checked on a `--menu-preview` render in light and dark against the live host.
+- **The five toggles under `Menu bar shows` read `object(forKey:) as? Bool ?? true`, not
   `bool(forKey:)`.** `UserDefaults.bool(forKey:)` returns FALSE for a key nobody has
   written, so reading it directly would ship an app whose bar is blank until three things
   are switched on by hand. `--menu-dump` prints the composed label and the submenu's
@@ -158,6 +173,14 @@ Four things are load-bearing:
   publishes only how much is LEFT; **Codex's is parsed off the line** (`codex=44%/7d`, which the
   host already prints), and when it is absent that row draws its fill with **no tick** rather than
   assuming seven days — a mark at a position nothing measured is the one thing this must not do.
+  - **THE CODEX ROW HAD NO TICK ON A MAC WHERE THE WINDOW WAS KNOWN, until 2026-11-07.** The host
+    printed the window in whole days only (`Math.round(cxWin / 1440)`), and this account's Codex
+    reports a 300-minute primary window. So the live line read `codex=17%/0d`, which
+    `codexWindowMin` correctly refused as "no window". The host now prints hours below a day
+    (`/5h`), following the device's own CODEX header in `usage.ino`, and the parser reads either
+    unit. An old host's `/0d` still parses as no window rather than as zero. Both forms are
+    asserted in `--pace-check`. **Not yet seen live:** the fix reaches the menu only once the
+    host restarts.
   - **A STALE reading keeps its digits and loses its pace, on both surfaces.** The comparison is
     against a clock that has kept running while the percentage has not, so the tick and the glyph
     are suppressed rather than corrected. The reading's own age is otherwise NOT subtracted from
