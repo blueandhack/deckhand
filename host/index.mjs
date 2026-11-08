@@ -27,6 +27,7 @@ import noble from "@abandonware/noble";
 import { DatabaseSync } from "node:sqlite";
 import { mergeById } from "./sessions-merge.mjs";
 import { readAntigravitySessions } from "./gemini-sessions.mjs";
+import { readGeminiQuota, quotaField, ageQuota } from "./gemini-quota.mjs";
 import {
   capUtf8,
   ANSWER_TEXT_MAX_BYTES as VOICE_ANSWER_TEXT_MAX_BYTES,
@@ -2737,7 +2738,37 @@ function kickCcusage() {
   return ccusageInFlight;
 }
 
+// Gemini usage, from the Gemini app's local server (host/gemini-quota.mjs). A local
+// call that answers in ~35ms, but it is still a network round trip the tick must never
+// wait on: kicked at most once a MINUTE, in the background, single-flight like
+// ccusage, and the tick prints whatever the last answer was. MENU BAR ONLY - like
+// Gemini's sessions it never reaches the device. A reading older than 6h (the app has
+// been closed that long) is dropped rather than shown as stale forever.
+const GEMINI_QUOTA_EVERY_MS = 60_000;
+const GEMINI_QUOTA_DROP_MS = 6 * 3600_000;
+let geminiQuota = null;            // { list, at }
+let geminiQuotaInFlight = null;
+let geminiQuotaAskedAt = 0;
+function kickGeminiQuota() {
+  if (geminiQuotaInFlight || Date.now() - geminiQuotaAskedAt < GEMINI_QUOTA_EVERY_MS) return;
+  geminiQuotaAskedAt = Date.now();
+  geminiQuotaInFlight = readGeminiQuota()
+    .then((list) => { if (list) geminiQuota = { list, at: Date.now() }; })
+    .catch(() => {})
+    .finally(() => { geminiQuotaInFlight = null; });
+}
+function geminiQuotaLine() {
+  if (!geminiQuota || Date.now() - geminiQuota.at > GEMINI_QUOTA_DROP_MS) return "";
+  // Aged to NOW: resets count down between reads, and a window that has reset since
+  // is dropped rather than shown with its old percentage (ageQuota).
+  const ageMs = Date.now() - geminiQuota.at;
+  const groups = ageQuota(geminiQuota.list, Math.floor(ageMs / 60000));
+  if (!groups.length) return "";
+  return `gmq=${quotaField(groups)} gmage=${Math.round(ageMs / 1000)} `;
+}
+
 async function readUsage() {
+  kickGeminiQuota();
   // ccusage is NOT on this list any more - see kickCcusage above. The rest are
   // still gathered together and none of them can reject the tick. countInventory()
   // is readdir-only (no stat, no content read - see
@@ -6156,6 +6187,9 @@ async function tick(generation = tickGeneration) {
         (usage.cxPct2 == null ? "" :
           `codex2=${usage.cxPct2}%${usage.cxWin2 ? (usage.cxWin2 >= 1440 ? `/${Math.round(usage.cxWin2 / 1440)}d` : `/${Math.round(usage.cxWin2 / 60)}h`) : ""}` +
           `${usage.cxResetMin2 == null ? "" : ` (resets ${usage.cxResetMin2}m)`} `) +
+        // Gemini usage, one entry per quota GROUP:
+        // `gmq=Group|5h:usedPct:resetMin|weekly:usedPct:resetMin;Group2|...`.
+        geminiQuotaLine() +
         // The MENU's list (the device's plus Gemini), not usage.sessions: this
         // line is the menu bar's feed, and nothing reads it for the device.
         `sessions(${menuSessions.total})=${JSON.stringify(menuSessions.list)} ` +

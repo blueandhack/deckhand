@@ -394,6 +394,7 @@ node firmware/deckhand_display/geom-sweep.mjs          # fault-injection sweep, 
 node host/{wire-bytes,ask-chips,ask-optdescs,pair-crypto,pair-exchange,voice-answer}-check.mjs
 node host/{codex-refresh,line-address,session-lookup}-check.mjs
 node host/gemini-sessions-check.mjs                     # Antigravity rows: menu yes, device no
+node host/gemini-quota-check.mjs                        # Gemini usage from the Gemini app's local server
 node host/session-inbox-check.mjs                       # the inbox frame, over a stand-in socket
 node host/{host-tag,mac-emoji,run-ledger,watchdog,ccusage}-check.mjs
 node host/whisper-prompt-check.mjs                      # the dictation vocabulary, vs whisper's SILENT prompt cap
@@ -491,6 +492,7 @@ through the measuring command.
 | pairing, keys, two Macs at once | [`docs/reference/pairing-and-multi-mac.md`](docs/reference/pairing-and-multi-mac.md) |
 | hooks, remote answering, the `ask` object | [`docs/reference/hooks-and-answering.md`](docs/reference/hooks-and-answering.md) |
 | Codex, the paged history reader | [`docs/reference/codex-and-history.md`](docs/reference/codex-and-history.md) |
+| Gemini / Antigravity: sessions, and usage from the app's local server | [`docs/reference/gemini.md`](docs/reference/gemini.md) |
 | `host/index.mjs`, OAuth, the watchdog, logs | [`docs/reference/host-runtime.md`](docs/reference/host-runtime.md) |
 | the menu-bar app | [`docs/reference/menu-bar.md`](docs/reference/menu-bar.md) |
 | the released `Deckhand.app`, signing, notarization, Sparkle, `release/` | [`docs/reference/release.md`](docs/reference/release.md) |

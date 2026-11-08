@@ -155,6 +155,10 @@ struct HostStatus {
     // rather than an array, because every renderer here already names Claude's two
     // windows the same way.
     var cx2Pct: Int? = nil, cx2Reset: Int? = nil, cx2WinMin: Int? = nil
+    // Gemini usage per quota GROUP (`gmq=`), each with up to two windows, read by the
+    // host from the Gemini app's own local server - see docs/reference/gemini.md.
+    var gemini: [GeminiGroup] = []
+    var gmAgeSec: Int? = nil
     // Codex's window LENGTH in minutes, which the two Claude windows do not need
     // (300 and 10080 are fixed by the plan) and this one does: it is whatever
     // Codex's own rate_limits reported, 7d on a Plus plan and not guaranteed
@@ -293,6 +297,8 @@ func readStatus() -> HostStatus {
             s.cx2WinMin = codexWindowMin(line, key: "codex2=")
             s.quotaAgeSec = field(line, "qage=").flatMap { Int($0) }
             s.cxAgeSec = field(line, "cxage=").flatMap { Int($0) }
+            s.gemini = parseGeminiQuota(field(line, "gmq=") ?? "")
+            s.gmAgeSec = field(line, "gmage=").flatMap { Int($0) }
             s.via = field(line, "via=")
             s.sessions = extractSessions(full)
             if let r = line.range(of: "sessions("), let close = line[r.upperBound...].firstIndex(of: ")") {
@@ -341,6 +347,53 @@ func pctReset(_ line: Substring, _ key: String) -> (Int, Int?)? {
         reset = Int(after[rr.upperBound..<close].dropLast())   // "176m" -> 176
     }
     return (pct, reset)
+}
+
+/// One of the Gemini app's quota GROUPS ("Gemini Models", "Gemini 4 Argon", "Claude
+/// and GPT models"), each with up to two windows - see host/gemini-quota.mjs.
+struct GeminiGroup: Equatable {
+    struct Bucket: Equatable { var window: String; var pct: Int; var reset: Int? }
+    var name: String
+    var buckets: [Bucket]
+    func bucket(_ w: String) -> Bucket? { buckets.first { $0.window == w } }
+    /// The group the bar's GM column shows: the app's general Gemini bucket ("Flash,
+    /// Pro"). Argon and the third-party models are separate allowances; they are in
+    /// the dropdown.
+    ///
+    /// Never a non-Gemini group: if the app renames "Gemini Models", the fallback is
+    /// the first GEMINI group with a 5h window, then any Gemini group - not simply the
+    /// first, which could be "Claude and GPT models". (Review finding.)
+    static func primary(_ gs: [GeminiGroup]) -> GeminiGroup? {
+        let own = gs.filter { $0.name.lowercased().hasPrefix("gemini") }
+        return own.first { $0.name.lowercased() == "gemini models" }
+            ?? own.first { $0.bucket("5h") != nil }
+            ?? own.first
+    }
+}
+
+/// "5h" / "weekly" -> minutes, and "<n>h" / "<n>d" the same way the host's
+/// windowMinutes reads them, so the two sides agree on any window the app adds.
+func geminiWindowMinutes(_ w: String) -> Int? {
+    if w == "weekly" { return WINDOW_7D_MIN }
+    guard let unit = w.last, let n = Int(w.dropLast()), n > 0 else { return nil }
+    return unit == "d" ? n * 1440 : (unit == "h" ? n * 60 : nil)
+}
+
+/// `gmq=Gemini_Models|5h:0:295|weekly:0:10071;Gemini_4_Argon|weekly:1:9968` -> groups,
+/// in the app's order. Underscores were spaces; a reset of `?` is unknown. A
+/// malformed bucket is skipped rather than read as 0% - an absent number is not a
+/// measurement - and a group left with none is dropped.
+func parseGeminiQuota(_ v: String) -> [GeminiGroup] {
+    v.split(separator: ";").compactMap { g in
+        let parts = g.split(separator: "|")
+        guard let name = parts.first else { return nil }
+        let buckets: [GeminiGroup.Bucket] = parts.dropFirst().compactMap { b in
+            let f = b.split(separator: ":", omittingEmptySubsequences: false)
+            guard f.count == 3, let pct = Int(f[1]) else { return nil }
+            return .init(window: String(f[0]), pct: pct, reset: Int(f[2]))
+        }
+        return buckets.isEmpty ? nil : GeminiGroup(name: name.replacingOccurrences(of: "_", with: " "), buckets: buckets)
+    }
 }
 
 /// Codex's window length in MINUTES, out of the `/7d` or `/5h` the host appends to
@@ -741,6 +794,9 @@ enum BarPref: String, CaseIterable {
     // the reverse. Defaults ON like the rest - a Mac with no Codex reading draws
     // nothing for it anyway (`cxPct` nil), so ON costs a non-Codex user no width.
     case codex = "barShowCodex"
+    // Gemini's, from the Gemini app while it runs. Its own switch for the reason
+    // Codex has one: someone who never uses Gemini should not give up the others.
+    case gemini = "barShowGemini"
     case sessions = "barShowSessions"
     case asking = "barShowAsking"
     case onlyOffline = "barOnlyWhenOffline"
@@ -749,6 +805,7 @@ enum BarPref: String, CaseIterable {
         switch self {
         case .usage: return "Quota usage"
         case .codex: return "Codex usage"
+        case .gemini: return "Gemini usage"
         case .sessions: return "Waiting / working counts"
         case .asking: return "Needs-input count"
         case .onlyOffline: return "Only while no device is connected"
@@ -865,8 +922,11 @@ struct BarQuota: Equatable {
     var tag = ""
     var labels: [String]? = nil
     var top = BarCell()
-    var bottom = BarCell()
-    var needsAttention: Bool { top.needsAttention || bottom.needsAttention }
+    /// nil for a ONE-ROW column, drawn centred.
+    var bottom: BarCell? = BarCell()
+    /// Each row's window length, which decides its LABEL (see barModel).
+    var windows: [Int?] = [WINDOW_5H_MIN, WINDOW_7D_MIN]
+    var needsAttention: Bool { top.needsAttention || (bottom?.needsAttention ?? false) }
 }
 
 struct BarModel: Equatable {
@@ -895,33 +955,54 @@ func barModel(_ s: HostStatus, tier: BarTier, previewing: Bool = false) -> BarMo
     if tier == .icon { m.dot = asking > 0; return m }
     m.asking = asking
 
-    var claudeShown = false
     if allowed(.usage), s.pct5h != nil || s.pct7d != nil {
         let stale = (s.quotaAgeSec ?? 0) > QUOTA_STALE_SEC
-        m.quotas.append(BarQuota(tag: "", labels: ["5h", "7d"],
+        m.quotas.append(BarQuota(tag: "",
                                  top: barCell(s.pct5h, reset: s.reset5h, window: WINDOW_5H_MIN, stale: stale),
                                  bottom: barCell(s.pct7d, reset: s.reset7d, window: WINDOW_7D_MIN, stale: stale)))
-        claudeShown = true
     }
     if allowed(.codex), s.cxPct != nil || s.cx2Pct != nil {
         let stale = (s.cxAgeSec ?? 0) > QUOTA_STALE_SEC
-        // Its rows share Claude's labels only when its windows ARE 5h and 7d and the
-        // Claude column is there to carry them. A plan whose first window is 7d must
-        // not have its figure sitting in the row the Claude column calls "5h".
-        let same = claudeShown && (s.cxWinMin ?? WINDOW_5H_MIN) == WINDOW_5H_MIN
-            && (s.cx2WinMin ?? WINDOW_7D_MIN) == WINDOW_7D_MIN
         m.quotas.append(BarQuota(
             tag: "CX",
-            labels: same ? nil : [codexWindowLabel(s.cxWinMin, fallback: "1"), codexWindowLabel(s.cx2WinMin, fallback: "2")],
             top: barCell(s.cxPct, reset: s.cxReset, window: s.cxWinMin, stale: stale),
-            bottom: barCell(s.cx2Pct, reset: s.cx2Reset, window: s.cx2WinMin, stale: stale)))
+            bottom: barCell(s.cx2Pct, reset: s.cx2Reset, window: s.cx2WinMin, stale: stale),
+            windows: [s.cxWinMin, s.cx2WinMin]))
+    }
+    if allowed(.gemini), let g = GeminiGroup.primary(s.gemini) {
+        // The app's general Gemini allowance, 5h over weekly like the others - from
+        // its own quota summary, which names both windows, so the pace is real too.
+        let stale = (s.gmAgeSec ?? 0) > QUOTA_STALE_SEC
+        let five = g.bucket("5h"), week = g.bucket("weekly")
+        let cell = { (b: GeminiGroup.Bucket?) in
+            barCell(b?.pct, reset: b?.reset, window: b.flatMap { geminiWindowMinutes($0.window) }, stale: stale) }
+        if five != nil {
+            // 5h over weekly; a missing weekly is a dash holding its row.
+            m.quotas.append(BarQuota(tag: "GM", top: cell(five), bottom: cell(week)))
+        } else if let only = week ?? g.buckets.first {
+            // No 5h window: ONE row, labelled by the tooltip - not a dash in a "5h"
+            // row that this group does not have. (Review finding.)
+            m.quotas.append(BarQuota(tag: "GM", top: cell(only), bottom: nil, windows: [geminiWindowMinutes(only.window)]))
+        }
     }
     if tier == .minimal { m.quotas = m.quotas.filter(\.needsAttention) }
-    // Codex borrowed Claude's row labels on the assumption the Claude column is
-    // beside it. Minimal can drop that column, so Codex then carries its own.
-    // (Found by looking at --bar-preview: Minimal drew Codex with no labels at all.)
-    if !m.quotas.contains(where: { $0.tag.isEmpty }), let i = m.quotas.firstIndex(where: { $0.labels == nil }) {
-        m.quotas[i].labels = [codexWindowLabel(s.cxWinMin, fallback: "1"), codexWindowLabel(s.cx2WinMin, fallback: "2")]
+    // ROW LABELS, decided once the columns are final. Claude's column always says
+    // 5h/7d. Another two-row column BORROWS them - no labels of its own - only when
+    // its windows ARE 5h and 7d and the Claude column is actually there; otherwise it
+    // carries its own. (Minimal can drop the Claude column: found on --bar-preview,
+    // where Codex was drawn with no labels at all. And a plan whose first window is
+    // 7d must not sit in the row the Claude column calls "5h".)
+    let claudeThere = m.quotas.contains { $0.tag.isEmpty }
+    for i in m.quotas.indices where m.quotas[i].bottom != nil {
+        let q = m.quotas[i]
+        let label = { (w: Int?, fb: String) in codexWindowLabel(w, fallback: fb) }
+        if q.tag.isEmpty { m.quotas[i].labels = ["5h", "7d"] }
+        else if claudeThere && q.windows.count == 2
+                    && (q.windows[0] ?? WINDOW_5H_MIN) == WINDOW_5H_MIN && (q.windows[1] ?? WINDOW_7D_MIN) == WINDOW_7D_MIN {
+            m.quotas[i].labels = nil
+        } else {
+            m.quotas[i].labels = [label(q.windows.first ?? nil, "1"), label(q.windows.count > 1 ? q.windows[1] : nil, "2")]
+        }
     }
     if tier == .full, allowed(.sessions) {
         // ○ waits, ● works - with the badge's ■ asks, the three PARTITION the list,
@@ -937,7 +1018,8 @@ func barModel(_ s: HostStatus, tier: BarTier, previewing: Bool = false) -> BarMo
 func barText(_ m: BarModel) -> String {
     var parts: [String] = []
     for q in m.quotas {
-        let rows = [(q.labels?[0], q.top), (q.labels?[1], q.bottom)].map { (l, c) in
+        let cells: [(String?, BarCell)] = q.bottom.map { [(q.labels?[0], q.top), (q.labels?[1], $0)] } ?? [(nil, q.top)]
+        let rows = cells.map { (l, c) in
             (l.map { "\($0) " } ?? "") + c.text + (c.ahead ? "\u{25B2}" : "")
         }
         parts.append("[" + (q.tag.isEmpty ? "" : "\(q.tag) ") + rows.joined(separator: " / ") + "]")
@@ -1008,7 +1090,8 @@ func barImage(_ m: BarModel, boat: BoatStyle, colourful: Bool, height h: CGFloat
             x += w + 2.5
         }
         // Values right-aligned in their column, so 9% and 41% end at the same place.
-        let rows = [(q.top, base1), (q.bottom, base0)]
+        // A one-row column sits in the middle of the bar.
+        let rows = q.bottom.map { [(q.top, base1), ($0, base0)] } ?? [(q.top, ((h - cap) / 2).rounded())]
         let widths = rows.map { size($0.0.text, BAR_VALUE_FONT) + ($0.0.ahead ? size("\u{25B2}", BAR_GLYPH_FONT) + 1 : 0) }
         let colW = widths.max() ?? 0
         ops.append((x, { x in
@@ -1111,7 +1194,19 @@ func barTooltip(_ s: HostStatus) -> String {
             lines.append("\(name): " + paceWords(pct: pct, pace: pacePct(resetInMin: s.cx2Reset, windowMin: s.cx2WinMin)))
         }
     }
+    if let g = geminiTooltip(s) { lines.append(g) }
     return lines.joined(separator: "\n")
+}
+
+/// The bar tooltip's Gemini lines: one per window of the group the GM column shows.
+func geminiTooltip(_ s: HostStatus) -> String? {
+    guard barMirrorAllowed(.gemini, s), let g = GeminiGroup.primary(s.gemini) else { return nil }
+    let age = s.gmAgeSec ?? 0
+    return g.buckets.map { b in
+        let name = "GM (Gemini) \(b.window == "weekly" ? "7d" : b.window)"
+        if age > QUOTA_STALE_SEC { return "\(name): \(b.pct)% used, no pace: this reading is \(humanMinutes(age / 60)) old" }
+        return "\(name): " + paceWords(pct: b.pct, pace: pacePct(resetInMin: b.reset, windowMin: geminiWindowMinutes(b.window)))
+    }.joined(separator: "\n")
 }
 
 /// "5h" / "7d" from a window length in minutes - the host's own rule (days, or
@@ -1336,9 +1431,11 @@ func windowName(_ minutes: Int?) -> String {
 /// pace glyph on the left; when it resets on the right. `pct` nil is a window with
 /// no current reading (it reset since the service last reported one). Returns the
 /// row and its tooltip, which carries the sentence the old second line did.
-func quotaRow(_ windowMin: Int?, _ pct: Int?, _ reset: Int?, stale: Bool) -> (NSAttributedString, String) {
-    let name = windowName(windowMin)
-    let label = (name.padding(toLength: 7, withPad: " ", startingAt: 0), F_MONO, NSColor.secondaryLabelColor)
+func quotaRow(_ windowMin: Int?, _ pct: Int?, _ reset: Int?, stale: Bool, name named: String? = nil) -> (NSAttributedString, String) {
+    // `named`: a row labelled by its GROUP and window ("Argon 7d", "C/GPT 5h") rather
+    // than by the window alone. Ten columns, so every section's bars still line up.
+    let name = named ?? windowName(windowMin)
+    let label = (name.padding(toLength: 10, withPad: " ", startingAt: 0), F_MONO, NSColor.secondaryLabelColor)
     guard let pct else {
         return (menuColumns([label, ("   \u{2013}", F_MONO, .secondaryLabelColor)],
                             [("no reading since it reset", F_SMALL, .secondaryLabelColor)]),
@@ -2257,7 +2354,7 @@ func pairRowTitle(_ d: PairDevice) -> NSAttributedString {
     ])
 }
 
-class AppDelegate: NSObject, NSApplicationDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var statusItem: NSStatusItem!
     let statusLine = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     let deviceLine = NSMenuItem(title: "", action: nil, keyEquivalent: "")
@@ -2272,6 +2369,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // way draws exactly like the system's own - dim is the platform's header style.
     let claudeHeader = NSMenuItem.sectionHeader(title: "Claude")
     let codexHeader = NSMenuItem.sectionHeader(title: "Codex")
+    let geminiHeader = NSMenuItem.sectionHeader(title: "Gemini")
+    // One row per Gemini quota WINDOW (a group has up to two), a fixed pool shown or hidden like the
+    // session rows (never added or removed while the menu may be open).
+    let geminiRows = (0..<6).map { _ in NSMenuItem(title: "", action: nil, keyEquivalent: "") }
     let usageSep = NSMenuItem.separator()
     let moreSessions = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     let voiceHeader = NSMenuItem.sectionHeader(title: "Last dictation")
@@ -2344,6 +2445,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
         statusItem.menu = buildMenu()
+        statusItem.menu?.delegate = self
         NSApp.mainMenu = buildMainMenu()
 
         // Once here, on purpose, before anything is drawn - then only ever off the
@@ -2471,7 +2573,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Groups, separated: where the host stands / what quota is left / who is
         // waiting on you / the last dictation / what you can do / the app itself.
         var items: [NSMenuItem] = [statusLine, deviceLine, .separator(),
-                                   claudeHeader, q5, q7, codexHeader, cxLine, cx2Line, usageSep,
+                                   claudeHeader, q5, q7, codexHeader, cxLine, cx2Line, geminiHeader]
+        items += geminiRows
+        items += [usageSep,
                                    sessionsHeader]
         items += sessionRows
         items += [moreSessions, voiceSep, voiceHeader, voiceHeard, voiceReplyItem,
@@ -2502,7 +2606,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // is a worse failure than a row that does nothing when clicked. The
         // SESSIONS header is deliberately NOT in this list: it is chrome, it
         // carries no reading, and dim is what says so.
-        for it in [q5, q7, cxLine, cx2Line, statusLine, deviceLine] { it.isEnabled = true }
+        for it in [q5, q7, cxLine, cx2Line, statusLine, deviceLine] + geminiRows { it.isEnabled = true }
         // No icons on the actions: tried, and this macOS draws no item images in a
         // menu at all (a plain test menu with SF Symbols showed none).
         return menu
@@ -2605,7 +2709,43 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         claudeHeader.isHidden = !claudeOn
         codexHeader.isHidden = !codexOn
-        usageSep.isHidden = !(claudeOn || codexOn)
+        // Gemini: its own models always, the other vendors' models the app offers
+        // only once they have been used - five rows of 0% would be noise.
+        let gStale = (s.gmAgeSec ?? 0) > QUOTA_STALE_SEC
+        // The general Gemini allowance as "5-hour" / "Weekly", like Claude's; then
+        // the separate ones, named: Argon always (it is Gemini's own), the Claude and
+        // GPT models the app also offers only once used - zeros there are noise.
+        var gRows: [(label: String?, group: String, b: GeminiGroup.Bucket)] = []
+        let primary = GeminiGroup.primary(s.gemini)
+        for g in s.gemini {
+            let isPrimary = g.name == primary?.name
+            let isOwn = g.name.lowercased().hasPrefix("gemini")
+            guard isPrimary || isOwn || g.buckets.contains(where: { $0.pct > 0 }) else { continue }
+            // "C/GPT", never "Claude": inside the Gemini section a row called "Claude
+            // 5h" read as your own Claude quota. (Review finding.)
+            let short = isPrimary ? nil : (g.name.lowercased().contains("argon") ? "Argon"
+                        : (g.name.lowercased().contains("claude") ? "C/GPT" : String(g.name.prefix(5))))
+            for b in g.buckets {
+                let w = b.window == "weekly" ? "7d" : b.window
+                gRows.append((short.map { "\($0) \(w)" }, g.name, b))
+            }
+        }
+        geminiHeader.attributedTitle = menuHeader("Gemini", note: ageNote(gStale, s.gmAgeSec))
+        geminiHeader.isHidden = gRows.isEmpty
+        for (i, item) in geminiRows.enumerated() {
+            guard i < gRows.count else { item.isHidden = true; continue }
+            let r = gRows[i]
+            let win = geminiWindowMinutes(r.b.window)
+            let title = quotaRow(win, r.b.pct, r.b.reset, stale: gStale, name: r.label).0
+            // The tooltip names the GROUP and the WINDOW ("Gemini 4 Argon, weekly"),
+            // never the row's short label.
+            let tip = quotaRow(win, r.b.pct, r.b.reset, stale: gStale).1
+            let sentence = "\(r.group), " + tip.prefix(1).lowercased() + tip.dropFirst() + "\nRead from the Gemini app while it is running."
+            item.attributedTitle = title
+            item.toolTip = sentence
+            item.isHidden = false
+        }
+        usageSep.isHidden = !(claudeOn || codexOn || !gRows.isEmpty)
 
         // ---- sessions ----
         // The header COUNTS by state, so "is anyone waiting on me" is answered
@@ -3012,6 +3152,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func openSettings() { showSettings(pane: nil) }
+
+    // ---- keeping Settings in front across a trip to the status menu ----------
+    //
+    // Opening the status menu takes focus from the app, and macOS used to drop the
+    // Settings window behind every other window when it did (user report). So: if
+    // Settings was the window in front when the menu opened (key, or key until a
+    // moment ago - the click on the menu takes key first), it is brought back when
+    // the menu closes. If it was merely open behind another app, it is left there:
+    // glancing at the menu must not drag a window over whatever you were doing.
+    // A menu action that opens a window (Pair New Device) runs AFTER this, so that
+    // window still ends up on top.
+    private static var settingsFrontAtMenuOpen = false
+    func menuWillOpen(_ menu: NSMenu) {
+        guard let w = settingsWindow, w.window.isVisible else { AppDelegate.settingsFrontAtMenuOpen = false; return }
+        AppDelegate.settingsFrontAtMenuOpen = w.window.isKeyWindow || Date().timeIntervalSince(w.resignedKeyAt) < 1.0
+    }
+    func menuDidClose(_ menu: NSMenu) {
+        guard AppDelegate.settingsFrontAtMenuOpen, let w = settingsWindow, w.window.isVisible else { return }
+        AppDelegate.settingsFrontAtMenuOpen = false
+        NSApp.activate(ignoringOtherApps: true)
+        w.window.makeKeyAndOrderFront(nil)
+    }
 
     func showSettings(pane: SettingsPane?) {
         if settingsWindow == nil { settingsWindow = SettingsWindowController(app: self) }
@@ -4469,7 +4631,7 @@ struct MenuBarPane: View {
     func toggle(_ p: BarPref) -> Binding<Bool> {
         Binding(get: { m.prefs[p] ?? p.on }, set: { m.app?.setBarPref(p, $0) })
     }
-    var mirrorsOn: Bool { (m.prefs[.usage] ?? true) || (m.prefs[.codex] ?? true) || (m.prefs[.sessions] ?? true) }
+    var mirrorsOn: Bool { (m.prefs[.usage] ?? true) || (m.prefs[.codex] ?? true) || (m.prefs[.gemini] ?? true) || (m.prefs[.sessions] ?? true) }
     func preview(_ tier: BarTier) -> NSImage {
         barImage(barModel(m.s, tier: tier, previewing: true), boat: barBoatStyle(m.s), colourful: m.colourful, height: NSStatusBar.system.thickness)
     }
@@ -4531,6 +4693,7 @@ struct MenuBarPane: View {
             Section("Beside the icon") {
                 DescribedToggle(title: "Claude usage", detail: "5-hour figure on top, 7-day below. \u{25B2} means you are using it faster than the clock.", isOn: toggle(.usage))
                 DescribedToggle(title: "Codex usage", detail: "Only on a Mac where Codex reports a quota.", isOn: toggle(.codex))
+                DescribedToggle(title: "Gemini usage", detail: "GM: the Gemini app's 5-hour and weekly limits, read from the app while it is running.", isOn: toggle(.gemini))
                 DescribedToggle(title: "Session counts", detail: "\u{25CB} waiting on you, \u{25CF} working.", isOn: toggle(.sessions))
                 DescribedToggle(title: "Needs-input count", detail: "\u{25A0} and how many sessions are waiting for your answer.", isOn: toggle(.asking))
             }
@@ -4815,9 +4978,26 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         model.pullServices()
     }
 
+    /// When the window last stopped being the key window - so opening the status
+    /// menu (which takes focus away first) can tell "Settings was in front a moment
+    /// ago" from "Settings is open somewhere behind the app you are using".
+    var resignedKeyAt = Date.distantPast
+    func windowDidResignKey(_ n: Notification) { resignedKeyAt = Date() }
+
+    /// WHILE THE WINDOW IS OPEN, DECKHAND IS A REGULAR APP: a Dock icon, a place in
+    /// Cmd-Tab, and its window ordered like any other app's. As an .accessory app the
+    /// window was filed BEHIND every other app's the moment it lost focus - which
+    /// opening the status menu does - and an accessory app has no Dock icon or
+    /// Cmd-Tab entry to get it back by. (User report, 2026-11-08.) Closing the window
+    /// returns the app to the menu bar only.
+    func windowWillClose(_ n: Notification) {
+        DispatchQueue.main.async { NSApp.setActivationPolicy(.accessory) }
+    }
+
     func show(pane: SettingsPane?) {
         if let p = pane { tabs.selectedTabViewItemIndex = p.rawValue }
         if !window.isVisible { window.center() }
+        NSApp.setActivationPolicy(.regular)
         window.makeKeyAndOrderFront(nil)
         // An .accessory app is never frontmost on its own; without this the window
         // opens behind whatever the person was reading.
@@ -4929,6 +5109,7 @@ if let i = CommandLine.arguments.firstIndex(of: "--bar-preview"), CommandLine.ar
     var s = HostStatus()
     s.running = true; s.pct5h = 19; s.reset5h = 200; s.pct7d = 41; s.reset7d = 2900; s.quotaAgeSec = 1
     s.cxPct = 100; s.cxReset = 12; s.cxWinMin = 300; s.cx2Pct = 62; s.cx2Reset = 8400; s.cx2WinMin = 10080; s.cxAgeSec = 5
+    s.gemini = parseGeminiQuota("Gemini_Models|5h:23:180|weekly:9:9000;Gemini_4_Argon|weekly:3:9956"); s.gmAgeSec = 20
     s.sessions = [SessionRow(id: "a", status: "waiting"), SessionRow(id: "b", status: "waiting"), SessionRow(id: "c", status: "working"),
                   SessionRow(id: "d", status: "asking"), SessionRow(id: "e", status: "asking")]
     let h = NSStatusBar.system.thickness, scale: CGFloat = 2, pad: CGFloat = 10, rowH = h + 8
@@ -5612,6 +5793,41 @@ if CommandLine.arguments.contains("--pace-check") {
         }
     } else {
         print("note: Codex bar checks skipped - Claude usage or Codex usage is switched off")
+    }
+
+    // GEMINI (gmq=): quota GROUPS off the tick line; the bar's GM column is the general
+    // "Gemini Models" group, 5h over weekly with a real pace, like Claude and Codex.
+    let gmLine: Substring = "5h=10% (resets 30m) qage=1 cxage=1 gmq=Gemini_Models|5h:85:120|weekly:9:9000;Claude_and_GPT_models|5h:0:120|weekly:0:9000;Gemini_4_Argon|weekly:3:9956 gmage=20 sessions(0)=[]"
+    let gq = parseGeminiQuota(field(tickFields(gmLine), "gmq=") ?? "")
+    eq(gq.map(\.name), ["Gemini Models", "Claude and GPT models", "Gemini 4 Argon"], "gmq= parses every group, underscores back to spaces")
+    eq(gq[0].buckets.map(\.window), ["5h", "weekly"], "with its windows")
+    eq(gq[2].buckets.map(\.pct), [3], "Argon has its weekly one only")
+    eq(parseGeminiQuota("Bad|5h:x:1;Ok|5h:3:4").map(\.name), ["Ok"], "a malformed bucket is skipped (and its empty group), never read as 0%")
+    eq(GeminiGroup.primary(gq)?.name, "Gemini Models", "the bar's group is the general Gemini allowance")
+    eq(GeminiGroup.primary(parseGeminiQuota("Claude_and_GPT_models|5h:9:1;Gemini_Renamed|5h:1:1"))?.name, "Gemini Renamed",
+       "a renamed group still finds Gemini's own, never the Claude/GPT one first in the list")
+    eq(GeminiGroup.primary(parseGeminiQuota("Claude_and_GPT_models|5h:9:1")) == nil, true, "and with no Gemini group, nothing")
+    eq(geminiWindowMinutes("3d"), 4320, "an unforeseen 3d window reads the way the host reads it")
+    if BarPref.gemini.on {
+        var g = HostStatus()
+        g.running = true; g.gemini = gq; g.gmAgeSec = 20
+        let txt = barText(barModel(g, tier: .full))
+        eq(txt.contains("[GM 5h 85%"), true, "GM is 5h over weekly, labelled when no Claude column is beside it (\(txt))")
+        eq(txt.contains("/ 7d 9%"), true, "with the weekly figure below")
+        g.pct5h = 10; g.pct7d = 20; g.quotaAgeSec = 1
+        eq(barText(barModel(g, tier: .full)).contains("[GM 85%"), true, "and borrows Claude's 5h/7d labels when it is there")
+        eq(barText(barModel(g, tier: .full)).contains("[GM 85%\u{25B2}"), true, "85% with 60% of 5h gone is ahead of the clock: a real pace")
+        eq(barText(barModel(g, tier: .minimal)).contains("[GM 5h 85%"), true, "85% needs attention, so Minimal keeps it - with its own labels")
+        g.gemini = parseGeminiQuota("Gemini_Models|5h:2:120|weekly:9:9000")
+        eq(barText(barModel(g, tier: .minimal)).contains("GM"), false, "2% does not, so Minimal drops it")
+        eq(barTooltip(g).contains("GM (Gemini) 5h:"), true, "the tooltip names the window")
+        g.gemini = parseGeminiQuota("Gemini_Models|weekly:7:9000")
+        eq(barModel(g, tier: .full).quotas.first { $0.tag == "GM" }?.bottom == nil, true,
+           "a group with only a weekly window is ONE row, not a dash in a 5h row it does not have")
+        g.gemini = []
+        eq(barText(barModel(g, tier: .full)).contains("GM"), false, "no reading (the app is closed), no GM column")
+    } else {
+        print("note: Gemini bar checks skipped - Gemini usage is switched off")
     }
 
     print(failed == 0 ? "pace: all \(ran) checks passed" : "pace: \(failed) of \(ran) FAILED")
