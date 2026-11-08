@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The host's launch agent, registered by the app with SMAppService.agent(plistName:)
+  from Contents/Library/LaunchAgents. It is host/deckhand-service.sh's plist moved
+  inside the bundle, with the same three supervision choices and the same reasons:
+  RunAtLoad + KeepAlive because the host's failure mode is hanging or exiting with
+  nothing bringing it back, and ThrottleInterval so a broken build cannot respawn
+  as fast as the machine allows.
+
+  BundleProgram is relative to the app bundle, which is what lets the app live
+  anywhere. The launcher it names finds Node and index.mjs relative to itself -
+  see release/host-launch.c. @ARGS@ is filled in by build-release.sh.
+
+  Label is NOT com.deckhand.host, deliberately: that is the repo's own agent
+  (host/deckhand-service.sh), and the app has to be able to tell the two apart to
+  offer to stop the repo one - two hosts would fight over the serial port and BLE.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.github.blueandhack.deckhand.host</string>
+  <key>BundleProgram</key>
+  <string>Contents/Helpers/Deckhand Host.app/Contents/MacOS/deckhand-host-launch</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>deckhand-host-launch</string>@ARGS@
+  </array>
+  <key>AssociatedBundleIdentifiers</key>
+  <array>
+    <string>io.github.blueandhack.deckhand</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- git, security and the user's whisper-cli are found by name; launchd's
+         default PATH has no /opt/homebrew/bin. Same list as deckhand-service.sh. -->
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+</dict>
+</plist>

@@ -45,3 +45,8 @@ firmware/deckhand_display/build/
 
 # Superpowers worktrees (scratch; never committed)
 .worktrees/
+
+# Release build inputs and outputs (release/build-release.sh)
+release/.cache/
+release/dist/
+release/build/

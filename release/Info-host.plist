@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The host helper: Deckhand.app/Contents/Helpers/Deckhand Host.app. Its executable
+  is the official Node binary. It exists as a BUNDLE for one reason, the same one
+  host/DeckhandBLE.plist gives: macOS kills a process that touches CoreBluetooth
+  unless an Info.plist says why it wants Bluetooth. Background-only, so it never
+  shows in the Dock. @VERSION@ and @BUILD@ are filled in by build-release.sh.
+-->
+<plist version="1.0">
+<dict>
+  <key>CFBundleExecutable</key>
+  <string>Deckhand Host</string>
+  <key>CFBundleIdentifier</key>
+  <string>io.github.blueandhack.deckhand.host</string>
+  <key>CFBundleName</key>
+  <string>Deckhand Host</string>
+  <key>CFBundleDisplayName</key>
+  <string>Deckhand</string>
+  <key>CFBundleIconFile</key>
+  <string>Deckhand</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleShortVersionString</key>
+  <string>@VERSION@</string>
+  <key>CFBundleVersion</key>
+  <string>@BUILD@</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>14.0</string>
+  <key>LSBackgroundOnly</key>
+  <true/>
+  <key>NSBluetoothAlwaysUsageDescription</key>
+  <string>Deckhand uses Bluetooth to send live Claude Code status to your Deckhand display.</string>
+  <key>NSBluetoothPeripheralUsageDescription</key>
+  <string>Deckhand uses Bluetooth to send live Claude Code status to your Deckhand display.</string>
+</dict>
+</plist>

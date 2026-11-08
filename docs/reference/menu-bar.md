@@ -20,6 +20,27 @@ watchdog becomes a second supervisor racing the first. It now shells out to
 exists, and suppresses its watchdog in that case - launchd restarts a dead host within
 a second and survives reboots, which the app cannot. Unsupervised, the old path and the
 watchdog both remain, because there is then nothing else doing the job.
+**CORRECTED 2026-11-07: "launchd is strictly better" is true of a host that EXITS and false
+of one that HANGS.** KeepAlive restarts a process that dies; a frozen one keeps its pid and
+launchd is satisfied. Measured on the released app: a host stopped with `SIGSTOP` sat with
+a 47s-old heartbeat, the menu said "Stopped", and nothing would ever have brought it back.
+The watchdog (`AppDelegate.watchdog`) now runs supervised too, as launchd's missing hang
+detector rather than a second supervisor: after 30s without a heartbeat it restarts the
+host THROUGH launchd (`launchctl kickstart -k`), never around it, with a 60s cooldown, and
+writes a `menu-bar watchdog:` line into `host.log`. The 30s (versus 20s unsupervised) is
+so it never races launchd bringing a crashed host back by itself, which measured at
+about 1s. Measured after the change: a SIGSTOPped host replaced in **51s** (12s for the
+heartbeat to count as stale, the 30s wait, ~6s for `kickstart -k` to clear a stopped
+process); a `kill -9` replaced by launchd in **1s**.
+
+**`SMAppService.status` IS A SYNCHRONOUS XPC CALL AND MUST NOT RUN ON THE MAIN THREAD.**
+Measured with `sample` on the released app: ~35ms of every 3s refresh blocked in
+`+[SMAppService sendSMDRequest:reply:error:]` (the agent's status and the login item's),
+which is a menu frozen for as long as the background-task daemon takes to answer - and at
+login or under load that is not 35ms. `ServiceState` now reads both (and the hooks'
+state, which is file I/O) on a background queue every 15s and right after anything the
+app does to a service; the main thread only reads the cached answer. Re-sampled: zero
+`SMAppService` frames on the main thread.
 
 **What the menu-bar ITEM shows: shape is the link, badges are the device's job when
 the device is absent, and colour carries nothing at all.** The boat is `.solid` when a
@@ -127,7 +148,7 @@ Four things are load-bearing:
   2.21 on dark, #4C9BE0 to 2.72 on light, and the cream #FBF4E9 to **1.00** - invisible -
   which is what killed the obvious "cream sails, blue hull" two-tone, since half the boat
   would vanish depending on the wallpaper. Re-measure before changing it.
-  `Settings › Colourful icon` (default on) returns the monochrome template, which is not a
+  `Colourful icon` (Settings › Menu Bar since 2026-11-07; default on) returns the monochrome template, which is not a
   lesser fallback: it is the only version that follows light and dark bars, and which one a
   wallpaper favours cannot be decided from the code. Two consequences worth knowing: a
   coloured image does NOT invert to white while the menu is open and the item is
@@ -135,13 +156,15 @@ Four things are load-bearing:
   and `--icon-preview` now renders colour rows AS-IS while still faking the system tint for
   the template rows - painting our own tint over a coloured icon would show a colour the
   bar never renders.
-- **`Settings > Mac name...` names this Mac on the device** - the text tag beside its sessions
+- **The Mac's name (Settings › Devices › *Name* since 2026-11-07; it was `Settings > Mac
+  name...`, an alert with a text field) names this Mac on the device** - the text tag beside its sessions
   and projects once a second Mac connects - because the automatic tag (the hostname's last word)
   collides between two Macs of one model. It writes `MACTAG <name>` to the trigger file, like the
   icon picker's `EMOJI`; the row's title carries the current name and where it came from. See
   [`pairing-and-multi-mac.md`](pairing-and-multi-mac.md), "PROJECTS WITH TWO MACS".
-- **The menu is grouped by KIND: the top level is actions, `Settings ▸` holds every
-  preference.** Answer-prompts, Menu bar shows, Needs-input sound and Launch at login used
+- **SUPERSEDED 2026-11-07 by the Settings window (below); kept because the reasoning about
+  enablement still applies to what is left in the menu.** **The menu is grouped by KIND: the
+  top level is actions, `Settings ▸` holds every preference.** Answer-prompts, Menu bar shows, Needs-input sound and Launch at login used
   to sit in the top-level row, which had grown to three consecutive submenus and pushed
   Quit down the menu with nothing saying which items merely change a setting and which
   one stops the host. The moved items need `target = self` and explicit `isEnabled` set by
@@ -151,6 +174,74 @@ Four things are load-bearing:
   preferences door that only opens while a background process is alive is its own bug),
   while `Device` and `Answer prompts on device` dim with it, since neither can do anything
   without the host.
+- **THE DROPDOWN IS THREE SECTIONS OF ONE-LINE ROWS (2026-11-07).** It is read to answer, in
+  order: is it working, how much quota is left and when it comes back, who is waiting on me.
+  So: the connection in two lines (`Syncing with Deckhand-C114`, then `Over USB and Bluetooth ·
+  battery 11%, charging` - it was three rows and printed the raw link id `usb:Deckhand-C114`,
+  because `viaLabel` predated per-board link names); then a **Claude** and a **Codex** section,
+  one line per window named in words (`5-hour`, `Weekly`), number first, bar after, and the
+  reset in a right-aligned column set by a real tab stop (`menuColumns`, `MENU_RIGHT_TAB`);
+  then **Sessions**, whose header counts by state (`1 needs you · 2 waiting · 1 working`) and
+  whose rows put the state and how long on the right (`waiting · 6m`, from the tick's
+  `actSec`), with `N more` when the host has more than the six rows. The second line every
+  quota row used to carry (`9% elapsed, behind pace`) moved to the row's TOOLTIP with the
+  clock time it resets at: it teaches once, and on every row it was half the menu's height.
+  A stale section says so once in its header (`updated 35m ago`) instead of on each row.
+  Headers are real `NSMenuItem.sectionHeader` items (VoiceOver announces them); they draw dim
+  because that is the platform's header style - one built from the system call measured the
+  same. Tried and dropped: SF Symbol icons on the actions - this macOS draws no item images in
+  a menu (a bare test menu showed none), though it adds its own gear to "Settings...". Read off
+  `--menu-shot` captures of the real menu, which is the only instrument that sees it.
+- **THE BAR ITEM IS TWO ROWS AND COMES IN FOUR SIZES (2026-11-07), because a wide one gets
+  HIDDEN.** It was one line of text, `19%▼ · 41%▼   CX 100% · 62%▲ ■2 ○2 ●1`, MEASURED at
+  **275pt** with its own font. On a MacBook Pro every status item must fit between the notch
+  and the right edge (~650pt on a 14"), and macOS silently hides whatever overflows; on this
+  Mac the items to Deckhand's right already took ~1,220pt. Now each service is a column with
+  its 5-hour figure on top and its 7-day below, tiny `5h`/`7d` labels, Codex tagged `CX`
+  (it borrows Claude's labels only when its windows are also 5h/7d AND the Claude column is
+  shown); session counts stack `○` over `●`; needs-input is a red pill with a count. One
+  `NSImage` drawn by a handler (`barImage`), so every colour is semantic and resolves against
+  the bar's own appearance. Only ▲ (ahead of pace) is drawn - ▼ and ≈ are reassurance and
+  live in the rows and tooltip. Sizes (`BarTier`), same busy content: **Full 156pt, Compact
+  133, Minimal 104, Icon only 18** (`--bar-preview <png>` draws all four, light and dark).
+  **Automatic** (`BarSize`, the default) starts at Compact on a notched screen and Full
+  elsewhere, and steps DOWN when macOS hides the item. The signal was measured, not
+  assumed: an item with no room keeps its window but it is parked off-screen (`y = -30`)
+  with `window.screen == nil`, while `occlusionState` still reports it VISIBLE - so occlusion
+  cannot be used. Other apps' items cannot be measured at all on this macOS (the whole bar
+  is one `MenuBarAgent` window), so "am I hidden" is the only answerable question. It tries
+  larger again only when the displays change or the Mac wakes; a timer would make the item
+  flicker out and back. Settings › Menu Bar shows every size as a live preview (ignoring
+  "hide while a display is connected", or every preview was the same bare boat).
+  `--menu-dump` prints each size's width and content. Two things found only by looking: the
+  Minimal column had no row labels (it relied on a Claude column Minimal had dropped), and
+  the dash was invisible on a real dark bar until it went from tertiary to secondary. And
+  one by reading the live tooltip: after the 5h reset the host prints `codex=?`, and the
+  window parser searched on into `codex2=62%/7d`, labelling the expired window "7d" - every
+  tick field is now parsed within its own token.
+- **EVERY PREFERENCE IS IN THE SETTINGS WINDOW (2026-11-07), and the menu is for looking.**
+  The `Settings ▸` submenu had grown to eleven rows and five nested submenus (a sixteen-row
+  icon picker, a device picker, a sound list, five bar toggles, the hooks), with half the
+  rows only understandable from a tooltip and the Mac's name edited in an alert. The menu
+  is now status, quota, sessions, then **Start/Stop, Pair New Device…, Settings… (⌘,)**,
+  Check for Updates… (released app only) and Quit; `Device ▸` and `Open host log` moved
+  into the window too. The window (`SettingsWindowController`, SwiftUI panes inside an
+  `NSTabViewController` with toolbar tabs) is General / Menu Bar / Devices / Claude Code /
+  About, grouped by the question someone arrives with rather than by setting type, and
+  every switch carries the sentence its tooltip used to. **It decides and writes nothing
+  itself**: each control calls the AppDelegate function that does exactly what the menu
+  item did (`setBarPref`, `setAskSound`, `setRemoteAnswer`, `selectDevice`, `setIcon`,
+  `setMacName`, `forgetDevice`, ...), the same trigger-file line and the same UserDefaults
+  key, and the model re-reads the menu's own heartbeat snapshot on each refresh - only
+  while the window is visible. Three things it needed that were found by LOOKING at it,
+  not by compiling: an accessory app has no main menu, so without one (`buildMainMenu`,
+  never shown) Cmd-V does nothing in the name field and Cmd-W does not close the window;
+  SwiftUI hands focus to the first text field, which put a cursor in the name on opening
+  Devices and stopped the refresh updating it (`SettingsTabs` clears it on every tab
+  switch); and a dev build reported the released app's working hooks as "Need repair",
+  because it compared them against a bundled Node it does not have. `--settings-show
+  <general|menubar|devices|claude|about> [--light|--dark]` opens the real window on a pane
+  against the live host, dry-run, for a capture.
 - **The quota rows say when they are STALE, and the age comes from the host rather than
   being re-derived.** `quotaAgeSec`/`cxAgeSec` are computed by the host (it owns the
   oauth-vs-cache choice) and now ride the tick LOG line as `qage=`/`cxage=`, because that
@@ -364,6 +455,27 @@ Four things are load-bearing:
   nothing else on the Mac shows - and deliberately not the title, which would only repeat
   the same clipped string. `--menu-dump` prints tooltips, since a menu that cannot be
   screenshotted leaves hovering by hand as the only other check.
+- **GEMINI SESSIONS ARE MENU-ONLY, and that is a decision about the FIRMWARE, not the menu.**
+  "Gemini" on this Mac is Google Antigravity (`agy` and the Antigravity app), so the host reads
+  each store's `~/.gemini/<store>/conversation_summaries.db` - Antigravity's own one-row-per-
+  conversation index - with `node:sqlite`, read-only, every tick (`host/gemini-sessions.mjs`).
+  The rows reach the menu through the tick line's `sessions(N)=` list and are tagged
+  `· Gemini`; they are **kept off the device's payload**, because the firmware draws every
+  agent that is not `cx` as CLAUDE (`sessions.ino`'s `"CX" : "CC"` and `"CODEX" : "CLAUDE"`),
+  so a Gemini row on the wire would be a mislabelled row on the glass. Teaching the firmware a
+  third tag is what lifts that. **Measured** (one `agy -p` turn sampled every 300ms, agy
+  1.4.8): the index updates LIVE - `RUNNING` + `not_fully_idle=1` during the turn, `IDLE` ~3s
+  later - so unlike Codex's `session_index.jsonl` it does not lag; a new row's first sample has
+  the zero time `0001-01-01`, which is skipped rather than read as ancient; and one store can
+  hold a COPY of another's conversation, which `app_data_dir` (the owner) dedupes. Working is
+  `RUNNING`/`BUSY`/`CANCELING` or `not_fully_idle`; everything else is waiting. **NOT
+  measured:** there is no `asking` - `CASCADE_RUN_STATUS` has no pending-approval state, so a
+  conversation sitting on a permission prompt most likely reads as working. Only the app's own
+  store names an app (`com.google.antigravity`), so a click activates Antigravity; a CLI row
+  reveals its folder, since nothing records which terminal `agy` ran in. No Gemini QUOTA row
+  yet: Antigravity caches no quota on disk, and reading it live means an undocumented Google
+  endpoint and its stored OAuth token. `node host/gemini-sessions-check.mjs [--selftest]`
+  binds the device/menu split to `readSessions()`'s own body.
 - **The Mac plays a sound on the EDGE into `asking`, and `AskWatcher` is keyed by session
   ID for the reason the device's beep budget already documents**: two sessions on one
   project share a name, and name-matching made an asking session look newly-asking on
@@ -372,7 +484,8 @@ Four things are load-bearing:
   PRIMES**: whatever is already asking when the app launches is not news, and without that
   every relaunch (the login item after a reboot included) would sound off about a backlog.
   One sound per refresh no matter how many arrive at once - two identical alerts a
-  millisecond apart is just noise. The `Needs-input sound` submenu offers Off plus four
+  millisecond apart is just noise. The `Needs-input sound` submenu (Settings › General ›
+  *Sound* since 2026-11-07) offers Off plus four
   system sounds, defaulting to **Submarine** (theme aside, Basso and Sosumi read as
   ERRORS, and a prompt is not an error); picking one plays it, because a name tells you
   nothing about a sound. `--sound-check [play]` verifies all of it with no prompt and no

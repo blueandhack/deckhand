@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The released Deckhand.app. Placeholders are filled in by build-release.sh.
+
+  NO DeckhandHostDir key, deliberately: its presence is what puts the menu-bar code
+  in REPO mode (mac-app/build.sh's dev builds, driving the host in a checkout).
+  Its absence selects the bundled host and its launch agent.
+
+  The Bluetooth strings are here as well as on the helper: macOS may attribute the
+  helper's Bluetooth use to this app, the one that registered its agent, and a
+  missing string there would be a crash rather than a prompt (host/build-app.sh).
+-->
+<plist version="1.0">
+<dict>
+  <key>CFBundleExecutable</key>
+  <string>Deckhand</string>
+  <key>CFBundleIdentifier</key>
+  <string>io.github.blueandhack.deckhand</string>
+  <key>CFBundleName</key>
+  <string>Deckhand</string>
+  <key>CFBundleDisplayName</key>
+  <string>Deckhand</string>
+  <key>CFBundleIconFile</key>
+  <string>Deckhand</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleShortVersionString</key>
+  <string>@VERSION@</string>
+  <key>CFBundleVersion</key>
+  <string>@BUILD@</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>14.0</string>
+  <key>LSUIElement</key>
+  <true/>
+  <key>LSApplicationCategoryType</key>
+  <string>public.app-category.developer-tools</string>
+  <key>NSHumanReadableCopyright</key>
+  <string>MIT License. github.com/blueandhack/deckhand</string>
+  <key>NSBluetoothAlwaysUsageDescription</key>
+  <string>Deckhand uses Bluetooth to send live Claude Code status to your Deckhand display.</string>
+  <key>NSBluetoothPeripheralUsageDescription</key>
+  <string>Deckhand uses Bluetooth to send live Claude Code status to your Deckhand display.</string>
+  <key>SUFeedURL</key>
+  <string>@FEED_URL@</string>
+  <key>SUPublicEDKey</key>
+  <string>@SU_PUBLIC_KEY@</string>
+  <key>DeckhandCommit</key>
+  <string>@COMMIT@</string>
+</dict>
+</plist>
