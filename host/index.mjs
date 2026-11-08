@@ -2650,24 +2650,56 @@ async function tryCcusage(args) {
   }
 }
 
+// ccusage runs BESIDE the tick, never inside it. The tick used to AWAIT both
+// calls, and making them unable to reject (tryCcusage) fixed what a timeout
+// threw away but not how long the tick WAITED for it: up to CCUSAGE_TIMEOUT_MS.
+// The heartbeat is written at the top of each tick, so a 20s wait put the next
+// write 25s after the last - past the menu bar's 12s "is the host alive" bar -
+// and the menu flipped to Stopped (hollow boat, no figures) and back, which
+// reads exactly like the host restarting. Measured 2026-11-07 off the reading
+// ages in deckhand-launchd.out: tick gaps of 12-25s, CAPPED AT 25 (= 5s + the
+// 20s timeout), in clusters; and ZERO in the 34.8h after ccusage began failing
+// instantly at launch (a broken dylib), against seven in the 34.8h before.
+//
+// SINGLE-FLIGHT: a tick starts a run only when none is in flight, and every
+// tick uses the most recent FINISHED result. A slow ccusage now costs token
+// freshness (a count at most one run old) and no longer the tick; a fast one
+// behaves as before, refreshing every tick. The FIRST tick still waits, so a
+// fresh host publishes measured counts rather than logging "nothing measured
+// yet" for one tick.
+let ccusageLatest = { blocks: null, weekly: null };
+let ccusageInFlight = null;
+let ccusageEverFinished = false;
+function kickCcusage() {
+  if (ccusageInFlight) return ccusageInFlight;
+  ccusageInFlight = Promise.all([tryCcusage(["blocks", "--active"]), tryCcusage(["weekly"])])
+    .then(([blocks, weekly]) => {
+      ccusageLatest = { blocks, weekly };
+      ccusageEverFinished = true;
+    })
+    .finally(() => {
+      ccusageInFlight = null;
+    });
+  return ccusageInFlight;
+}
+
 async function readUsage() {
-  // Still Promise.all, but the ccusage calls CANNOT REJECT any more - the
-  // resilience is in tryCcusage rather than in the combinator, which keeps the
-  // destructuring readable. These four are INDEPENDENT sources and ccusage
-  // supplies only the three token counts, so rejecting as a unit is what let
-  // one 20s timeout throw away the hero percentages, the session list and the
-  // clock, publish nothing, and freeze the menu bar on the previous reading.
-  // countInventory() is readdir-only (no stat, no content read - see
+  // ccusage is NOT on this list any more - see kickCcusage above. The rest are
+  // still gathered together and none of them can reject the tick. countInventory()
+  // is readdir-only (no stat, no content read - see
   // host/project-replies.mjs) so it is cheap enough to sit on this list too.
   // The full project listing and a project's own session list are NOT built
   // here, deliberately - see the note beside hostSecondsSinceMidnight below.
-  const [blocksResp, weeklyResp, rateLimits, sessions, projectInventory] = await Promise.all([
-    tryCcusage(["blocks", "--active"]),
-    tryCcusage(["weekly"]),
+  const ccusageRun = kickCcusage();
+  if (!ccusageEverFinished) await ccusageRun;
+  const [rateLimits, sessions, projectInventory] = await Promise.all([
     readRateLimits(),
     readSessions(),
     countInventory(),
   ]);
+  // A finished run's result is reused tick after tick until the next one lands.
+  // A null half is a FAILED call, which pickTokens below carries over as stale.
+  const { blocks: blocksResp, weekly: weeklyResp } = ccusageLatest;
 
   const activeBlock = blocksResp?.blocks?.find((b) => b.isActive);
   const currentWeek = weeklyResp?.weekly?.at(-1) ?? null;
@@ -6046,7 +6078,10 @@ async function tick(generation = tickGeneration) {
         // letting the Mac re-derive it from a file mtime and drift.
         `qage=${usage.quotaAgeSec ?? "?"} cxage=${usage.cxAgeSec ?? "?"} ` +
         `codex=${usage.cxPct == null ? "?" : `${usage.cxPct}%`}` +
-        `${usage.cxWin ? `/${Math.round(usage.cxWin / 1440)}d` : ""}` +
+        // Days, or HOURS under a day - the device's own rule (usage.ino's CODEX
+        // header). Days alone printed a 300-minute window as `/0d`, which the menu
+        // reads as "no window" and so drew Codex with no pace at all.
+        `${usage.cxWin ? (usage.cxWin >= 1440 ? `/${Math.round(usage.cxWin / 1440)}d` : `/${Math.round(usage.cxWin / 60)}h`) : ""}` +
         `${usage.cxResetMin == null ? "" : ` (resets ${usage.cxResetMin}m)`} ` +
         `sessions(${usage.sessionsTotal})=${JSON.stringify(usage.sessions)} ` +
         // Every live link by name, not just the transport kinds: "via=usb,ble"
