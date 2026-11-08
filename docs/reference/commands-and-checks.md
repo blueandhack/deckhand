@@ -413,6 +413,19 @@ Two more traps that will cost you an hour if you don't know them:
   `ada-url` moved to 4.x. Fix is the documented rebuild at the bottom of this file (re-copy `node`
   + `libnode.*.dylib` into the bundle, re-`codesign`). Check crash reports FIRST when the host
   won't start; a silently-exiting `open` looks exactly like a code bug and isn't one.
+  - **A SECOND FORM, with no missing library and no log line at all (2026-10-31).** The bundle
+    copies `node` and `libnode`, but `libnode` still loads ITS dependencies (simdjson, abseil, llhttp,
+    libuv...) from `/opt/homebrew/opt/`. A `brew upgrade` on 2026-10-29 moved node to 26.13.0 and
+    simdjson to 5.0.7 under a bundle built from 26.12.1, and from then on **every fresh start
+    SIGABRT'd inside `node::modules::BindingData::ParsePackageJSON`** — measured by bisecting the
+    host's imports in the bundled runtime: `import('serialport')` alone exits 134, every other
+    module loads, and system node imports it fine. Nothing reaches `host.log` or launchd's
+    `.err`, and launchd says `successive crashes = 2`, `Abort trap: 6`.
+    **A RUNNING HOST HIDES IT FOR DAYS:** the old process had its libraries mapped before the
+    upgrade and kept ticking, while each `ccusage` child (spawned through the same binary) crashed
+    the same way - which is all "Token counts are STALE" and `ccusage ... Command failed` meant
+    for two days. The first restart after the upgrade is what exposes it. Same fix:
+    `host/build-app.sh`, which rebuilt cleanly and started first time, BLE included.
 - **The CH340 only flushes its receive buffer when the host WRITES.** A listen-only serial probe
   reads **zero bytes** from a perfectly healthy device — verified: 8 seconds of boot log arrived in
   one burst the instant a single byte was sent. Any ad-hoc probe must write periodically (a bare

@@ -10,6 +10,13 @@
 
 import Cocoa
 import ServiceManagement
+import SwiftUI
+#if SPARKLE
+// Only release/build-release.sh passes -D SPARKLE. mac-app/build.sh's dev build does
+// not link it, so a build that drives the repo's host can never update itself over
+// with a release.
+import Sparkle
+#endif
 
 // PER-USER runtime dir, and this MUST match RUNTIME_DIR in host/index.mjs and the same
 // derivation in claude-hooks/deckhand-session-hook.mjs. Three places now derive it
@@ -29,8 +36,31 @@ let commandTriggerPath = (NSHomeDirectory() as NSString).appendingPathComponent(
 func hostDir() -> String {
     (Bundle.main.object(forInfoDictionaryKey: "DeckhandHostDir") as? String) ?? ""
 }
-func hostApp() -> String { hostDir() + "/DeckhandBLE.app" }
-func hostScript() -> String { hostDir() + "/index.mjs" }
+
+// THE RELEASED APP (release/build-release.sh) carries its host INSIDE itself: its own
+// Node as a helper app, index.mjs and node_modules in Resources, and a launch agent
+// it registers with SMAppService. Its Info.plist has no DeckhandHostDir, and that
+// absence plus the helper actually being there is what selects this mode - a dev build
+// (mac-app/build.sh) always has the key, so it can never take this path by accident.
+// Resolved through symlinks because the host's argv carries the launcher's realpath()
+// (release/host-launch.c), and the pkill patterns below must match it exactly.
+let bundlePath = URL(fileURLWithPath: Bundle.main.bundlePath).resolvingSymlinksInPath().path
+let helperApp = bundlePath + "/Contents/Helpers/Deckhand Host.app"
+let helperNode = helperApp + "/Contents/MacOS/Deckhand Host"
+let bundledHostScript = bundlePath + "/Contents/Resources/host/index.mjs"
+let bundledHooksDir = bundlePath + "/Contents/Resources/hooks"
+let agentLabel = "io.github.blueandhack.deckhand.host"
+let isBundled = Bundle.main.object(forInfoDictionaryKey: "DeckhandHostDir") == nil
+    && FileManager.default.isExecutableFile(atPath: helperNode)
+let claudeDir = (NSHomeDirectory() as NSString).appendingPathComponent(".claude")
+// What the hooks run (claude-hooks/hook-command.mjs): a link to the bundled Node,
+// re-pointed on every launch, so moving the app never strands a hook.
+let runnerLink = claudeDir + "/deckhand-node"
+func hostAgent() -> SMAppService { SMAppService.agent(plistName: agentLabel + ".plist") }
+var appBuild: String { (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String) ?? "" }
+
+func hostApp() -> String { isBundled ? helperApp : hostDir() + "/DeckhandBLE.app" }
+func hostScript() -> String { isBundled ? bundledHostScript : hostDir() + "/index.mjs" }
 func serviceScript() -> String { hostDir() + "/deckhand-service.sh" }
 
 // Is the host supervised by launchd? If the LaunchAgent is installed, IT owns the
@@ -46,7 +76,52 @@ func launchdPlist() -> String {
     (NSHomeDirectory() as NSString)
         .appendingPathComponent("Library/LaunchAgents/com.deckhand.host.plist")
 }
-func isSupervised() -> Bool { FileManager.default.fileExists(atPath: launchdPlist()) }
+func isSupervised() -> Bool {
+    // The released app's supervisor is its own agent. launchdPlist() is then the
+    // REPO's agent - a second host, which setup offers to stop (legacyHostPresent).
+    isBundled ? ServiceState.shared.agent == .enabled : FileManager.default.fileExists(atPath: launchdPlist())
+}
+
+/// SMAppService's `status` is a SYNCHRONOUS round trip to the system's background-
+/// task daemon. Measured on this Mac with `sample`: ~35ms per refresh, on the MAIN
+/// thread, every 3 seconds (the agent's status and the login item's) - and when that
+/// daemon is slow, at login or under load, the whole menu freezes with it. So it is
+/// read here, off the main thread, every 15s and right after anything this app does
+/// to either service; everything on the main thread reads the cached answer. The
+/// hooks' state rides along: it reads settings.json and compares two 45KB scripts,
+/// which is cheap but is still file I/O the 3s refresh has no reason to repeat.
+final class ServiceState {
+    static let shared = ServiceState()
+    private let queue = DispatchQueue(label: "deckhand.service-state", qos: .utility)
+    private let lock = NSLock()
+    private var _agent = SMAppService.Status.notRegistered
+    private var _login = SMAppService.Status.notRegistered
+    private var _hooks = Hooks.State.notInstalled
+    private var _codexHooks = false
+
+    var agent: SMAppService.Status { lock.withLock { _agent } }
+    var login: SMAppService.Status { lock.withLock { _login } }
+    var hooks: Hooks.State { lock.withLock { _hooks } }
+    var codexHooks: Bool { lock.withLock { _codexHooks } }
+
+    /// On the calling thread. Only for launch and the --setup-do / preview modes,
+    /// where nothing is drawn yet that a 35ms wait could freeze.
+    func refreshNow() {
+        let a = isBundled ? hostAgent().status : .notRegistered
+        let l = SMAppService.mainApp.status
+        let h = Hooks.state()
+        let c = Hooks.codexInstalled()
+        lock.withLock { _agent = a; _login = l; _hooks = h; _codexHooks = c }
+    }
+
+    /// Off the main thread; `then` runs on the main thread afterwards.
+    func refresh(then: (() -> Void)? = nil) {
+        queue.async {
+            self.refreshNow()
+            if let then = then { DispatchQueue.main.async(execute: then) }
+        }
+    }
+}
 
 // One row of the sessions array the host already embeds in every tick line.
 struct SessionRow {
@@ -58,8 +133,13 @@ struct SessionRow {
     // Which app the session lives in: `app` is the bundle id (NSWorkspace can
     // resolve it), `appEntry` is Claude Code's own name for the surface. Both are
     // stamped by the hook from the environment it inherits, so a Codex thread read
-    // off a rollout has neither - no hook ran to observe one.
+    // off a rollout has neither - no hook ran to observe one. A Gemini row has
+    // `app` when it came from the Antigravity app's own store (the host knows
+    // which store it read), and never `appEntry`.
     var app = "", appEntry = ""
+    // Last activity, as the host sends it: seconds since LOCAL midnight (the
+    // device's clock format). The menu turns it into "waiting · 6m".
+    var actSec: Int? = nil
 }
 
 struct HostStatus {
@@ -71,6 +151,10 @@ struct HostStatus {
     var pct5h: Int? = nil, reset5h: Int? = nil
     var pct7d: Int? = nil, reset7d: Int? = nil
     var cxPct: Int? = nil, cxReset: Int? = nil
+    // Codex's SECOND window (`codex2=`, 7 days on a Plus plan). Its own fields
+    // rather than an array, because every renderer here already names Claude's two
+    // windows the same way.
+    var cx2Pct: Int? = nil, cx2Reset: Int? = nil, cx2WinMin: Int? = nil
     // Codex's window LENGTH in minutes, which the two Claude windows do not need
     // (300 and 10080 are fixed by the plan) and this one does: it is whatever
     // Codex's own rate_limits reported, 7d on a Plus plan and not guaranteed
@@ -93,6 +177,9 @@ struct HostStatus {
     var battLeftMin: Int? = nil
     var battAgeSec: Int? = nil
     var asking: Int { sessions.filter { $0.status == "asking" }.count }
+    // How many sessions the host has in all (`sessions(N)=`), which can exceed the
+    // rows it sent - the menu says "N more" rather than silently dropping them.
+    var sessionsTotal = 0
     var via: String? = nil
     var device: String? = nil    // device we're actually talking to, e.g. "Deckhand-A37A"
     var selected: String? = nil  // the one chosen in the picker; nil = "any"
@@ -128,6 +215,15 @@ struct HostStatus {
     // the ONLY surface for it: the device's own screen shows the other code, and
     // nothing about it is written to host.log.
     var pairing = PairInfo()
+    // The Bluetooth adapter's state as noble last reported it ("poweredOn",
+    // "unauthorized", "poweredOff"...), nil from a host too old to send it or before
+    // noble's first report. Only the released app's setup window reads it.
+    var ble: String? = nil
+    // Per device, for the Settings window's Devices pane: which links each paired
+    // board is on right now, and its last battery reading. The singular `device` and
+    // `batt` above are what the menu has always drawn and stay as they were.
+    var links: [(link: String, device: String)] = []
+    var batts: [String: (pct: Int, state: Int, ageSec: Int)] = [:]
 }
 
 func tail(_ path: String, _ maxBytes: Int) -> String? {
@@ -157,6 +253,15 @@ func readStatus() -> HostStatus {
             s.macTag = (obj["macTag"] as? String) ?? ""
             s.macTagSource = (obj["macTagSource"] as? String) ?? ""
             s.macTagAuto = (obj["macTagAuto"] as? String) ?? ""
+            s.ble = obj["ble"] as? String
+            for l in (obj["links"] as? [[String: Any]]) ?? [] {
+                if let id = l["link"] as? String { s.links.append((id, (l["device"] as? String) ?? "")) }
+            }
+            for b in (obj["batts"] as? [[String: Any]]) ?? [] {
+                if let d = b["device"] as? String, let pct = b["pct"] as? Int {
+                    s.batts[d] = (pct, (b["state"] as? Int) ?? 0, (b["ageSec"] as? Int) ?? 999)
+                }
+            }
             if let b = obj["batt"] as? [String: Any] {
                 s.battPct = b["pct"] as? Int
                 s.battState = b["state"] as? Int
@@ -176,15 +281,23 @@ func readStatus() -> HostStatus {
     // window held only a line or two - and a truncated oldest line is why this
     // scans from the END for one that is complete.
     if s.running, let t = tail(logPath, 32768) {
-        for line in t.split(separator: "\n").reversed() where line.hasPrefix("5h=") {
+        for full in t.split(separator: "\n").reversed() where full.hasPrefix("5h=") {
+            // Every field but the sessions is read from the line WITHOUT the
+            // sessions JSON, so no key can be matched inside a title (tickFields).
+            let line = tickFields(full)
             if let (pct, reset) = pctReset(line, "5h=") { s.pct5h = pct; s.reset5h = reset }
             if let (pct, reset) = pctReset(line, "7d=") { s.pct7d = pct; s.reset7d = reset }
             if let (pct, reset) = pctReset(line, "codex=") { s.cxPct = pct; s.cxReset = reset }
             s.cxWinMin = codexWindowMin(line)
+            if let (pct, reset) = pctReset(line, "codex2=") { s.cx2Pct = pct; s.cx2Reset = reset }
+            s.cx2WinMin = codexWindowMin(line, key: "codex2=")
             s.quotaAgeSec = field(line, "qage=").flatMap { Int($0) }
             s.cxAgeSec = field(line, "cxage=").flatMap { Int($0) }
             s.via = field(line, "via=")
-            s.sessions = extractSessions(line)
+            s.sessions = extractSessions(full)
+            if let r = line.range(of: "sessions("), let close = line[r.upperBound...].firstIndex(of: ")") {
+                s.sessionsTotal = Int(line[r.upperBound..<close]) ?? s.sessions.count
+            }
             break
         }
     }
@@ -214,7 +327,11 @@ func pctReset(_ line: Substring, _ key: String) -> (Int, Int?)? {
     // host once passed through verbatim hid the 5h figure from the bar AND the menu
     // with nothing saying why. The host rounds now; this keeps a regression there
     // from blanking the Mac again.
-    guard let pctEnd = rest.firstIndex(of: "%"), let raw = Double(rest[..<pctEnd]), raw.isFinite
+    // The "%" must be in THIS field's own token. `codex=?` has none, and searching
+    // the rest of the line found codex2='s - see codexWindowMin, where that misread
+    // labelled an expired 5h window "7d" on the glass (2026-11-07).
+    let token = rest.prefix { !$0.isWhitespace }
+    guard let pctEnd = token.firstIndex(of: "%"), let raw = Double(token[..<pctEnd]), raw.isFinite
     else { return nil }
     let pct = Int(raw.rounded())
     var reset: Int? = nil
@@ -239,9 +356,12 @@ func pctReset(_ line: Substring, _ key: String) -> (Int, Int?)? {
 /// rate_limits at all, and the row must then draw its fill with NO tick rather
 /// than assume seven days. Guessing the window would put a mark at a position
 /// nothing measured, which is the one thing this whole feature must not do.
-func codexWindowMin(_ line: Substring) -> Int? {
-    guard let r = line.range(of: "codex=") else { return nil }
-    let rest = line[r.upperBound...]
+func codexWindowMin(_ line: Substring, key: String = "codex=") -> Int? {
+    guard let r = line.range(of: key) else { return nil }
+    // Within this field's own token, never past it: after the 5h window reset the
+    // host prints `codex=?` (no "%"), and the search ran on into `codex2=62%/7d`,
+    // so the expired window was labelled 7d in the bar and the tooltip. Seen live.
+    let rest = line[r.upperBound...].prefix { !$0.isWhitespace }
     guard let pctEnd = rest.firstIndex(of: "%") else { return nil }
     let after = rest[rest.index(after: pctEnd)...]
     guard after.hasPrefix("/") else { return nil }
@@ -265,10 +385,43 @@ func codexWindowMin(_ line: Substring) -> Int? {
 /// entirely likely in a project about two transports - would corrupt the parse.
 /// Any malformed input yields an empty list; a status menu must not crash over a
 /// log line.
-func extractSessions(_ line: Substring) -> [SessionRow] {
+/// Where the sessions JSON array sits on a tick line ("[" through "]"), found by
+/// bracket depth with strings and escapes respected - shared by extractSessions and
+/// tickFields, so the two cannot disagree about where it ends.
+func sessionsArrayRange(_ line: Substring) -> ClosedRange<Substring.Index>? {
     guard let key = line.range(of: "sessions("),
-          let eq = line[key.upperBound...].range(of: "=[") else { return [] }
+          let eq = line[key.upperBound...].range(of: "=[") else { return nil }
     let start = line.index(after: eq.lowerBound)          // the '['
+    var depth = 0, inStr = false, esc = false
+    var i = start
+    while i < line.endIndex {
+        let c = line[i]
+        if esc { esc = false }
+        else if c == "\\" { esc = true }
+        else if inStr { if c == "\"" { inStr = false } }
+        else if c == "\"" { inStr = true }
+        else if c == "[" || c == "{" { depth += 1 }
+        else if c == "]" || c == "}" {
+            depth -= 1
+            if depth == 0 { return start...i }
+        }
+        i = line.index(after: i)
+    }
+    return nil
+}
+
+/// The tick line with its sessions JSON CUT OUT, for every other field. A key found
+/// by plain search can otherwise match inside a session's title or prompt: a title
+/// containing "codex2=62%/7d" - plausible in this very repo - read as a Codex
+/// figure, and "via=" the same way. (Review finding, 2026-11-07.)
+func tickFields(_ line: Substring) -> Substring {
+    guard let r = sessionsArrayRange(line) else { return line }
+    return Substring(String(line[..<r.lowerBound]) + String(line[line.index(after: r.upperBound)...]))
+}
+
+func extractSessions(_ line: Substring) -> [SessionRow] {
+    guard let range = sessionsArrayRange(line) else { return [] }
+    let start = range.lowerBound
     var depth = 0, inStr = false, esc = false, end: Substring.Index? = nil
     var i = start
     while i < line.endIndex {
@@ -291,6 +444,7 @@ func extractSessions(_ line: Substring) -> [SessionRow] {
         var r = SessionRow()
         r.id = o["id"] as? String ?? ""
         r.name = o["name"] as? String ?? "?"
+        r.actSec = o["actSec"] as? Int
         r.status = o["status"] as? String ?? ""
         r.path = o["path"] as? String ?? ""
         r.title = o["title"] as? String ?? ""
@@ -305,10 +459,17 @@ func extractSessions(_ line: Substring) -> [SessionRow] {
 
 // "usb,ble" -> "USB + Bluetooth". Both transports are normally live at once, so
 // this is a list and never a single "active transport".
+/// The host's `via=` in words. Since boards got per-link names it reads
+/// `usb:Deckhand-C114,ble`, and this printed that raw id in the menu - so any
+/// `usb:` link is USB, duplicates fold (two boards on two cables is still "USB"),
+/// and the two transports join as "USB and Bluetooth".
 func viaLabel(_ v: String) -> String {
-    v.split(separator: ",").map {
-        $0 == "usb" ? "USB" : ($0 == "ble" ? "Bluetooth" : String($0))
-    }.joined(separator: " + ")
+    var seen: [String] = []
+    for part in v.split(separator: ",") {
+        let p = part.hasPrefix("usb") ? "USB" : (part.hasPrefix("ble") ? "Bluetooth" : String(part))
+        if !seen.contains(p) { seen.append(p) }
+    }
+    return seen.joined(separator: " and ")
 }
 
 func humanMinutes(_ m: Int) -> String {
@@ -604,52 +765,6 @@ func barMirrorAllowed(_ pref: BarPref, _ s: HostStatus) -> Bool {
     pref.on && !(BarPref.onlyOffline.on && s.deviceConnected)
 }
 
-/// What sits beside the boat in the bar: a count when something is waiting on
-/// you, and NOTHING otherwise - a badge that is always there stops being a
-/// signal. Shared with --menu-dump on purpose: a diagnostic that recomputes the
-/// answer its own way can agree with itself while the app does something else.
-///
-/// The FILLED SQUARE is the same glyph an asking row carries in the menu and on
-/// the device, and it is not decoration here: the bar can hold three numbers, so
-/// a bare count would sit next to other bare counts with nothing but order to
-/// tell them apart. Shape is what separates them, which is the rule this project
-/// applies to colour everywhere else.
-///
-/// This is the first third of the partition `barSessionLabel` completes - ■ asks,
-/// ○ waits, ● works - so it must keep counting ONLY `asking`, or a session would
-/// be tallied twice.
-func barCountLabel(_ s: HostStatus) -> String {
-    (BarPref.asking.on && s.asking > 0) ? " \u{25A0}\(s.asking)" : ""
-}
-
-/// The live sessions BY STATUS - hollow ring waiting, dot working - and ONLY
-/// while no device is connected, same reasoning as `barUsageLabel`: the device's
-/// SESSIONS tab is where this is normally read, so the bar stands in for it and
-/// then gets out of the way.
-///
-/// `●` USED TO MEAN "every live session" and now means "working" alone, because
-/// adding waiting to a single total would have printed overlapping numbers - a
-/// `●3` that already contains the `○1` beside it invites adding them up. The
-/// three badges now PARTITION the list the way the menu's own rows do (■ asks,
-/// ○ waits, ● works, one glyph per session, same three shapes in the same
-/// urgency order), so `■1 ○1 ●1` is three sessions and reads as three.
-///
-/// Order follows the host's urgency sort - asking, waiting, working - so the
-/// leftmost number is always the one most likely to need you. Waiting outranks
-/// working here for the same reason it does in that sort and on the device:
-/// READY means nobody is mid-turn, i.e. it is your move.
-///
-/// A zero is drawn as NOTHING rather than as a glyph and a 0, each badge
-/// independently. A quiet Mac's resting state is an empty label, and a badge
-/// present in the resting state is the thing `barCountLabel` above refuses to
-/// be - which also means an absent `○` says "none waiting", not "not shown".
-func barSessionLabel(_ s: HostStatus) -> String {
-    guard barMirrorAllowed(.sessions, s) else { return "" }
-    let waiting = s.sessions.filter { $0.status == "waiting" }.count
-    let working = s.sessions.filter { $0.status == "working" }.count
-    return (waiting > 0 ? " \u{25CB}\(waiting)" : "") + (working > 0 ? " \u{25CF}\(working)" : "")
-}
-
 /// Filled when a device is actually connected, hollow when it is not - the icon
 /// stands for the LINK, not for the process. It used to key off `running`, which
 /// meant a host with no device on the other end drew the same solid boat as a
@@ -660,72 +775,309 @@ func barSessionLabel(_ s: HostStatus) -> String {
 /// `barCountLabel` is.
 func barBoatStyle(_ s: HostStatus) -> BoatStyle { s.deviceConnected ? .solid : .outline }
 
-/// Usage in the BAR, and ONLY while no device is connected. The device's USAGE
-/// tab is normally where these two numbers live, so with nothing on the desk to
-/// draw them the bar takes the job over rather than making you open the menu -
-/// and it goes quiet again the moment a device is back, because a pair of
-/// percentages that is always there is chrome, not a signal. Same reasoning as
-/// `barCountLabel`, applied to the other thing the device would have shown.
-///
-/// 5h first, then 7d, in the order the menu and the device both list them. Each
-/// figure carries its own PACE GLYPH and its own COLOUR, which is what makes this
-/// the USAGE tab standing in for a missing screen rather than two bare numbers:
-/// the device draws a pace bar because a percentage alone cannot say whether you
-/// are burning it faster than the clock, and that is just as true here.
-///
-/// Both are per-FIGURE and never shared: the 5h window can be ahead of its clock
-/// while the 7d window is far behind its own, which is the normal state of
-/// affairs on a busy afternoon, and one glyph for the pair would have to pick a
-/// side.
-///
-/// A stale reading keeps its DIGITS and loses its GLYPH. The digits still say the
-/// last thing we know; the pace does not survive, because it is a comparison
-/// against a clock that has kept running while the percentage has not - see
-/// `pacePct`. The dimming says so without a word, which the bar has no room for,
-/// and the menu row directly below spells out "stale 3h".
-///
-/// A dropped figure leaves no gap: the separator only appears between two figures
-/// that both exist, since a leading or trailing "·" reads as something missing
-/// rather than as something absent.
-///
-/// CODEX COMES LAST, AND NAMED. The two Claude figures go unlabelled because their
-/// order is fixed and the menu says which is which. A third bare percentage would
-/// be guesswork, though: with 5h missing, `50% · 17%` could be 7d and Codex or 5h
-/// and 7d. So Codex carries the device's own `CX` tag, in secondary colour, and the
-/// tag replaces the `·`. The tag already separates it, and it is a different
-/// agent's quota rather than a third window of the same one. Its staleness and its
-/// window are its OWN (`cxAgeSec`, `cxWinMin`), for the reason the menu row gives:
-/// a rollout file goes stale independently of the OAuth poller.
-func barUsageParts(_ s: HostStatus) -> [(String, NSFont, NSColor)] {
-    var out: [(String, NSFont, NSColor)] = []
-    if barMirrorAllowed(.usage, s) { out += barClaudeParts(s) }
-    if barMirrorAllowed(.codex, s), let pct = s.cxPct {
-        let stale = (s.cxAgeSec ?? 0) > QUOTA_STALE_SEC
-        let pace = stale ? nil : pacePct(resetInMin: s.cxReset, windowMin: s.cxWinMin)
-        out.append((out.isEmpty ? " CX " : "   CX ", F_BAR, .secondaryLabelColor))
-        out.append(("\(pct)%" + paceGlyph(pct: pct, pace: pace), F_BAR, quotaColour(pct: pct, stale: stale)))
+// MARK: - The menu-bar item: what sits beside the boat, sized to fit
+//
+// WHY THIS WAS REDESIGNED (2026-11-07). It used to be one line of text -
+// ` 19%▼  ·  41%▼   CX 100%  ·  62%▲ ■2 ○2 ●1` - MEASURED at 275pt with its own font. On a MacBook Pro every
+// status item has to fit between the notch and the right edge (~650pt on a 14"), and
+// when they do not, macOS HIDES the ones that overflow, silently. Measured on this
+// Mac: the items to Deckhand's right already took ~1,220pt, so on the laptop's own
+// screen a wide Deckhand item was the likeliest one to vanish. And `19%▼ · 41%▼` asked
+// the reader to remember which number was which window.
+//
+// So the figures are STACKED: each service is a column with its 5-hour reading on top
+// and its 7-day reading below, with a tiny row label - the layout system-monitor menu
+// bar apps use, which halves the width and labels every number. And the item comes in
+// four sizes (BarTier), chosen by the user or AUTOMATICALLY: Automatic starts smaller
+// on a notched screen, steps down whenever macOS hides the item, and tries larger
+// again only when the displays change or the Mac wakes (AppDelegate.checkBarFit).
+//
+// What each size keeps, most important last to go:
+//   full     every quota column, the session counts (○ waiting / ● working), the
+//            needs-input badge
+//   compact  the quota columns and the badge (session counts are on the menu's rows)
+//   minimal  the badge, and a quota column ONLY when it needs attention (80%+, or
+//            burning faster than the clock)
+//   icon     the boat alone, with a red dot on it while a session needs your answer
+//
+// Rules carried over from the text version, because they were right:
+//  - shape carries meaning, never colour alone: ○ waits, ● works, and the badge is a
+//    filled pill with a count. A zero is drawn as nothing, not as a 0;
+//  - a stale reading keeps its digits (dimmed) and loses its pace mark, which is a
+//    comparison against a clock that kept running while the number did not;
+//  - a missing window is a DASH holding its row, never a gap - "62%" alone on the
+//    top row would read as the 5-hour figure.
+// One change: only ▲ (ahead of pace, the warning) is drawn in the bar. ▼ and ≈ are
+// reassurance, and the menu rows and the tooltip still say them.
+
+enum BarTier: Int, CaseIterable, Comparable {
+    case icon = 0, minimal, compact, full
+    static func < (a: BarTier, b: BarTier) -> Bool { a.rawValue < b.rawValue }
+    var smaller: BarTier? { BarTier(rawValue: rawValue - 1) }
+    var title: String {
+        switch self {
+        case .full: return "Full"
+        case .compact: return "Compact"
+        case .minimal: return "Minimal"
+        case .icon: return "Icon only"
+        }
     }
-    return out
+    var detail: String {
+        switch self {
+        case .full: return "Usage for every service, session counts, and the needs-input badge."
+        case .compact: return "Usage and the needs-input badge."
+        case .minimal: return "Only what needs you: the badge, and usage once it is high."
+        case .icon: return "Just the boat. A red dot means a session is waiting for your answer."
+        }
+    }
 }
 
-/// The 5h and 7d figures, separated by a dot. See `barUsageParts` above.
-func barClaudeParts(_ s: HostStatus) -> [(String, NSFont, NSColor)] {
-    let stale = (s.quotaAgeSec ?? 0) > QUOTA_STALE_SEC
-    var out: [(String, NSFont, NSColor)] = []
-    for (pct, reset, win) in [(s.pct5h, s.reset5h, WINDOW_5H_MIN), (s.pct7d, s.reset7d, WINDOW_7D_MIN)] {
-        guard let pct else { continue }
-        let pace = stale ? nil : pacePct(resetInMin: reset, windowMin: win)
-        // The separator is SPACED, and secondary rather than tertiary. Both came
-        // out of looking at it: a tertiary dot was effectively gone at menu-bar
-        // size, and an unspaced one sat hard against the pace glyph before it
-        // ("96%▲·50%"), which reads as one number that has come apart rather than
-        // as two figures. Three characters against nine is a real cost in a bar
-        // shared with every other app's icons, and it buys the only thing keeping
-        // two independent windows legible as two.
-        out.append((out.isEmpty ? " " : "  \u{00B7}  ", F_BAR, .secondaryLabelColor))
-        out.append(("\(pct)%" + paceGlyph(pct: pct, pace: pace), F_BAR, quotaColour(pct: pct, stale: stale)))
+/// The user's choice. `automatic` resolves to whichever tier fits.
+enum BarSize: String, CaseIterable {
+    case automatic, full, compact, minimal, icon
+    var tier: BarTier? {
+        switch self {
+        case .automatic: return nil
+        case .full: return .full
+        case .compact: return .compact
+        case .minimal: return .minimal
+        case .icon: return .icon
+        }
     }
-    return out
+    static var current: BarSize {
+        get { BarSize(rawValue: UserDefaults.standard.string(forKey: "barSize") ?? "") ?? .automatic }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: "barSize") }
+    }
+}
+
+/// One figure. `pct` nil is the dash.
+struct BarCell: Equatable {
+    var pct: Int?
+    var stale = false
+    var ahead = false
+    var text: String { pct.map { "\($0)%" } ?? "\u{2013}" }
+    var needsAttention: Bool { !stale && ((pct ?? 0) >= 80 || ahead) }
+}
+
+/// One service's column: an optional tag ("CX"), two rows, and the rows' labels when
+/// they are not already given by the Claude column beside it.
+struct BarQuota: Equatable {
+    var tag = ""
+    var labels: [String]? = nil
+    var top = BarCell()
+    var bottom = BarCell()
+    var needsAttention: Bool { top.needsAttention || bottom.needsAttention }
+}
+
+struct BarModel: Equatable {
+    var quotas: [BarQuota] = []
+    var waiting = 0
+    var working = 0
+    var asking = 0
+    var dot = false
+}
+
+func barCell(_ pct: Int?, reset: Int?, window: Int?, stale: Bool) -> BarCell {
+    guard let pct else { return BarCell() }
+    let pace = stale ? nil : pacePct(resetInMin: reset, windowMin: window)
+    return BarCell(pct: pct, stale: stale, ahead: paceGlyph(pct: pct, pace: pace) == "\u{25B2}")
+}
+
+/// What the bar shows at `tier`. Pure: the switches it reads are the Menu Bar
+/// preferences, and the same function feeds the image, --menu-dump and the checks.
+func barModel(_ s: HostStatus, tier: BarTier, previewing: Bool = false) -> BarModel {
+    // `previewing`: the Settings window's size previews show what a size LOOKS
+    // like, so they ignore "hide while a display is connected" - otherwise, with a
+    // display plugged in, every preview was the same bare boat.
+    let allowed = { (p: BarPref) in previewing ? p.on : barMirrorAllowed(p, s) }
+    var m = BarModel()
+    let asking = BarPref.asking.on ? s.asking : 0
+    if tier == .icon { m.dot = asking > 0; return m }
+    m.asking = asking
+
+    var claudeShown = false
+    if allowed(.usage), s.pct5h != nil || s.pct7d != nil {
+        let stale = (s.quotaAgeSec ?? 0) > QUOTA_STALE_SEC
+        m.quotas.append(BarQuota(tag: "", labels: ["5h", "7d"],
+                                 top: barCell(s.pct5h, reset: s.reset5h, window: WINDOW_5H_MIN, stale: stale),
+                                 bottom: barCell(s.pct7d, reset: s.reset7d, window: WINDOW_7D_MIN, stale: stale)))
+        claudeShown = true
+    }
+    if allowed(.codex), s.cxPct != nil || s.cx2Pct != nil {
+        let stale = (s.cxAgeSec ?? 0) > QUOTA_STALE_SEC
+        // Its rows share Claude's labels only when its windows ARE 5h and 7d and the
+        // Claude column is there to carry them. A plan whose first window is 7d must
+        // not have its figure sitting in the row the Claude column calls "5h".
+        let same = claudeShown && (s.cxWinMin ?? WINDOW_5H_MIN) == WINDOW_5H_MIN
+            && (s.cx2WinMin ?? WINDOW_7D_MIN) == WINDOW_7D_MIN
+        m.quotas.append(BarQuota(
+            tag: "CX",
+            labels: same ? nil : [codexWindowLabel(s.cxWinMin, fallback: "1"), codexWindowLabel(s.cx2WinMin, fallback: "2")],
+            top: barCell(s.cxPct, reset: s.cxReset, window: s.cxWinMin, stale: stale),
+            bottom: barCell(s.cx2Pct, reset: s.cx2Reset, window: s.cx2WinMin, stale: stale)))
+    }
+    if tier == .minimal { m.quotas = m.quotas.filter(\.needsAttention) }
+    // Codex borrowed Claude's row labels on the assumption the Claude column is
+    // beside it. Minimal can drop that column, so Codex then carries its own.
+    // (Found by looking at --bar-preview: Minimal drew Codex with no labels at all.)
+    if !m.quotas.contains(where: { $0.tag.isEmpty }), let i = m.quotas.firstIndex(where: { $0.labels == nil }) {
+        m.quotas[i].labels = [codexWindowLabel(s.cxWinMin, fallback: "1"), codexWindowLabel(s.cx2WinMin, fallback: "2")]
+    }
+    if tier == .full, allowed(.sessions) {
+        // ○ waits, ● works - with the badge's ■ asks, the three PARTITION the list,
+        // so no session is counted twice. Waiting outranks working: it is your move.
+        m.waiting = s.sessions.filter { $0.status == "waiting" }.count
+        m.working = s.sessions.filter { $0.status == "working" }.count
+    }
+    return m
+}
+
+/// The model as one line, for --menu-dump and the checks. Columns are bracketed,
+/// rows separated by " / " - the text a person would read off the image.
+func barText(_ m: BarModel) -> String {
+    var parts: [String] = []
+    for q in m.quotas {
+        let rows = [(q.labels?[0], q.top), (q.labels?[1], q.bottom)].map { (l, c) in
+            (l.map { "\($0) " } ?? "") + c.text + (c.ahead ? "\u{25B2}" : "")
+        }
+        parts.append("[" + (q.tag.isEmpty ? "" : "\(q.tag) ") + rows.joined(separator: " / ") + "]")
+    }
+    if m.waiting > 0 || m.working > 0 {
+        parts.append("[" + [m.waiting > 0 ? "\u{25CB}\(m.waiting)" : "", m.working > 0 ? "\u{25CF}\(m.working)" : ""]
+            .filter { !$0.isEmpty }.joined(separator: " / ") + "]")
+    }
+    if m.asking > 0 { parts.append("(\(m.asking))") }
+    if m.dot { parts.append("\u{2022}") }
+    return parts.joined(separator: " ")
+}
+
+let BAR_VALUE_FONT = NSFont.monospacedDigitSystemFont(ofSize: 9.5, weight: .semibold)
+let BAR_LABEL_FONT = NSFont.systemFont(ofSize: 7.5, weight: .medium)
+let BAR_TAG_FONT = NSFont.systemFont(ofSize: 8.5, weight: .bold)
+let BAR_GLYPH_FONT = NSFont.systemFont(ofSize: 6, weight: .regular)
+let BAR_BADGE_FONT = NSFont.monospacedDigitSystemFont(ofSize: 9.5, weight: .bold)
+
+/// The boat and everything beside it as ONE image, laid out for a bar `height` tall.
+/// Drawn by a handler, not baked: every colour is a SEMANTIC one resolved when AppKit
+/// draws it, against the menu bar's own appearance, so it follows a light or dark bar
+/// (and a wallpaper change) the way the old attributed title did.
+func barImage(_ m: BarModel, boat: BoatStyle, colourful: Bool, height h: CGFloat) -> NSImage {
+    typealias Op = (CGFloat) -> Void        // draws at x
+    var ops: [(x: CGFloat, op: Op)] = []
+    var x: CGFloat = 0
+    let boatSize = max(14, min(18, h - 5))
+    let boatImg = deckhandPaperBoatImage(size: boatSize, style: boat, colourful: colourful)
+    let dot = m.dot
+    ops.append((x, { x in
+        let r = NSRect(x: x, y: (h - boatSize) / 2, width: boatSize, height: boatSize)
+        boatImg.draw(in: r)
+        if boatImg.isTemplate {
+            // A template image draws black; the bar's own colour is laid over it.
+            NSColor.labelColor.set()
+            r.fill(using: .sourceAtop)
+        }
+        if dot {
+            NSColor.systemRed.setFill()
+            NSBezierPath(ovalIn: NSRect(x: r.maxX - 5.5, y: r.maxY - 6, width: 6, height: 6)).fill()
+        }
+    }))
+    x += boatSize
+
+    // Two rows: baselines placed so two lines of digits sit centred in the bar.
+    let cap = BAR_VALUE_FONT.capHeight, gap: CGFloat = 2.5
+    let base0 = ((h - (2 * cap + gap)) / 2).rounded()     // bottom row
+    let base1 = base0 + cap + gap                          // top row
+    func size(_ s: String, _ f: NSFont) -> CGFloat { (s as NSString).size(withAttributes: [.font: f]).width }
+    func draw(_ s: String, _ f: NSFont, _ c: NSColor, x: CGFloat, baseline: CGFloat) {
+        (s as NSString).draw(at: NSPoint(x: x, y: baseline + f.descender), withAttributes: [.font: f, .foregroundColor: c])
+    }
+
+    for q in m.quotas {
+        x += 7
+        if !q.tag.isEmpty {
+            let w = size(q.tag, BAR_TAG_FONT), tag = q.tag
+            ops.append((x, { x in draw(tag, BAR_TAG_FONT, .secondaryLabelColor, x: x, baseline: (h - BAR_TAG_FONT.capHeight) / 2) }))
+            x += w + 3
+        }
+        if let labels = q.labels {
+            let w = labels.map { size($0, BAR_LABEL_FONT) }.max() ?? 0
+            ops.append((x, { x in
+                draw(labels[0], BAR_LABEL_FONT, .secondaryLabelColor, x: x, baseline: base1)
+                draw(labels[1], BAR_LABEL_FONT, .secondaryLabelColor, x: x, baseline: base0)
+            }))
+            x += w + 2.5
+        }
+        // Values right-aligned in their column, so 9% and 41% end at the same place.
+        let rows = [(q.top, base1), (q.bottom, base0)]
+        let widths = rows.map { size($0.0.text, BAR_VALUE_FONT) + ($0.0.ahead ? size("\u{25B2}", BAR_GLYPH_FONT) + 1 : 0) }
+        let colW = widths.max() ?? 0
+        ops.append((x, { x in
+            for (i, (cell, base)) in rows.enumerated() {
+                // SECONDARY for the dash, not tertiary: on the real dark bar a tertiary
+                // dash was all but invisible, and the column read as a lone "62%" -
+                // the exact misreading the dash exists to prevent. (Seen in a capture
+                // of the live menu bar, 2026-11-07.)
+                let colour: NSColor = cell.pct == nil ? .secondaryLabelColor : quotaColour(pct: cell.pct!, stale: cell.stale)
+                var cx = x + colW - widths[i]
+                draw(cell.text, BAR_VALUE_FONT, colour, x: cx, baseline: base)
+                if cell.ahead {
+                    cx += size(cell.text, BAR_VALUE_FONT) + 1
+                    draw("\u{25B2}", BAR_GLYPH_FONT, .secondaryLabelColor, x: cx, baseline: base + 1)
+                }
+            }
+        }))
+        x += colW
+    }
+
+    if m.waiting > 0 || m.working > 0 {
+        x += 7
+        let rows = [(m.waiting, "\u{25CB}", base1), (m.working, "\u{25CF}", base0)].filter { $0.0 > 0 }
+        // One row alone sits in the middle rather than leaving a hole above or below.
+        let placed = rows.count == 1 ? [(rows[0].0, rows[0].1, (h - cap) / 2)] : rows
+        let w = placed.map { size("\($0.1)\($0.0)", BAR_VALUE_FONT) }.max() ?? 0
+        ops.append((x, { x in
+            for (n, glyph, base) in placed { draw("\(glyph)\(n)", BAR_VALUE_FONT, .labelColor, x: x, baseline: base) }
+        }))
+        x += w
+    }
+
+    if m.asking > 0 {
+        x += 7
+        let text = "\(m.asking)"
+        let tw = size(text, BAR_BADGE_FONT)
+        let pillH: CGFloat = 13, pillW = max(pillH, tw + 8)
+        ops.append((x, { x in
+            let r = NSRect(x: x, y: ((h - pillH) / 2).rounded(), width: pillW, height: pillH)
+            NSColor.systemRed.setFill()
+            NSBezierPath(roundedRect: r, xRadius: pillH / 2, yRadius: pillH / 2).fill()
+            draw(text, BAR_BADGE_FONT, .white, x: r.midX - tw / 2, baseline: r.minY + (pillH - BAR_BADGE_FONT.capHeight) / 2)
+        }))
+        x += pillW
+    }
+
+    let width = ceil(x + 1)
+    let img = NSImage(size: NSSize(width: width, height: h), flipped: false) { _ in
+        for (ox, op) in ops { op(ox) }
+        return true
+    }
+    img.isTemplate = false
+    img.accessibilityDescription = "Deckhand"
+    return img
+}
+
+/// Where Automatic starts. A notched screen's status area is the strip between the
+/// notch and the right edge, shared with every other app's items, so it starts at
+/// Compact there; anywhere else at Full. Either way it steps down if macOS hides it.
+func barStartTier() -> BarTier {
+    NSScreen.screens.contains { $0.safeAreaInsets.top > 0 } ? .compact : .full
+}
+
+/// Every tier's width for a status - the arithmetic Automatic and the Settings
+/// window both reason with, from the same renderer that draws the bar.
+func barWidths(_ s: HostStatus, height: CGFloat) -> [BarTier: CGFloat] {
+    Dictionary(uniqueKeysWithValues: BarTier.allCases.map {
+        ($0, barImage(barModel(s, tier: $0), boat: barBoatStyle(s), colourful: colourfulIcon, height: height).size.width)
+    })
 }
 
 /// What the bar's own figures MEAN, on hovering the status item - the only place
@@ -735,6 +1087,9 @@ func barClaudeParts(_ s: HostStatus) -> [(String, NSFont, NSColor)] {
 func barTooltip(_ s: HostStatus) -> String {
     var lines: [String] = []
     if barMirrorAllowed(.usage, s) { lines += barClaudeTooltip(s) }
+    if barMirrorAllowed(.codex, s), s.cxPct == nil, s.cx2Pct != nil {
+        lines.append("CX (Codex) \(codexWindowLabel(s.cxWinMin, fallback: "first window")): no current reading - its window has reset since Codex last reported")
+    }
     if barMirrorAllowed(.codex, s), let pct = s.cxPct {
         let age = s.cxAgeSec ?? 0
         // Each reason named, for the reason given in barClaudeTooltip: a missing
@@ -748,7 +1103,22 @@ func barTooltip(_ s: HostStatus) -> String {
             lines.append("CX (Codex): " + paceWords(pct: pct, pace: pacePct(resetInMin: s.cxReset, windowMin: s.cxWinMin)))
         }
     }
+    if barMirrorAllowed(.codex, s), let pct = s.cx2Pct {
+        let name = "CX (Codex) \(codexWindowLabel(s.cx2WinMin, fallback: "second window"))"
+        if (s.cxAgeSec ?? 0) > QUOTA_STALE_SEC {
+            lines.append("\(name): \(pct)% used, no pace: this reading is \(humanMinutes((s.cxAgeSec ?? 0) / 60)) old")
+        } else {
+            lines.append("\(name): " + paceWords(pct: pct, pace: pacePct(resetInMin: s.cx2Reset, windowMin: s.cx2WinMin)))
+        }
+    }
     return lines.joined(separator: "\n")
+}
+
+/// "5h" / "7d" from a window length in minutes - the host's own rule (days, or
+/// hours under a day) - or `fallback` when Codex published none.
+func codexWindowLabel(_ win: Int?, fallback: String) -> String {
+    guard let w = win, w > 0 else { return fallback }
+    return w >= 1440 ? "\(w / 1440)d" : "\(w / 60)h"
 }
 
 /// The 5h and 7d lines of `barTooltip`, with their shared staleness sentence.
@@ -773,22 +1143,6 @@ func barClaudeTooltip(_ s: HostStatus) -> [String] {
     // otherwise read as included in "these readings".
     if stale { lines.append("No 5h/7d pace: these readings are \(humanMinutes((s.quotaAgeSec ?? 0) / 60)) old, so the clock has moved and they have not.") }
     return lines
-}
-
-/// Everything to the right of the boat, left to right: usage, then what needs
-/// you, then what is merely live. Urgency ahead of ambience, so the number that
-/// might make you get up is never the one you have to hunt for.
-///
-/// ATTRIBUTED, where this returned a plain String until the usage figures started
-/// carrying a threshold colour. The two counts stay monochrome deliberately: ■ ○ ●
-/// are already separated by SHAPE, and hue on top of that would be decoration -
-/// while a percentage has no shape to spare, so colour there is the accent on a
-/// figure that already states the fact in digits.
-func barTitle(_ s: HostStatus) -> NSAttributedString {
-    menuTitle(barUsageParts(s) + [
-        (barCountLabel(s), F_BAR, .labelColor),
-        (barSessionLabel(s), F_BAR, .labelColor),
-    ])
 }
 
 /// A sound when a session STARTS needing input, and the edge is the whole point.
@@ -928,87 +1282,107 @@ func menuTitle(_ parts: [(String, NSFont, NSColor)]) -> NSAttributedString {
 /// so the two surfaces cannot disagree about whether a reading is live.
 let QUOTA_STALE_SEC = 900
 
-func quotaTitle(_ label: String, _ pct: Int, _ reset: Int?, _ ageSec: Int? = nil,
-                windowMin: Int? = nil) -> NSAttributedString {
-    // A STALE reading is dimmed and says so in WORDS, both - the device dims its
-    // hero % for the same reason, and the word is what carries the meaning here
-    // for anyone who cannot see the dimming. Staleness outranks the usage
-    // threshold: "97% used" from an hour ago is not a crisis to colour red, it is
-    // a number we cannot vouch for. The threshold itself lives in `quotaColour`
-    // now, because the bar's figures take the same one.
-    let stale = (ageSec ?? 0) > QUOTA_STALE_SEC
-    let colour = quotaColour(pct: pct, stale: stale)
-    let note = stale ? "" : (pct >= 95 ? "  critical" : (pct >= 80 ? "  high" : ""))
-    let staleNote = stale ? "  \u{00B7} stale \(humanMinutes((ageSec ?? 0) / 60))" : ""
-    // The pace tick, suppressed for a stale reading exactly as the bar's arrow is
-    // (see `pacePct`) - a mark showing where the clock has got to, drawn into a
-    // fill that stopped being updated hours ago, invents a comparison.
-    let pace = stale ? nil : pacePct(resetInMin: reset, windowMin: windowMin)
-    // THE NUMBER LEADS, and the bar follows it. The row used to read label, bar,
-    // number - so the one figure being reported sat downstream of eleven
-    // characters of texture, and the pace glyph, which is a statement ABOUT that
-    // figure, ended up detached at the right margin with the bar between them.
-    // Number first puts the payload where the eye lands and puts its qualifiers
-    // next to it; the bar is context and reads perfectly well as the thing after.
-    var parts: [(String, NSFont, NSColor)] = [
-        (label.padding(toLength: 6, withPad: " ", startingAt: 0), F_MONO, .secondaryLabelColor),
-        (String(format: "%3d%% used", pct), F_MONO_BOLD, colour),
-        (note, F_MONO, colour),
-        // Two spaces, because "4% used▼" reads as a typo - the glyph is a
-        // separate statement about a different quantity, not a suffix on this one.
-        //
-        // NEUTRAL, not the usage colour, for the same reason the tick is: it
-        // reports a COMPARISON, not a level. In the usage colour a red ▼ sat
-        // beside a red 96% and read as part of the alarm, when ▼ is the
-        // reassuring half of the pair - it says the percentage is climbing slower
-        // than the clock. A colour that inverts the meaning of the glyph it
-        // paints is worse than no colour on it.
-        (pace == nil ? "" : "  " + paceGlyph(pct: pct, pace: pace), F_MONO, .secondaryLabelColor),
-        ("   ", F_MONO, .secondaryLabelColor),
-    ]
-    // THREE ROLES, THREE VALUES, and the ordering between them is the whole point:
-    // fill at full strength, tick a step down, track a step below that. That is
-    // what makes the tick OUTRANK the track it sits in - at the same value as the
-    // track it goes back to being findable only as the notch its own cell makes,
-    // which is the defect the tick's own split was introduced to fix.
-    //
-    // The track has to be dimmer THAN THE FILL, which is not the same as being a
-    // fixed colour: a stale reading dims its fill to tertiary, so a fixed tertiary
-    // track would match it exactly and reproduce the smear on precisely the rows
-    // whose numbers are least trustworthy. So it steps down with it.
-    let trackColour: NSColor = stale ? .quaternaryLabelColor : .tertiaryLabelColor
-    for (text, role) in quotaBarRuns(pct, pace: pace) {
-        parts.append((text, F_MONO, role == .fill ? colour
-                                 : role == .track ? trackColour
-                                 : .secondaryLabelColor))
+
+// MARK: - The dropdown's rows (redesigned 2026-11-07)
+//
+// HOW IT IS READ decided its shape. Someone opens this menu to answer, in order:
+// is it working; how much quota is left and when does it come back; who is waiting
+// on me. So it is three SECTIONS under plain headers (the connection, then Claude
+// and Codex usage, then Sessions), each row is ONE line where it used to be two,
+// and every row puts its answer on the left and its "when" in a right-aligned
+// column - the shape of a macOS menu with shortcuts, which is the menu everyone
+// already knows how to scan. The explanations that used to sit on a second line
+// ("9% elapsed, behind pace") moved into each row's tooltip: they teach once, and
+// a teaching line on every row was half the menu's height.
+//
+// Before: 4 quota windows took 8 lines, labelled `5h`/`7d`/`CX 5h`/`CX 7d`, with no
+// heading saying which service a row belonged to; the connection took three rows
+// and printed the raw link id (`usb:Deckhand-C114`).
+
+/// The right-hand column's position. One value for every row so the columns line
+/// up across sections; wide enough that the widest left side (a 22-character
+/// project name and its agent tag) never reaches it.
+let MENU_RIGHT_TAB: CGFloat = 330
+let F_HEADER = NSFont.systemFont(ofSize: 11, weight: .semibold)
+
+/// A row with an answer on the left and a right-aligned note, by a real tab stop -
+/// padding with spaces cannot align a proportional font.
+func menuColumns(_ left: [(String, NSFont, NSColor)], _ right: [(String, NSFont, NSColor)] = []) -> NSAttributedString {
+    let out = NSMutableAttributedString(attributedString: menuTitle(left))
+    if right.contains(where: { !$0.0.isEmpty }) {
+        out.append(NSAttributedString(string: "\t", attributes: [.font: F_BODY]))
+        out.append(menuTitle(right))
     }
-    return menuTitle(parts + [
-        // NOT systemOrange, which is also the 80%-high colour - so a stale row was
-        // the loudest ink in the whole block AND wearing the warning colour, i.e.
-        // it looked like an alarm about usage on the one row whose numbers we
-        // explicitly cannot vouch for. Staleness is an absence of information, and
-        // it is already said in words and by the dimmed figure beside it.
-        (staleNote, F_MONO, .secondaryLabelColor),
-        // THE RESET STAYS DOWN HERE, and that was measured rather than preferred.
-        // With the number leading, the main row now ends around 232px of a 316px
-        // lane (`--menu-preview`), so promoting `resets in` up to it looks free -
-        // but the widest real case is "  resets in 5d 8h", 17 monospaced cells
-        // ≈ 112px against 84px spare. It would wrap, and a wrapped row note gets
-        // no indent, which is a defect this menu has already been through once.
-        //
-        // Indented with monospaced spaces so it sits under the bar. Padding a
-        // proportional font gave a third of the intended indent.
-        (reset.map { _ in "\n      " } ?? "", F_MONO, .secondaryLabelColor),
-        (reset.map { "resets in \(humanMinutes($0))" } ?? "", F_SMALL, .secondaryLabelColor),
-        // What the tick is, spelled out, on the row that has room for it. The
-        // menu bar can only afford the glyph, so this is where the vocabulary the
-        // two surfaces share actually gets taught.
-        // SECONDARY, not tertiary. This clause is the only place the ▲/▼/≈
-        // vocabulary is ever spelled out - the bar label has room for the glyph
-        // and nothing else - so it is the row's teaching text, and at 0.259 it
-        // was the faintest thing on a row it is supposed to explain.
-        (pace == nil ? "" : "  \u{00B7}  \(paceNote(pct: pct, pace: pace))", F_SMALL, .secondaryLabelColor),
-    ])
+    let ps = NSMutableParagraphStyle()
+    ps.tabStops = [NSTextTab(textAlignment: .right, location: MENU_RIGHT_TAB)]
+    out.addAttribute(.paragraphStyle, value: ps, range: NSRange(location: 0, length: out.length))
+    return out
+}
+
+/// A section header: the service or the list it heads, and a note on the right.
+func menuHeader(_ title: String, note: String = "") -> NSAttributedString {
+    menuColumns([(title, F_HEADER, .secondaryLabelColor)], [(note, F_SMALL, .secondaryLabelColor)])
+}
+
+/// A window by its LENGTH, in words: "5-hour", "Weekly", else "3-day" / "8-hour".
+/// Claude's are fixed by the plan; Codex's come off the tick line.
+func windowName(_ minutes: Int?) -> String {
+    guard let m = minutes, m > 0 else { return "Usage" }
+    if m == 10080 { return "Weekly" }
+    return m >= 1440 ? "\(m / 1440)-day" : "\(m / 60)-hour"
+}
+
+/// One usage window on ONE line: name, bar (with its pace tick), percentage and
+/// pace glyph on the left; when it resets on the right. `pct` nil is a window with
+/// no current reading (it reset since the service last reported one). Returns the
+/// row and its tooltip, which carries the sentence the old second line did.
+func quotaRow(_ windowMin: Int?, _ pct: Int?, _ reset: Int?, stale: Bool) -> (NSAttributedString, String) {
+    let name = windowName(windowMin)
+    let label = (name.padding(toLength: 7, withPad: " ", startingAt: 0), F_MONO, NSColor.secondaryLabelColor)
+    guard let pct else {
+        return (menuColumns([label, ("   \u{2013}", F_MONO, .secondaryLabelColor)],
+                            [("no reading since it reset", F_SMALL, .secondaryLabelColor)]),
+                "\(name): no current reading. This window has reset since the service last reported its usage; it updates the next time you use it.")
+    }
+    let colour = quotaColour(pct: pct, stale: stale)
+    let pace = stale ? nil : pacePct(resetInMin: reset, windowMin: windowMin)
+    let trackColour: NSColor = stale ? .quaternaryLabelColor : .tertiaryLabelColor
+    // THE NUMBER LEADS, and the bar follows it (a decision the pace checks hold):
+    // the figure the row reports is where the eye lands, its qualifiers sit next to
+    // it, and the bar is the context after. The pace glyph is in NEUTRAL ink - it
+    // reports a comparison, not a level, and in the usage colour a red ▼ beside a
+    // red 96% read as part of the alarm. A blank cell holds its place when there is
+    // no pace, so the bars of every row start in the same column.
+    var left: [(String, NSFont, NSColor)] = [
+        label,
+        (String(format: "%4d%%", pct), F_MONO_BOLD, colour),
+        (" " + (pace == nil ? " " : paceGlyph(pct: pct, pace: pace)) + "  ", F_MONO, .secondaryLabelColor),
+    ]
+    for (text, role) in quotaBarRuns(pct, pace: pace) {
+        left.append((text, F_MONO, role == .fill ? colour : role == .track ? trackColour : .secondaryLabelColor))
+    }
+    let right = reset.map { "resets in \(humanMinutes($0))" } ?? ""
+    var tip = "\(name): \(pct)% used"
+    if stale { tip += " - this reading is not current, so there is no pace" }
+    else if pace != nil { tip += ". " + paceNote(pct: pct, pace: pace).prefix(1).uppercased() + paceNote(pct: pct, pace: pace).dropFirst() }
+    if let r = reset {
+        let at = Date().addingTimeInterval(TimeInterval(r * 60))
+        let f = DateFormatter()
+        f.dateFormat = r < 1440 ? "HH:mm" : "EEE HH:mm"
+        tip += ".\nResets in \(humanMinutes(r)), at \(f.string(from: at))."
+    }
+    if pct >= 95 && !stale { tip += "\nAt or near the limit." }
+    return (menuColumns(left, [(right, F_SMALL, .secondaryLabelColor)]), tip)
+}
+
+/// How long ago, from the host's seconds-since-local-midnight `actSec`. Sessions
+/// older than a day have aged out of the list long before this could wrap.
+func sessionAge(_ actSec: Int?) -> String? {
+    guard let a = actSec, a >= 0 else { return nil }
+    let c = Calendar.current.dateComponents([.hour, .minute, .second], from: Date())
+    let now = (c.hour ?? 0) * 3600 + (c.minute ?? 0) * 60 + (c.second ?? 0)
+    let ago = (now - a + 86400) % 86400
+    return ago < 60 ? "just now" : humanMinutes(ago / 60)
 }
 
 /// ONE LESS than the host's own 40-character slice, and that is the whole trick.
@@ -1019,21 +1393,31 @@ func quotaTitle(_ label: String, _ pct: Int, _ reset: Int?, _ ageSec: Int? = nil
 /// ellipsis, which says "there is more" instead of looking like a typo.
 let SESSION_TITLE_SHOW = 39
 
+/// One session: status glyph, project and (for a non-Claude agent) its name on the
+/// left, the state and how long it has been in it on the right, and what it is
+/// about on a second line. Shape and word, never colour alone: ■ needs you, ○
+/// waiting, ● working - the device's three states, in the host's urgency order.
 func sessionTitle(_ r: SessionRow) -> NSAttributedString {
-    // Shape and word, never colour alone: filled square asks, hollow ring waits,
-    // dot works - the same three states the device draws, in the same order of
-    // urgency the host already sorted them into.
     let asking = r.status == "asking"
-    let glyph = asking ? "■" : (r.status == "waiting" ? "○" : "●")
-    var meta = "  ·  " + (asking ? "needs input" : r.status)
-    if r.agent == "cx" { meta += "  ·  Codex" }
-    return menuTitle([
+    let glyph = asking ? "\u{25A0}" : (r.status == "waiting" ? "\u{25CB}" : "\u{25CF}")
+    let agent = r.agent == "cx" ? "Codex" : (r.agent == "gm" ? "Gemini" : "")
+    let age = sessionAge(r.actSec)
+    let state: String
+    switch r.status {
+    case "asking": state = "needs you"
+    case "waiting": state = "waiting" + (age.map { " \u{00B7} \($0)" } ?? "")
+    default: state = r.status
+    }
+    let out = NSMutableAttributedString(attributedString: menuColumns([
         ("\(glyph)  ", F_BODY, asking ? .systemOrange : .secondaryLabelColor),
-        (r.name, asking ? F_BOLD : F_BODY, .labelColor),
-        (meta, F_SMALL, .secondaryLabelColor),
-        (r.title.isEmpty ? "" : "\n     ", F_MONO, .secondaryLabelColor),
-        (r.title.isEmpty ? "" : clip(r.title, SESSION_TITLE_SHOW), F_SMALL, .secondaryLabelColor),
-    ])
+        (clip(r.name, 22), asking ? F_BOLD : F_BODY, .labelColor),
+        (agent.isEmpty ? "" : "  \(agent)", F_SMALL, .tertiaryLabelColor),
+    ], [(state, asking ? F_BOLD : F_SMALL, asking ? .systemOrange : .secondaryLabelColor)]))
+    if !r.title.isEmpty {
+        out.append(menuTitle([("\n     ", F_MONO, .secondaryLabelColor),
+                              (clip(r.title, SESSION_TITLE_SHOW), F_SMALL, .secondaryLabelColor)]))
+    }
+    return out
 }
 
 /// One editor window, from `~/.claude/ide/<port>.lock` - Claude Code's own record
@@ -1586,8 +1970,8 @@ func pairWindowModel(_ s: HostStatus, _ local: PairLocal = PairLocal()) -> PairW
         m.phase = .done
         m.title = "Paired with \(who)"
         m.detail = "Both ends derived the same key from the exchange - it was never transmitted. "
-            + "This Mac can now answer that device's prompts, and the pairing shows up under "
-            + "Device in the menu."
+            + "This Mac can now answer that device's prompts, and the pairing is listed under "
+            + "Devices in this app's Settings window."
         m.primary = close
         m.showsList = true
         m.rowsEnabled = pairCanStart(s)
@@ -1880,35 +2264,40 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     let q5 = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     let q7 = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     let cxLine = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-    let battLine = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-    let sessionsHeader = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    let cx2Line = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    // Section headers (disabled: they are chrome, and dim is what says so), the
+    // separator under usage that hides with it, and the "N more" row.
+    // REAL section headers (macOS 14), so VoiceOver announces them as headers; each
+    // keeps an attributed title for its right-hand note. Measured: one built this
+    // way draws exactly like the system's own - dim is the platform's header style.
+    let claudeHeader = NSMenuItem.sectionHeader(title: "Claude")
+    let codexHeader = NSMenuItem.sectionHeader(title: "Codex")
+    let usageSep = NSMenuItem.separator()
+    let moreSessions = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    let voiceHeader = NSMenuItem.sectionHeader(title: "Last dictation")
+    let sessionsHeader = NSMenuItem.sectionHeader(title: "Sessions")
     // A fixed pool that is shown or hidden, never added and removed. The menu can
     // be OPEN while the 3s refresh runs, and rebuilding items under the cursor
     // makes the list jump; hiding is what the voice rows already did.
     var sessionRows: [NSMenuItem] = []
     let voiceSep = NSMenuItem.separator()
     let startStop = NSMenuItem(title: "", action: #selector(toggleHost), keyEquivalent: "")
-    let deviceItem = NSMenuItem(title: "Device", action: nil, keyEquivalent: "")
-    let deviceMenu = NSMenu()
-    let forgetItem = NSMenuItem(title: "Forget device (re-pair over USB)", action: #selector(forgetDevice), keyEquivalent: "")
-    let remoteItem = NSMenuItem(title: "Answer prompts on device", action: #selector(toggleRemoteAnswer), keyEquivalent: "")
     let voiceHeard = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     let voiceReplyItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-    let loginItem = NSMenuItem(title: "Launch at login", action: #selector(toggleLogin), keyEquivalent: "")
-    // Built ONCE from BarPref.allCases and then only re-checked, the way every
-    // other row here is - see sessionRows on why nothing is added or removed
-    // while the menu may be open under the cursor.
-    let barItem = NSMenuItem(title: "Menu bar shows", action: nil, keyEquivalent: "")
-    let barMenu = NSMenu()
-    var barPrefItems: [(BarPref, NSMenuItem)] = []
-    let colourItem = NSMenuItem(title: "Colourful icon", action: #selector(toggleColourfulIcon), keyEquivalent: "")
-    let settingsItem = NSMenuItem(title: "Settings", action: nil, keyEquivalent: "")
-    let settingsMenu = NSMenu()
+    // EVERY PREFERENCE LIVES IN THE SETTINGS WINDOW (SettingsWindowController). The
+    // menu used to carry them as a Settings submenu that had grown to eleven rows and
+    // five nested submenus - a Mac icon picker sixteen rows long, a device picker, a
+    // sound list, five bar toggles, the hooks - and a submenu is the wrong control
+    // for all of it: no room to say what a switch does, a mis-click closes it, and a
+    // name field needs an alert. The menu is now status, then the three things people
+    // do from it: start or stop, pair, and open Settings.
+    let settingsWindowItem = NSMenuItem(title: "Settings\u{2026}", action: #selector(openSettings), keyEquivalent: ",")
+    var settingsWindow: SettingsWindowController?
     // Wireless pairing. ONE ROW, and it opens a window rather than a submenu - see
     // the note above PAIR_TICK_SEC for why a menu cannot hold this flow. It is
     // never dimmed: with no host, or against a host too old to pair, the WINDOW
     // says so in words, which a grey row cannot.
-    let pairItem = NSMenuItem(title: "Pair new device\u{2026}", action: #selector(openPairWindow), keyEquivalent: "")
+    let pairItem = NSMenuItem(title: "Pair New Device\u{2026}", action: #selector(openPairWindow), keyEquivalent: "")
     var pairWindow: PairWindow?
     // The window's own state: what this Mac has answered, and whether it has asked
     // to cancel. Expired by pairLocalNext() rather than by hand.
@@ -1923,21 +2312,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // False until the first refresh has looked at the pairing block once. See
     // pairWorthRaising.
     var pairPrimed = false
-    let soundItem = NSMenuItem(title: "Needs-input sound", action: nil, keyEquivalent: "")
-    let soundMenu = NSMenu()
-    var soundItems: [(String, NSMenuItem)] = []
-    // Title is set per-refresh (rebuildIconMenu) since it changes to "(set by
-    // env)" - it starts at the plain form so --menu-dump has something sane
-    // before the first refresh runs.
-    let iconItem = NSMenuItem(title: "Mac icon", action: nil, keyEquivalent: "")
-    let iconMenu = NSMenu()
-    var iconItems: [(String, NSMenuItem)] = []
-    // The icon's sibling: the TEXT this Mac is called on the device. Title and
-    // enabled state are set per refresh (rebuildNameRow), from the heartbeat.
-    let nameItem = NSMenuItem(title: "Mac name\u{2026}", action: #selector(editMacName), keyEquivalent: "")
     // Diffed every refresh, so it must outlive one - a local would announce
     // every asking session on every 3s tick.
     var askWatcher = AskWatcher()
+    // The released app only (isBundled). Added to the menu in buildMenu() only in
+    // that mode, so a dev build's menu - and --menu-dump - is exactly what it was.
+    let updateItem = NSMenuItem(title: "Check for Updates\u{2026}", action: #selector(checkForUpdates), keyEquivalent: "")
+    var setup: SetupFlow?
+    #if SPARKLE
+    var updater: SPUStandardUpdaterController?
+    #endif
 
     // Watchdog state. wantRunning persists the user's intent ("syncing should
     // be on") so a deliberate Stop is respected but a frozen/crashed host is
@@ -1945,6 +2329,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // reboot). downSince/lastRestart debounce the restart.
     var downSince: Date?
     var lastRestart = Date.distantPast
+    /// launchd refused a restart (no such job); see watchdog.
+    var watchdogGaveUp = false
     // --menu-dump / --menu-preview build the real menu and refresh it. Neither may
     // start or stop anything, so the watchdog is skipped outright rather than
     // relied on to be a no-op on a single call.
@@ -1958,18 +2344,112 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
         statusItem.menu = buildMenu()
+        NSApp.mainMenu = buildMainMenu()
 
+        // Once here, on purpose, before anything is drawn - then only ever off the
+        // main thread (see ServiceState).
+        ServiceState.shared.refreshNow()
         refresh()
         Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in self?.refresh() }
+        NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
+                                               object: nil, queue: .main) { [weak self] _ in self?.resetBarFit() }
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification,
+                                                          object: nil, queue: .main) { [weak self] _ in self?.resetBarFit() }
+        // A different app in front may have a different size (fitByApp).
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification,
+                                                          object: nil, queue: .main) { [weak self] _ in self?.refresh() }
+        Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
+            ServiceState.shared.refresh {
+                if let w = self?.settingsWindow, w.window.isVisible { w.model.pullServices() }
+            }
+        }
 
         // Adopt the current state: if the host is already syncing, keep it
         // alive from now on. If syncing was meant to be on but the host is
         // down (e.g. after a reboot via the login item), start it.
+        if isBundled { bundledLaunch() }
         if readStatus().running { wantRunning = true }
-        if wantRunning && !readStatus().running {
+        // The released app starts nothing before its setup has run once: hooks are
+        // installed only with consent, and the agent is registered by setup.
+        if wantRunning && !readStatus().running && (!isBundled || SetupFlow.done) {
             lastRestart = Date()
             startHost()
         }
+    }
+
+    /// An accessory app has no menu bar of its own, but the KEY EQUIVALENTS of one
+    /// are how a window's text field gets Cmd-V and Cmd-A and how Cmd-W closes it -
+    /// with no main menu, pasting a name into Settings silently does nothing. Never
+    /// shown (the app is never frontmost in the menu-bar sense), only used.
+    func buildMainMenu() -> NSMenu {
+        let main = NSMenu()
+        func sub(_ title: String, _ items: [NSMenuItem]) {
+            let host = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            let m = NSMenu(title: title)
+            items.forEach { m.addItem($0) }
+            host.submenu = m
+            main.addItem(host)
+        }
+        let settings = NSMenuItem(title: "Settings\u{2026}", action: #selector(openSettings), keyEquivalent: ",")
+        settings.target = self
+        sub("Deckhand", [settings, .separator(),
+                         NSMenuItem(title: "Quit Deckhand", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")])
+        let redo = NSMenuItem(title: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        sub("Edit", [NSMenuItem(title: "Undo", action: Selector(("undo:")), keyEquivalent: "z"), redo, .separator(),
+                     NSMenuItem(title: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x"),
+                     NSMenuItem(title: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c"),
+                     NSMenuItem(title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v"),
+                     NSMenuItem(title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")])
+        sub("Window", [NSMenuItem(title: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")])
+        return main
+    }
+
+    /// MIGRATION from the menu app built out of the repo. That app's bundle id was
+    /// com.deckhand.menubar, so its preferences live in a different defaults domain
+    /// and the released app started from scratch - found on this Mac, where the old
+    /// app had the monochrome icon chosen and the released one came up colourful.
+    /// Copied ONCE (a key marks it done), and only keys this app has never set, so a
+    /// choice made here is never overwritten by an old one. `wantRunning` is NOT
+    /// copied: setup decides whether the bundled host runs.
+    func importLegacyPrefs() {
+        let d = UserDefaults.standard
+        guard !d.bool(forKey: "importedLegacyPrefs") else { return }
+        d.set(true, forKey: "importedLegacyPrefs")
+        guard let old = UserDefaults(suiteName: "com.deckhand.menubar") else { return }
+        let keys = BarPref.allCases.map(\.rawValue) + ["colourfulIcon", "askSound", "macIcon"]
+        var copied: [String] = []
+        for k in keys where d.object(forKey: k) == nil {
+            if let v = old.object(forKey: k) { d.set(v, forKey: k); copied.append(k) }
+        }
+        if !copied.isEmpty { NSLog("Deckhand: imported preferences from the old menu app: %@", copied.joined(separator: ", ")) }
+    }
+
+    /// Everything the released app does at launch that a dev build must not.
+    func bundledLaunch() {
+        importLegacyPrefs()
+        #if SPARKLE
+        // Sparkle's standard flow: it asks on the SECOND launch whether to check
+        // automatically, and the menu's Check for Updates works from the first.
+        updater = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+        #endif
+        // A new build (a Sparkle update, or a new download dragged over the old):
+        // re-copy the hook scripts if the user agreed to them once, and restart the
+        // host so it runs the code that is now in the bundle rather than the old
+        // process left running out of the replaced one.
+        DispatchQueue.global(qos: .utility).async { Hooks.afterLaunch() }
+        let d = UserDefaults.standard
+        if d.string(forKey: "hostBuild") != appBuild {
+            // Off the main thread: both the status and kickstart are calls into
+            // system daemons that can be slow at login, when this mostly runs.
+            DispatchQueue.global(qos: .utility).async {
+                if hostAgent().status == .enabled {
+                    _ = runCapture("/bin/launchctl", ["kickstart", "-k", "gui/\(getuid())/\(agentLabel)"])
+                }
+            }
+            d.set(appBuild, forKey: "hostBuild")
+        }
+        if !SetupFlow.done || legacyHostPresent() || runningFromTemporaryLocation() { openSetup() }
     }
 
     // Built in its own method, not inline above, so --menu-dump can construct the
@@ -1978,79 +2458,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let menu = NSMenu()
         // EXPLICIT enablement. With autoenablesItems on (the default) AppKit
         // re-enables anything that has a target and an action, which silently
-        // undid the isEnabled this code sets for Forget and the Device submenu -
-        // so Forget was clickable with no device paired.
+        // undid the isEnabled this code sets - so a control meant to be dimmed was
+        // clickable.
         menu.autoenablesItems = false
-        deviceMenu.autoenablesItems = false
-        deviceItem.submenu = deviceMenu
-        barMenu.autoenablesItems = false
-        barItem.submenu = barMenu
-        soundMenu.autoenablesItems = false
-        soundItem.submenu = soundMenu
-        iconMenu.autoenablesItems = false
-        iconItem.submenu = iconMenu
-        // PREFERENCES behind one door, so the top level is actions only. These
-        // four used to sit in the top-level row and it had grown to three
-        // consecutive submenus, which pushed Quit down the menu and left nothing
-        // saying which items merely change a setting and which one stops the host.
-        //
-        // Two things this needs that the top-level loop below would otherwise
-        // have done: autoenablesItems off (AppKit re-enables anything with a
-        // target, which is how Forget once became clickable with no device
-        // paired) and an explicit target, since that loop only walks `items`. The
-        // two submenu PARENTS are enabled explicitly - the loop's "an item with
-        // an action is a control" rule would read their nil action as
-        // informational and dim them.
-        settingsMenu.autoenablesItems = false
-        settingsItem.submenu = settingsMenu
-        for it in [remoteItem, colourItem, barItem, soundItem, iconItem, nameItem, pairItem, loginItem] {
-            it.target = self
-            it.isEnabled = true
-            settingsMenu.addItem(it)
-        }
-        // Off FIRST, because silencing something that is currently making a noise
-        // is the reason most people open this menu, and it should not be at the
-        // bottom of a list of noises. Choosing a sound PLAYS it (see
-        // pickAskSound) - a name is not something you can evaluate by reading.
-        for name in [""] + ASK_SOUNDS {
-            let it = NSMenuItem(title: name.isEmpty ? "Off" : name,
-                                action: #selector(pickAskSound(_:)), keyEquivalent: "")
-            it.target = self
-            it.representedObject = name
-            soundMenu.addItem(it)
-            soundItems.append((name, it))
-            if name.isEmpty { soundMenu.addItem(.separator()) }
-        }
-        // Sixteen fixed rows, checked/enabled per refresh (rebuildIconMenu) -
-        // same "built once, only re-checked" shape as soundItems above, since
-        // the set of names never changes, only which one is checked and
-        // whether they're editable at all.
-        for name in MAC_ICON_NAMES {
-            let it = NSMenuItem(title: iconRowTitle(name), action: #selector(pickIcon(_:)), keyEquivalent: "")
-            it.target = self
-            it.representedObject = name
-            iconMenu.addItem(it)
-            iconItems.append((name, it))
-        }
-        // The three device-mirroring badges (Claude usage, Codex usage, sessions),
-        // then the restriction that governs them, then - past a separator - the
-        // one that stands on its own. The
-        // grouping is what says which items "only while no device is connected"
-        // applies to, so it cannot be reordered without saying it another way.
-        for pref in [BarPref.usage, .codex, .sessions, .onlyOffline, .asking] {
-            if pref == .asking { barMenu.addItem(.separator()) }
-            let it = NSMenuItem(title: pref.label, action: #selector(toggleBarPref(_:)), keyEquivalent: "")
-            it.target = self
-            it.representedObject = pref.rawValue
-            if pref == .sessions {
-                it.toolTip = "\u{25CB} waiting on you, \u{25CF} working. Sessions needing input are counted by the row below."
-            }
-            if pref == .onlyOffline {
-                it.toolTip = "Applies to the three above. The needs-input count is unaffected."
-            }
-            barMenu.addItem(it)
-            barPrefItems.append((pref, it))
-        }
 
         sessionRows = (0..<MAX_SESSION_ROWS).map { _ in
             let it = NSMenuItem(title: "", action: #selector(openSessionFolder(_:)), keyEquivalent: "")
@@ -2059,16 +2469,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // Groups, separated: where the host stands / what quota is left / who is
-        // waiting on you / the last dictation / what you can do / logs and quit.
-        // Six actions used to run together under a single separator.
-        var items: [NSMenuItem] = [statusLine, deviceLine, battLine, .separator(), q5, q7, cxLine,
-                                   .separator(), sessionsHeader]
+        // waiting on you / the last dictation / what you can do / the app itself.
+        var items: [NSMenuItem] = [statusLine, deviceLine, .separator(),
+                                   claudeHeader, q5, q7, codexHeader, cxLine, cx2Line, usageSep,
+                                   sessionsHeader]
         items += sessionRows
-        items += [voiceSep, voiceHeard, voiceReplyItem,
-                  .separator(), startStop, deviceItem, settingsItem,
-                  .separator(),
-                  NSMenuItem(title: "Open host log", action: #selector(openLog), keyEquivalent: ""),
-                  NSMenuItem(title: "Quit Deckhand", action: #selector(quit), keyEquivalent: "q")]
+        items += [moreSessions, voiceSep, voiceHeader, voiceHeard, voiceReplyItem,
+                  .separator(), startStop, pairItem, settingsWindowItem,
+                  .separator()]
+        // Released app only: Sparkle's item sits with Quit, where Mac apps put it.
+        if isBundled { items.append(updateItem) }
+        items.append(NSMenuItem(title: "Quit Deckhand", action: #selector(quit), keyEquivalent: "q"))
         for it in items {
             it.target = self
             // An item with no action is information; one with an action is a
@@ -2091,7 +2502,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // is a worse failure than a row that does nothing when clicked. The
         // SESSIONS header is deliberately NOT in this list: it is chrome, it
         // carries no reading, and dim is what says so.
-        for it in [q5, q7, cxLine, battLine, statusLine, deviceLine] { it.isEnabled = true }
+        for it in [q5, q7, cxLine, cx2Line, statusLine, deviceLine] { it.isEnabled = true }
+        // No icons on the actions: tried, and this macOS draws no item images in a
+        // menu at all (a plain test menu with SF Symbols showed none).
         return menu
     }
 
@@ -2100,8 +2513,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if let si = statusItem, let button = si.button {
             // The bar's own thickness sets the size, so this follows a
             // 24px bar or a 22px one instead of assuming either.
-            let h = max(16, min(20, button.bounds.height - 4))
-            button.image = deckhandPaperBoatImage(size: h, style: barBoatStyle(s))
             // NO TINT, EVER - nil, deliberately, where this used to set grey for
             // stopped and orange for running-with-no-device. Those two colours
             // were not reaching the screen: with the host running and no device
@@ -2131,182 +2542,303 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             // colours are semantic (`systemRed`/`systemOrange`/`tertiaryLabel`),
             // so they follow a light bar and a dark one; and the digits and the
             // glyph both still state the fact without them.
-            let label = barTitle(s)
-            button.attributedTitle = label
-            button.imagePosition = label.length == 0 ? .imageOnly : .imageLeading
+            // The boat and everything beside it are ONE image now, laid out by
+            // size (BarTier) - see barImage for why the text title went.
+            applyBar(s, button: button)
             // The arrows are the one thing in the bar that needs a word, and this
             // is the only surface that can give them one.
             button.toolTip = barTooltip(s).isEmpty ? nil : barTooltip(s)
         }
+        // ---- the connection: what, and how ----
+        let device = s.device ?? s.selected
         if !s.running {
-            statusLine.attributedTitle = menuTitle([("◦  ", F_BODY, .secondaryLabelColor),
-                                                    ("Stopped", F_BOLD, .labelColor)])
+            statusLine.attributedTitle = menuTitle([("\u{25E6}  ", F_BODY, .secondaryLabelColor),
+                                                    ("Deckhand is stopped", F_BOLD, .labelColor)])
+            deviceLine.attributedTitle = menuTitle([("      The display is not being updated.", F_SMALL, .secondaryLabelColor)])
         } else if s.deviceConnected {
-            statusLine.attributedTitle = menuTitle([
-                ("●  ", F_BODY, .controlAccentColor), ("Syncing", F_BOLD, .labelColor),
-                (s.via.map { "  ·  \(viaLabel($0))" } ?? "", F_SMALL, .secondaryLabelColor)])
-        } else {
-            statusLine.attributedTitle = menuTitle([
-                ("◦  ", F_BODY, .systemOrange), ("Running", F_BOLD, .labelColor),
-                ("  ·  device offline", F_SMALL, .secondaryLabelColor)])
-        }
-        // The paired device becomes a sub-line of the status rather than its own
-        // "Paired:" row - same information, one row fewer, and it reads as
-        // belonging to the connection above it.
-        deviceLine.attributedTitle = menuTitle([
-            ("      ", F_SMALL, .secondaryLabelColor),
-            (s.device ?? s.selected ?? "No device paired", F_SMALL, .secondaryLabelColor)])
-
-        // Battery, as a second sub-line of the device it belongs to. Hidden when
-        // the reading is ABSENT OR STALE: BATT arrives once a minute, and the
-        // moment the link drops the last one starts aging - showing a two-hour-old
-        // level as current is the failure this whole age field exists to prevent.
-        if let pct = s.battPct, (s.battAgeSec ?? 999) < 180, (s.battState ?? 0) != 0 {
-            var note = ""
-            switch s.battState ?? 0 {
-            case 2: note = "charging"
-            case 3: note = "full"
-            default:
-                // Absent only while the device is still measuring - see
-                // battMinutesLeft() in power.ino. No placeholder, because a
-                // number derived from noise would be worse than none.
-                if let m = s.battLeftMin {
-                    note = m < 120 ? "~\(m)m left" : "~\((m + 30) / 60)h left"
+            statusLine.attributedTitle = menuTitle([("\u{25CF}  ", F_BODY, .controlAccentColor),
+                                                    ("Syncing with \(device ?? "your display")", F_BOLD, .labelColor)])
+            // How it is connected, then its battery - one line, where it was three.
+            var detail = [s.via.map { "Over " + viaLabel($0) } ?? "Connected"]
+            if let pct = s.battPct, (s.battAgeSec ?? 999) < 180, (s.battState ?? 0) != 0 {
+                switch s.battState ?? 0 {
+                case 2: detail.append("battery \(pct)%, charging")
+                case 3: detail.append("battery full")
+                default:
+                    // Hours left only once the device has measured a trend - see
+                    // battMinutesLeft() in power.ino; a guess from noise would be worse.
+                    let left = s.battLeftMin.map { $0 < 120 ? ", ~\($0)m left" : ", ~\(($0 + 30) / 60)h left" } ?? ""
+                    detail.append("battery \(pct)%\(left)")
                 }
             }
-            battLine.attributedTitle = menuTitle([
-                ("      ", F_MONO, .secondaryLabelColor),
-                ("\(pct)%", F_SMALL, pct <= 10 ? .systemOrange : .secondaryLabelColor),
-                (note.isEmpty ? "" : "  ·  \(note)", F_SMALL, .secondaryLabelColor),
-            ])
-            battLine.isHidden = false
+            let low = (s.battPct ?? 100) <= 10 && (s.battState ?? 0) == 1
+            deviceLine.attributedTitle = menuTitle([("      " + detail.joined(separator: "  \u{00B7}  "), F_SMALL,
+                                                     low ? .systemOrange : .secondaryLabelColor)])
         } else {
-            battLine.isHidden = true
+            statusLine.attributedTitle = menuTitle([("\u{25E6}  ", F_BODY, .systemOrange),
+                                                    ("Waiting for a display", F_BOLD, .labelColor)])
+            deviceLine.attributedTitle = menuTitle([("      " + (device.map { "Plug in \($0) over USB, or turn it on." }
+                                                                 ?? "Plug a Deckhand in over USB to pair it."),
+                                                     F_SMALL, .secondaryLabelColor)])
         }
 
-        // Each row carries the age of ITS OWN source: Codex's reading comes from a
-        // rollout file the host merely re-reads, so it goes stale independently of
-        // the OAuth poller. Hanging the Codex row off quotaAgeSec was a real bug
-        // on the device (see the Codex row note in CLAUDE.md) and there is no
-        // reason to repeat it here.
-        // The window each percentage belongs to, which is what turns "resets in
-        // 176m" into a POSITION. Codex's comes off the tick line (`codex=44%/7d`)
-        // because it is per-plan; a missing one costs the tick and nothing else.
-        if let pct = s.pct5h { q5.attributedTitle = quotaTitle("5h", pct, s.reset5h, s.quotaAgeSec, windowMin: WINDOW_5H_MIN) }
-        if let pct = s.pct7d { q7.attributedTitle = quotaTitle("7d", pct, s.reset7d, s.quotaAgeSec, windowMin: WINDOW_7D_MIN) }
-        if let pct = s.cxPct { cxLine.attributedTitle = quotaTitle("Codex", pct, s.cxReset, s.cxAgeSec, windowMin: s.cxWinMin) }
-        q5.isHidden = s.pct5h == nil
-        q7.isHidden = s.pct7d == nil
-        cxLine.isHidden = s.cxPct == nil
+        // ---- usage: a section per service, one line per window ----
+        let cStale = (s.quotaAgeSec ?? 0) > QUOTA_STALE_SEC
+        let xStale = (s.cxAgeSec ?? 0) > QUOTA_STALE_SEC
+        // A header says when its readings are OLD, once for the section, instead of
+        // "· stale 35m" on every row under it.
+        let ageNote = { (stale: Bool, age: Int?) in stale ? "updated \(humanMinutes((age ?? 0) / 60)) ago" : "" }
+        let claudeOn = s.pct5h != nil || s.pct7d != nil
+        let codexOn = s.cxPct != nil || s.cx2Pct != nil
+        claudeHeader.attributedTitle = menuHeader("Claude", note: ageNote(cStale, s.quotaAgeSec))
+        codexHeader.attributedTitle = menuHeader("Codex", note: ageNote(xStale, s.cxAgeSec))
+        for (item, win, pct, reset, stale, shown) in [
+            (q5, WINDOW_5H_MIN, s.pct5h, s.reset5h, cStale, claudeOn),
+            (q7, WINDOW_7D_MIN, s.pct7d, s.reset7d, cStale, claudeOn),
+            (cxLine, s.cxWinMin ?? WINDOW_5H_MIN, s.cxPct, s.cxReset, xStale, codexOn),
+            (cx2Line, s.cx2WinMin ?? WINDOW_7D_MIN, s.cx2Pct, s.cx2Reset, xStale, codexOn && s.cx2Pct != nil),
+        ] as [(NSMenuItem, Int, Int?, Int?, Bool, Bool)] {
+            // A window with no reading keeps its row (a dash) while the service has
+            // another reading - the menu's version of the bar's dash.
+            item.isHidden = !shown
+            if shown { (item.attributedTitle, item.toolTip) = quotaRow(win, pct, reset, stale: stale) }
+        }
+        claudeHeader.isHidden = !claudeOn
+        codexHeader.isHidden = !codexOn
+        usageSep.isHidden = !(claudeOn || codexOn)
 
-        // Sessions keep the ORDER THE HOST SORTED THEM INTO (asking, then waiting,
-        // then working, then recency). Re-sorting here would let the menu and the
-        // device disagree about which session matters most.
-        sessionsHeader.attributedTitle = menuTitle([("SESSIONS", F_SMALL, .tertiaryLabelColor)])
-        sessionsHeader.isHidden = s.sessions.isEmpty
+        // ---- sessions ----
+        // The header COUNTS by state, so "is anyone waiting on me" is answered
+        // before reading a single row.
+        let byState = { (st: String) in s.sessions.filter { $0.status == st }.count }
+        let counts = [(byState("asking"), "need you"), (byState("waiting"), "waiting"), (byState("working"), "working")]
+            .filter { $0.0 > 0 }.map { "\($0.0) \($0.0 == 1 && $0.1 == "need you" ? "needs you" : $0.1)" }
+        sessionsHeader.attributedTitle = menuHeader("Sessions", note: s.sessions.isEmpty ? "none right now" : counts.joined(separator: "  \u{00B7}  "))
+        sessionsHeader.isHidden = false
         for (i, row) in sessionRows.enumerated() {
             guard i < s.sessions.count else { row.isHidden = true; continue }
             let r = s.sessions[i]
             row.attributedTitle = sessionTitle(r)
-            // The whole row, not just its path: the click now needs the app and the
-            // entrypoint too, and a second parallel array would be one more thing
-            // to keep in step with this loop.
+            // The whole row, not just its path: the click needs the app and the
+            // entrypoint too, and a parallel array would be one more thing to keep
+            // in step with this loop.
             row.representedObject = r
-            // The tooltip already said what the row DOES. What it ADDS is the two
-            // facts the row cannot fit and nothing else on this Mac shows - model
-            // and git branch, the same pair the device's own detail screen pairs
-            // off. Deliberately NOT the title: the host slices that to 40
-            // characters before either surface sees it, so a tooltip could only
-            // repeat the identical clipped string. The path stays the LIVE cwd the
-            // host reports, which is what the click actually reveals - the project
-            // name on the row comes from the repo ROOT instead, so the two
-            // legitimately differ and naming the real target matters.
-            let facts = [r.model, r.branch].filter { !$0.isEmpty }.joined(separator: "  ·  ")
-            // The action line comes from the SAME resolver the click uses, so the
-            // tooltip cannot promise Finder and then open an editor.
+            // The tooltip adds the two facts the row cannot fit - model and branch -
+            // and says exactly what the click will do, from the same resolver the
+            // click uses, so it cannot promise Finder and then open an editor.
+            let facts = [r.model, r.branch].filter { !$0.isEmpty }.joined(separator: "  \u{00B7}  ")
             let action = "Click to " + describeTarget(sessionTarget(r))
             let tip = [facts, action].filter { !$0.isEmpty }.joined(separator: "\n\n")
             row.toolTip = tip.isEmpty ? nil : tip
             row.isEnabled = !r.path.isEmpty
             row.isHidden = false
         }
-        forgetItem.title = "Forget \(s.device ?? s.selected ?? "this device")…"
-        // The last dictation, which is the ONLY Mac-side trace of one - a headless
-        // `claude -p --resume` appears in no Claude Code window. The transcript is
-        // verbatim quoted text, so it renders monospaced for the same reason the
-        // device renders it in Cozette rather than prose.
+        let more = max(0, s.sessionsTotal - min(s.sessions.count, sessionRows.count))
+        moreSessions.attributedTitle = menuTitle([("      \(more) more", F_SMALL, .secondaryLabelColor)])
+        moreSessions.isHidden = more == 0
+
+        // ---- the last dictation: the only Mac-side trace of one, since a headless
+        // `claude -p --resume` appears in no Claude Code window ----
         if let t = s.voiceText, !t.isEmpty {
             let st = s.voiceState ?? ""
             let reply = (s.voiceReply?.isEmpty == false) ? s.voiceReply!
-                : (st == "sent" ? "sent to session, waiting…" : st)
-            voiceHeard.attributedTitle = menuTitle([("“\(clip(t, 42))”", F_MONO, .labelColor)])
+                : (st == "sent" ? "sent to the session, waiting\u{2026}" : st)
+            voiceHeader.attributedTitle = menuHeader("Last dictation")
+            voiceHeard.attributedTitle = menuTitle([("\u{201C}\(clip(t, 42))\u{201D}", F_MONO, .labelColor)])
             voiceReplyItem.attributedTitle = menuTitle([
-                (st == "error" ? "⚠  " : "↳  ", F_SMALL, .secondaryLabelColor),
+                (st == "error" ? "\u{26A0}  " : "\u{21B3}  ", F_SMALL, .secondaryLabelColor),
                 (clip(reply, 50), F_SMALL, st == "error" ? .systemOrange : .secondaryLabelColor)])
+            voiceHeader.isHidden = false
             voiceHeard.isHidden = false
             voiceReplyItem.isHidden = reply.isEmpty
             voiceSep.isHidden = false
         } else {
+            voiceHeader.isHidden = true
             voiceHeard.isHidden = true
             voiceReplyItem.isHidden = true
             voiceSep.isHidden = true
         }
-        remoteItem.isEnabled = s.running
-        remoteItem.state = s.remoteAnswer ? .on : .off
-        rebuildDeviceMenu(s)
-        rebuildIconMenu(s)
-        rebuildNameRow(s)
         rebuildPairRow(s)
         startStop.title = s.running ? "Stop Deckhand" : "Start Deckhand"
         // Naming the supervisor matters: with launchd in charge, a stop is permanent
         // until Start, whereas unsupervised the app's own watchdog may bring it back.
-        startStop.toolTip = isSupervised()
-            ? "Managed by launchd (starts at login, restarts if it dies)"
-            : "Not supervised - install with host/deckhand-service.sh install"
-        loginItem.state = (SMAppService.mainApp.status == .enabled) ? .on : .off
+        startStop.toolTip = hostSupervisionText()
         // The EDGE into asking, not the state - and stepped on every refresh even
         // when silent, so switching a sound on does not then announce a backlog
         // the watcher never saw. dryRun covers --menu-dump: a diagnostic must
         // not make a noise.
         let asking = Set(s.sessions.filter { $0.status == "asking" }.map { $0.id })
         if askWatcher.step(asking) > 0 && !dryRun { playAskSound() }
+        // The window reads the same snapshot, and only while it is ON SCREEN: the
+        // controller is kept after a close (so it reopens where it was), and a
+        // hidden SwiftUI tree re-rendered every 3s is work nobody sees.
+        if let w = settingsWindow, w.window.isVisible { w.model.pull(s, bar: statusItem?.button) }
 
-        colourItem.state = colourfulIcon ? .on : .off
-        colourItem.toolTip = "Off draws it in the system's own menu-bar colour, which follows light and dark bars."
-        for (name, it) in soundItems { it.state = (name == askSoundName) ? .on : .off }
-        for (pref, it) in barPrefItems {
-            it.state = pref.on ? .on : .off
-            // The restriction is meaningless with nothing left for it to
-            // restrict, and a live checkbox that changes nothing is worse than a
-            // dimmed one that explains itself.
-            if pref == .onlyOffline { it.isEnabled = BarPref.usage.on || BarPref.codex.on || BarPref.sessions.on }
-        }
-
-        // Watchdog: if syncing is meant to be on but the host has been down or
-        // frozen (stale heartbeat) for a sustained window, restart it. Only
-        // acts when wantRunning, so a deliberate Stop is honored. The 30s
-        // cooldown avoids re-restarting while a fresh host is still connecting.
-        // Skipped entirely when launchd owns the host: it restarts a dead process within
-        // a second and survives reboots, which is strictly better than this loop, and
-        // two supervisors racing each other is worse than either alone.
         if dryRun { return }
         // AFTER the dryRun guard, deliberately: --menu-dump and --menu-preview
         // build the real menu and refresh it, and a diagnostic that pops a modal
         // dialog on someone's desktop is the same class of problem as one that
         // makes a noise.
         pairTick(s)
-        if wantRunning && !s.running && !isSupervised() {
-            if downSince == nil { downSince = Date() }
-            else if Date().timeIntervalSince(downSince!) > 20,
-                    Date().timeIntervalSince(lastRestart) > 30 {
-                NSLog("Deckhand watchdog: host down, restarting")
-                lastRestart = Date()
-                downSince = nil
-                startHost()
+        watchdog(s)
+    }
+
+    /// Who keeps the host alive, in one sentence - the Start/Stop tooltip and the
+    /// Settings window's General pane say the same thing.
+    func hostSupervisionText() -> String {
+        if isBundled {
+            switch ServiceState.shared.agent {
+            case .enabled: return "Runs in the background: starts at login, restarts if it stops or hangs."
+            case .requiresApproval: return "Turned off in System Settings \u{203A} General \u{203A} Login Items."
+            default: return "Not running in the background."
+            }
+        }
+        return isSupervised()
+            ? "Managed by launchd: starts at login, restarts if it stops or hangs."
+            : "Not supervised - install with host/deckhand-service.sh install."
+    }
+
+    /// THE WATCHDOG: syncing is meant to be on, and the heartbeat has been stale
+    /// for a sustained window. Only acts when wantRunning, so a deliberate Stop is
+    /// honoured; the cooldown keeps it from re-restarting a host still connecting.
+    ///
+    /// It now covers a SUPERVISED host too, because launchd's KeepAlive restarts a
+    /// process that EXITS and never one that HANGS. Measured on the released app:
+    /// a host frozen with SIGSTOP sat there with a 47s-old heartbeat, the menu said
+    /// "Stopped", and nothing would ever have recovered it - the old watchdog was
+    /// switched off whenever launchd was in charge, on the reasoning that launchd
+    /// was strictly better, which is only true of crashes. Supervised, the restart
+    /// goes THROUGH launchd (`kickstart -k`), so there is still one supervisor and
+    /// this is just its missing hang detector. The wait is longer than the
+    /// unsupervised one because launchd brings a crashed host back by itself
+    /// within a second or two, and this must not race that.
+    func watchdog(_ s: HostStatus) {
+        if s.running { watchdogGaveUp = false }
+        let supervised = isSupervised()
+        guard wantRunning, !s.running, !(isBundled && !SetupFlow.done),
+              !(isBundled && !supervised) else { downSince = nil; return }
+        guard let since = downSince else { downSince = Date(); return }
+        let wait: TimeInterval = supervised ? 30 : 20
+        let cooldown: TimeInterval = supervised ? 60 : 30
+        guard Date().timeIntervalSince(since) > wait, Date().timeIntervalSince(lastRestart) > cooldown else { return }
+        lastRestart = Date()
+        downSince = nil
+        if supervised {
+            guard !watchdogGaveUp else { return }
+            let label = isBundled ? agentLabel : "com.deckhand.host"
+            // The log says what HAPPENED, not what was attempted. A repo agent stopped
+            // from a terminal (`deckhand-service.sh stop`: booted out, plist kept)
+            // still counts as supervised, and kickstart then fails with "Could not
+            // find service" - which used to be logged as a restart every 90s forever.
+            // One line saying so, then nothing until the host is seen running again.
+            // (Review finding.)
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                let r = runCapture("/bin/launchctl", ["kickstart", "-k", "gui/\(getuid())/\(label)"])
+                DispatchQueue.main.async {
+                    if r.status == 0 {
+                        noteInHostLog("menu-bar watchdog: no heartbeat for \(Int(wait))s - restarted the host (launchctl kickstart -k \(label))")
+                    } else {
+                        noteInHostLog("menu-bar watchdog: no heartbeat for \(Int(wait))s, but launchd could not restart \(label) (\(r.out.trimmingCharacters(in: .whitespacesAndNewlines))). Stopped from a terminal? Not retrying until the host is running again.")
+                        self?.watchdogGaveUp = true
+                    }
+                }
             }
         } else {
-            downSince = nil
+            NSLog("Deckhand watchdog: host down, restarting")
+            startHost()
         }
+    }
+
+    // ---- the bar item's size (BarTier) -------------------------------------
+
+    /// The largest size known to fit on the current displays, for Automatic.
+    var fitTier: BarTier = barStartTier()
+    /// What the button is showing, so an unchanged bar is not re-set every 3s.
+    var barShown: (model: BarModel, style: BoatStyle, colourful: Bool, height: CGFloat)?
+    var barHiddenSince: Date?
+    /// macOS is hiding the item even at the size in use - nothing smaller to try.
+    var barHidden = false
+    var barFitNote = ""
+
+    /// Sizes stepped down to WHILE A GIVEN APP WAS FRONTMOST. On a notched Mac the
+    /// frontmost app's own menus share the bar, so an app with long menus (Xcode,
+    /// Office) can push status items off it - and a single size for everything
+    /// ratcheted down in such an app and never came back. (Review finding.) Each app
+    /// remembers its own; every other app keeps `fitTier`.
+    var fitByApp: [String: BarTier] = [:]
+    func frontApp() -> String { NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "" }
+
+    var barTier: BarTier { BarSize.current.tier ?? fitByApp[frontApp()] ?? fitTier }
+
+    func applyBar(_ s: HostStatus, button: NSStatusBarButton) {
+        let h = NSStatusBar.system.thickness
+        let m = barModel(s, tier: barTier)
+        let style = barBoatStyle(s)
+        if let shown = barShown, shown.model == m, shown.style == style,
+           shown.colourful == colourfulIcon, shown.height == h {
+            checkBarFit()
+            return
+        }
+        button.image = barImage(m, boat: style, colourful: colourfulIcon, height: h)
+        button.title = ""
+        button.imagePosition = .imageOnly
+        barShown = (m, style, colourfulIcon, h)
+        // A new width is when macOS decides again whether the item fits.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in self?.checkBarFit() }
+    }
+
+    /// AUTOMATIC'S ONE SIGNAL, and it was measured rather than assumed. An item macOS
+    /// has no room for keeps its window, but the window is parked OFF-SCREEN (y = -30)
+    /// and its `screen` is nil - while `occlusionState` still claims it is visible,
+    /// so occlusion cannot be used. (Probed with items of 60 to 5,000pt on this Mac.)
+    /// Other apps' items cannot be measured at all on this macOS - the whole bar is
+    /// one MenuBarAgent window - so "am I hidden" is the only question answerable.
+    /// Hidden for a second (not a single frame of a display change) steps Automatic
+    /// down one size; a chosen size that does not fit is reported in Settings.
+    /// Skipped while the menu bar itself is hidden (a full-screen app), when every
+    /// item is off-screen and none of it means anything.
+    func checkBarFit() {
+        guard !dryRun, let win = statusItem?.button?.window, NSMenu.menuBarVisible() else { return }
+        // `screen == nil` ALONE: a display arranged below the main one has negative y,
+        // so a coordinate test would call a visible item hidden there. (Review finding;
+        // the off-screen parking measured with screen == nil every time.)
+        let hidden = win.screen == nil
+        guard hidden else { barHiddenSince = nil; barHidden = false; return }
+        guard let since = barHiddenSince else {
+            barHiddenSince = Date()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in self?.checkBarFit() }
+            return
+        }
+        guard Date().timeIntervalSince(since) >= 1 else { return }
+        barHiddenSince = nil
+        if BarSize.current == .automatic, let smaller = barTier.smaller {
+            let app = NSWorkspace.shared.frontmostApplication
+            let name = app?.localizedName ?? "the frontmost app"
+            barFitNote = "\(barTier.title) did not fit in the menu bar while \(name) was in front, so Deckhand uses \(smaller.title) there."
+            NSLog("Deckhand: %@", barFitNote)
+            fitByApp[app?.bundleIdentifier ?? ""] = smaller
+            barShown = nil
+            refresh()
+        } else {
+            barHidden = true
+        }
+    }
+
+    /// The space in the menu bar is a property of the DISPLAYS, so it is worth asking
+    /// again only when they change - a display plugged in, the lid opened, the Mac
+    /// waking. Retrying on a timer would make the item flicker out and back.
+    func resetBarFit() {
+        fitTier = barStartTier()
+        fitByApp = [:]
+        barFitNote = ""
+        barHidden = false
+        barShown = nil
+        refresh()
+    }
+
+    func setBarSize(_ size: BarSize) {
+        BarSize.current = size
+        resetBarFit()
     }
 
     func run(_ path: String, _ args: [String]) {
@@ -2320,6 +2852,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // macOS still thinks is running, so a frozen node would just get
     // re-activated), then launch a fresh one.
     func startHost() {
+        if isBundled { startBundledHost(); return }
         if isSupervised() {
             // `bootstrap` via the service script, so the agent is loaded and KeepAlive
             // takes over from here. No pkill: there is nothing to force-clear, and
@@ -2339,6 +2872,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func stopHost() {
+        if isBundled {
+            // unregister() unloads the job, which is the only real stop under
+            // KeepAlive - the same meaning as deckhand-service.sh stop. Start
+            // registers it again.
+            do { try hostAgent().unregister() } catch { NSLog("Deckhand: unregister failed: \(error)") }
+            // And any host OUTSIDE the agent - the one setup opens for the Bluetooth
+            // prompt, if its window was closed mid-prompt. unregister() cannot see it,
+            // and a Stop that leaves a host running is no stop. (Review finding.)
+            _ = runCapture("/usr/bin/pkill", ["-f", bundledHostScript])
+            ServiceState.shared.refresh()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.refresh() }
+            return
+        }
         if isSupervised() {
             // `bootout` UNLOADS the job, which is the only thing that actually stops it.
             // A plain kill is reversed by KeepAlive within a second.
@@ -2363,249 +2909,117 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    // ---- what the Settings window does -------------------------------------
+    //
+    // One function per setting, each doing EXACTLY what its menu item used to do
+    // (the same trigger-file line, the same UserDefaults key), so moving a control
+    // from a submenu into a window changed where it is and nothing about what it
+    // means. The window never writes either store itself.
+
+    /// Write one line to the host's trigger file, then re-read twice: once at once,
+    /// so the window shows the choice before the host has acted, and once after the
+    /// host has had a tick to make it true.
+    func sendCommand(_ line: String) {
+        try? line.write(toFile: commandTriggerPath, atomically: true, encoding: .utf8)
+        refresh()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in self?.refresh() }
+    }
+
     // Purely a Mac-side display choice - nothing is written to the command file
     // and the host is not told, because the host does not care what its own
     // numbers are rendered as.
-    @objc func toggleBarPref(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String, let pref = BarPref(rawValue: raw) else { return }
-        pref.toggle()
+    func setBarPref(_ pref: BarPref, _ on: Bool) {
+        UserDefaults.standard.set(on, forKey: pref.rawValue)
         refresh()
     }
 
-    @objc func toggleColourfulIcon() {
-        UserDefaults.standard.set(!colourfulIcon, forKey: "colourfulIcon")
+    func setColourfulIcon(_ on: Bool) {
+        UserDefaults.standard.set(on, forKey: "colourfulIcon")
         refresh()
     }
 
     // Picking a sound PLAYS it, which is the only way to judge one, and Off is
     // silent for the same reason - a preview of silence is not a thing.
-    @objc func pickAskSound(_ sender: NSMenuItem) {
-        guard let name = sender.representedObject as? String else { return }
+    func setAskSound(_ name: String) {
         UserDefaults.standard.set(name, forKey: "askSound")
         playAskSound()
         refresh()
     }
 
-    @objc func toggleLogin() {
+    func setLaunchAtLogin(_ on: Bool) {
         do {
-            if SMAppService.mainApp.status == .enabled {
-                try SMAppService.mainApp.unregister()
-            } else {
-                try SMAppService.mainApp.register()
-            }
+            if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
         } catch {
-            let a = NSAlert()
-            a.messageText = "Couldn't change the login item"
-            a.informativeText = "\(error.localizedDescription)\n\nAd-hoc-signed apps sometimes can't self-register; moving Deckhand to /Applications usually fixes it."
-            a.runModal()
+            alert("Couldn't change the login item",
+                  "\(error.localizedDescription)\n\nMoving Deckhand to the Applications folder usually fixes it.")
         }
-        refresh()
-    }
-
-    // The Device submenu: every paired device, a checkmark on the chosen one,
-    // plus "Any device" to let the host take whichever it finds. Rebuilt on each
-    // refresh so newly paired units appear without restarting the app.
-    func rebuildDeviceMenu(_ s: HostStatus) {
-        deviceMenu.removeAllItems()
-        deviceItem.isEnabled = s.running
-        // Settings stays reachable with the host DOWN: launch-at-login and the
-        // bar's own contents are still meaningful choices, and a preferences door
-        // that only opens while a background process is alive is its own bug.
-        settingsItem.isEnabled = true
-        barItem.isEnabled = true
-        soundItem.isEnabled = true
-        // Answering can only be toggled through the host, so it dims with it -
-        // the same rule deviceItem follows.
-        remoteItem.isEnabled = s.running
-        if s.devices.isEmpty {
-            let none = NSMenuItem(title: "No devices paired yet", action: nil, keyEquivalent: "")
-            none.isEnabled = false
-            deviceMenu.addItem(none)
-            return
-        }
-        let any = NSMenuItem(title: "Any device", action: #selector(selectDevice(_:)), keyEquivalent: "")
-        any.target = self
-        any.isEnabled = true
-        any.representedObject = ""            // "" = auto
-        any.state = (s.selected == nil) ? .on : .off
-        deviceMenu.addItem(any)
-        deviceMenu.addItem(NSMenuItem.separator())
-        for name in s.devices {
-            // Mark the one we're actually connected to, which may differ from
-            // the choice while it's out of range.
-            let live = (name == s.device && s.deviceConnected)
-            let item = NSMenuItem(title: live ? "\(name)  ·  connected" : name,
-                                  action: #selector(selectDevice(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = name
-            item.state = (name == s.selected) ? .on : .off
-            item.isEnabled = true
-            deviceMenu.addItem(item)
-        }
-        // Forget lives HERE, not in the top-level menu: it is a destructive
-        // per-device action and this is where the devices are. It is still named
-        // explicitly, so it forgets the one shown rather than whatever is current
-        // when the host reads the trigger file.
-        deviceMenu.addItem(.separator())
-        forgetItem.isEnabled = s.running && (s.device ?? s.selected) != nil
-        deviceMenu.addItem(forgetItem)
-    }
-
-    // Switching is instant and harmless (the host just re-points its BLE scan),
-    // so no confirmation - unlike Forget, which destroys a key.
-    @objc func selectDevice(_ sender: NSMenuItem) {
-        let name = (sender.representedObject as? String) ?? ""
-        try? "SELECT \(name)".write(toFile: commandTriggerPath, atomically: true, encoding: .utf8)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.refresh() }
-    }
-
-    // WHICH of the sixteen is live. One function because two things now render
-    // it - the checkmark and the parent row's glyph - and a picker whose tick
-    // and whose picture disagreed would be worse than either alone.
-    //
-    // The host has already resolved env-vs-file (resolveMacEmoji, env wins), so
-    // s.icon IS the live value regardless of which source it came from - no
-    // separate branch needed for the env case here. That reading is only fresh
-    // while the host is actually running (readStatus only fills it inside its
-    // "running" branch); with the host down, fall back to what was last picked
-    // from this menu, so the checkmark survives a relaunch instead of going
-    // blank.
-    func iconRowCurrent(_ s: HostStatus) -> String {
-        s.running ? s.icon : (UserDefaults.standard.string(forKey: "macIcon") ?? "")
-    }
-
-    // The Mac-icon submenu: sixteen fixed rows, one checkmarked. Rebuilt every
-    // refresh (not just built once, unlike a static preference row) because
-    // BOTH the checkmark and whether the rows are editable at all come from the
-    // host's heartbeat, which can change out from under this app - a picker
-    // showing changeable checkmarks while DECKHAND_MAC_EMOJI is set would be
-    // lying about what a click can do.
-    func rebuildIconMenu(_ s: HostStatus) {
-        let current = iconRowCurrent(s)
-        // The parent carries the CURRENT glyph, so the setting is legible without
-        // opening the submenu at all - and it is the one row that can show which
-        // of the sixteen an env-set value resolved to without implying a click
-        // could change it. Nothing when none is set, rather than a placeholder:
-        // no icon is a real state (the device falls back to the text tag).
-        let glyph = MAC_ICON_GLYPHS[current].map { "  \($0)" } ?? ""
-        iconItem.title = (s.iconFromEnv ? "Mac icon (set by env)" : "Mac icon") + glyph
-        for (name, item) in iconItems {
-            item.state = (!current.isEmpty && name == current) ? .on : .off
-            // Only the CHILDREN are disabled - the parent stays clickable so
-            // the (now-inert) list can still be opened and read, the same way
-            // Settings itself stays reachable with the host down.
-            item.isEnabled = !s.iconFromEnv
-        }
-    }
-
-    // Writes EMOJI <name> to the trigger file - the same mechanism SELECT and
-    // FORGET already use - and stores it in UserDefaults so the checkmark is
-    // right immediately and survives a relaunch even before the host's own
-    // heartbeat catches up. Validating the name and persisting it to
-    // ~/.claude/deckhand-mac-emoji both already happen on the host
-    // (host/mac-emoji.mjs) and are deliberately NOT repeated here.
-    @objc func pickIcon(_ sender: NSMenuItem) {
-        guard let name = sender.representedObject as? String else { return }
-        UserDefaults.standard.set(name, forKey: "macIcon")
-        try? "EMOJI \(name)".write(toFile: commandTriggerPath, atomically: true, encoding: .utf8)
-        refresh()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.refresh() }
+        ServiceState.shared.refresh { [weak self] in self?.refresh() }
     }
 
     // On (the default) the device can answer prompts as well as show them, and
     // that costs the Mac nothing - Claude Code's dialog stays on screen the whole
     // time, so the two surfaces race and the first answer wins. No confirmation
     // needed in either direction; off simply makes the device read-only.
-    @objc func toggleRemoteAnswer() {
-        let s = readStatus()
-        try? "REMOTE \(s.remoteAnswer ? "off" : "on")"
-            .write(toFile: commandTriggerPath, atomically: true, encoding: .utf8)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.refresh() }
+    func setRemoteAnswer(_ on: Bool) { sendCommand("REMOTE \(on ? "on" : "off")") }
+
+    // Switching is instant and harmless (the host just re-points its BLE scan),
+    // so no confirmation - unlike Forget, which destroys a key. "" = any device.
+    func selectDevice(_ name: String) { sendCommand("SELECT \(name)") }
+
+    /// WHICH of the sixteen is live. The host has already resolved env-vs-file
+    /// (resolveMacEmoji, env wins), so s.icon IS the live value whichever source
+    /// it came from. That reading is only fresh while the host is running; with it
+    /// down, fall back to what was last picked here, so the choice survives a
+    /// relaunch instead of going blank.
+    func currentIcon(_ s: HostStatus) -> String {
+        s.running ? s.icon : (UserDefaults.standard.string(forKey: "macIcon") ?? "")
     }
 
-    // "Mac name: pro" - the setting legible without opening anything, like the
-    // icon row's glyph. Disabled, and saying why, in the two states where a
-    // click could not work: the host is down (nothing would read the command,
-    // and the dialog could not show the current name) or DECKHAND_MAC_TAG pins
-    // it (a rename would be accepted and then never shown).
-    func rebuildNameRow(_ s: HostStatus) {
-        guard s.running else {
-            nameItem.title = "Mac name\u{2026}"
-            nameItem.isEnabled = false
-            return
-        }
-        let shown = s.macTag.isEmpty ? "" : ": \(s.macTag)"
-        switch s.macTagSource {
-        case "env":
-            nameItem.title = "Mac name\(shown) (set by env)"
-            nameItem.isEnabled = false
-        case "auto":
-            nameItem.title = "Mac name\(shown) (automatic)\u{2026}"
-            nameItem.isEnabled = true
-        default:
-            nameItem.title = "Mac name\(shown)\u{2026}"
-            nameItem.isEnabled = true
-        }
+    // Writes EMOJI <name> - the mechanism SELECT and FORGET use - and stores it in
+    // UserDefaults so the choice is right immediately and survives a relaunch even
+    // before the host's heartbeat catches up. Validating the name and persisting it
+    // to ~/.claude/deckhand-mac-emoji both happen on the host (host/mac-emoji.mjs)
+    // and are deliberately NOT repeated here.
+    func setIcon(_ name: String) {
+        UserDefaults.standard.set(name, forKey: "macIcon")
+        sendCommand("EMOJI \(name)")
     }
 
-    // Writes MACTAG <name> to the trigger file, the EMOJI/FORGET mechanism. The
-    // host sanitises (letters and digits, lowercase, 6 at most - the device's
-    // fonts are ASCII and the tag lane is measured for six) and persists it to
+    // MACTAG <name>; a bare MACTAG returns to the automatic name. The host
+    // sanitises (letters and digits, lowercase, 6 at most - the device's fonts are
+    // ASCII and the tag lane is measured for six) and persists it to
     // ~/.claude/deckhand-mac-tag; none of that is repeated here, so the two can
-    // never disagree. A bare MACTAG returns to the automatic name.
-    @objc func editMacName() {
-        let s = readStatus()
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 24))
-        field.stringValue = s.macTagSource == "name" ? s.macTag : ""
-        field.placeholderString = s.macTagAuto.isEmpty ? "home" : s.macTagAuto
-        let a = NSAlert()
-        a.messageText = "Name this Mac"
-        a.informativeText = "Shown on the Deckhand beside this Mac's sessions and projects whenever two Macs are connected, so you can tell them apart. Up to 6 letters or digits; it is shown in lowercase.\n\nEach Mac names itself: set the other one from its own menu."
-        a.accessoryView = field
-        a.addButton(withTitle: "Save")
-        a.addButton(withTitle: "Cancel")
-        // Only offered when there is a name to undo - "automatic" is already
-        // what an unnamed Mac is.
-        if s.macTagSource == "name" {
-            a.addButton(withTitle: s.macTagAuto.isEmpty ? "Use automatic" : "Use automatic (\(s.macTagAuto))")
-        }
-        // A menu-bar app is never the active one, so without this the field
-        // would not take the keyboard until clicked.
-        NSApp.activate(ignoringOtherApps: true)
-        a.window.initialFirstResponder = field
-        let r = a.runModal()
-        let line: String
-        switch r {
-        case .alertFirstButtonReturn:
-            let typed = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            // Save with an empty field is "no name", the same as Use automatic.
-            line = typed.isEmpty ? "MACTAG" : "MACTAG \(typed)"
-        case .alertThirdButtonReturn:
-            line = "MACTAG"
-        default:
-            return
-        }
-        try? line.write(toFile: commandTriggerPath, atomically: true, encoding: .utf8)
-        refresh()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.refresh() }
+    // never disagree.
+    func setMacName(_ name: String) {
+        let typed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        sendCommand(typed.isEmpty ? "MACTAG" : "MACTAG \(typed)")
     }
 
     // Drop this pairing and its key. The device keeps its own copy until a new
-    // Mac re-provisions it, so this is reversible by plugging it back in.
-    @objc func forgetDevice() {
-        let s = readStatus()
-        let target = s.device ?? s.selected
+    // Mac re-provisions it, so this is reversible by plugging it back in. Named
+    // explicitly, so it forgets the one the person clicked, not whatever is
+    // current by the time the host reads the trigger file.
+    func forgetDevice(_ name: String) {
         let a = NSAlert()
-        a.messageText = target.map { "Forget \($0)?" } ?? "Forget the paired device?"
-        a.informativeText = "This Mac drops that device's pairing key. It re-pairs automatically the next time you connect it over USB; your other paired devices are unaffected.\n\nTo clear the device's own side too, use its \"Reset pairing\" button (Settings › Actions), or forget just this Mac from Settings › Paired Macs."
+        a.messageText = "Forget \(name)?"
+        a.informativeText = "This Mac drops that device's pairing key. It re-pairs automatically the next time you connect it over USB; your other paired devices are unaffected.\n\nTo clear the device's own side too, use its \"Reset pairing\" button (Settings \u{203A} Actions), or forget just this Mac from Settings \u{203A} Paired Macs."
         a.addButton(withTitle: "Forget")
         a.addButton(withTitle: "Cancel")
+        a.buttons.first?.hasDestructiveAction = true
+        NSApp.activate(ignoringOtherApps: true)
         guard a.runModal() == .alertFirstButtonReturn else { return }
-        // Name it explicitly so we forget the one shown, not whatever is current
-        // by the time the host reads the trigger file.
-        try? "FORGET \(target ?? "")".trimmingCharacters(in: .whitespaces)
-            .write(toFile: commandTriggerPath, atomically: true, encoding: .utf8)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.refresh() }
+        sendCommand("FORGET \(name)")
+    }
+
+    @objc func openSettings() { showSettings(pane: nil) }
+
+    func showSettings(pane: SettingsPane?) {
+        if settingsWindow == nil { settingsWindow = SettingsWindowController(app: self) }
+        settingsWindow?.model.pull(readStatus(), bar: statusItem?.button)
+        ServiceState.shared.refresh { [weak self] in
+            self?.settingsWindow?.model.pullServices()
+        }
+        settingsWindow?.show(pane: pane)
     }
 
     /// Jump to where the session actually LIVES, falling back to the folder. It
@@ -2626,7 +3040,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         pairItem.isEnabled = true
         pairItem.title = pairInFlight(s)
             ? "Pairing with \(s.pairing.name.isEmpty ? "a device" : s.pairing.name)\u{2026}"
-            : "Pair new device\u{2026}"
+            : "Pair New Device\u{2026}"
         // One wording for a sighting and for a state, shared with the window.
         pairItem.toolTip = pairStatusText(s)
     }
@@ -3057,6 +3471,762 @@ func writeIconPreview(to path: String) {
     print("sizes left->right: \(sizes.map { Int($0) })")
 }
 
+// MARK: - The released app: its host, its hooks, its setup, its uninstall
+//
+// Everything below runs only when isBundled. The dev build compiles it and never
+// reaches it, which keeps one source file and one set of renderers for both.
+
+/// Running from the DMG, or from the read-only copy Gatekeeper makes of an app that
+/// was opened where it was downloaded. The hooks would point INTO that path, and the
+/// agent's program with them, and both vanish when the disk image is ejected.
+func runningFromTemporaryLocation() -> Bool {
+    bundlePath.contains("/AppTranslocation/") || bundlePath.hasPrefix("/Volumes/")
+}
+
+/// A host from a source checkout (install.sh's agent, or DeckhandBLE.app opened by the
+/// dev menu app). Two hosts fight over the serial port and over BLE, and they share
+/// one heartbeat path, so this menu could not even tell which one it was reading.
+func legacyHostPresent() -> Bool {
+    FileManager.default.fileExists(atPath: launchdPlist())
+        || runCapture("/usr/bin/pgrep", ["-f", "DeckhandBLE.app"]).status == 0
+        || legacyMenuAppRunning()
+}
+
+/// The repo-built menu app (com.deckhand.menubar). Quitting it is not enough on its
+/// own: it is usually a LOGIN ITEM, so it came back at the next login as a second
+/// boat in the menu bar - and one app cannot remove another's login item, so setup
+/// opens Login Items for the person to do it (stopLegacyHost).
+func legacyMenuAppRunning() -> Bool {
+    !NSRunningApplication.runningApplications(withBundleIdentifier: "com.deckhand.menubar").isEmpty
+}
+
+/// Stop the checkout's host for good, without deleting anything: unload its agent,
+/// MOVE its plist into ~/Deckhand-backups (so it does not return at login), quit the
+/// dev menu app and clear its "keep the host running" intent, since its watchdog
+/// would otherwise open DeckhandBLE.app again within a minute.
+func stopLegacyHost() {
+    _ = runCapture("/bin/launchctl", ["bootout", "gui/\(getuid())/com.deckhand.host"])
+    let fm = FileManager.default
+    if fm.fileExists(atPath: launchdPlist()) {
+        let dir = (NSHomeDirectory() as NSString).appendingPathComponent("Deckhand-backups")
+        try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        let stamp = Int(Date().timeIntervalSince1970)
+        try? fm.moveItem(atPath: launchdPlist(), toPath: "\(dir)/com.deckhand.host.plist-\(stamp)")
+    }
+    UserDefaults(suiteName: "com.deckhand.menubar")?.set(false, forKey: "wantRunning")
+    let menuApp = legacyMenuAppRunning()
+    for a in NSRunningApplication.runningApplications(withBundleIdentifier: "com.deckhand.menubar") { a.terminate() }
+    _ = runCapture("/usr/bin/pkill", ["-f", "DeckhandBLE.app"])
+    if menuApp { DispatchQueue.main.async { SMAppService.openSystemSettingsLoginItems() } }
+}
+
+/// Run a tool to completion and keep what it said - the installers' output is what
+/// an error alert quotes, so "it failed" never arrives without its reason.
+@discardableResult
+func runCapture(_ path: String, _ args: [String]) -> (status: Int32, out: String) {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: path)
+    p.arguments = args
+    let pipe = Pipe()
+    p.standardOutput = pipe
+    p.standardError = pipe
+    do { try p.run() } catch { return (-1, error.localizedDescription) }
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    p.waitUntilExit()
+    return (p.terminationStatus, String(data: data, encoding: .utf8) ?? "")
+}
+
+/// One line into the host's own log, so "why did the host restart at 3am" is
+/// answered where anyone would look. Appended whole (one write of one line), the
+/// same way the host appends, so the two cannot interleave mid-line.
+func noteInHostLog(_ text: String) {
+    let f = ISO8601DateFormatter()
+    let line = "\(f.string(from: Date())) \(text)\n"
+    if let h = FileHandle(forWritingAtPath: logPath) {
+        h.seekToEndOfFile()
+        h.write(line.data(using: .utf8)!)
+        try? h.close()
+    }
+    NSLog("Deckhand: %@", text)
+}
+
+/// When the heartbeat was last written. readStatus() only says "under 12s old", which
+/// cannot tell a host that just started from one that was killed 3 seconds ago.
+func heartbeatDate() -> Date? {
+    (try? FileManager.default.attributesOfItem(atPath: heartbeatPath))?[.modificationDate] as? Date
+}
+
+/// The Claude Code / Codex hooks, installed with the BUNDLED Node through runnerLink.
+/// The installers are the repo's own (claude-hooks/), so the rules about what is ours
+/// and what is yours are exactly install.sh's - see hook-command.mjs.
+enum Hooks {
+    static let scripts = ["deckhand-session-hook.mjs", "deckhand-statusline.mjs"]
+    static var codexPresent: Bool {
+        FileManager.default.fileExists(atPath: (NSHomeDirectory() as NSString).appendingPathComponent(".codex"))
+    }
+    /// The user agreed once. Updates then re-copy without asking again; Remove clears it.
+    static var consented: Bool {
+        get { UserDefaults.standard.bool(forKey: "hooksConsented") }
+        set { UserDefaults.standard.set(newValue, forKey: "hooksConsented") }
+    }
+
+    static func node(_ script: String, _ args: [String]) -> (status: Int32, out: String) {
+        runCapture(helperNode, [bundledHooksDir + "/" + script] + args)
+    }
+
+    static func pointRunner() throws {
+        let fm = FileManager.default
+        try fm.createDirectory(atPath: claudeDir, withIntermediateDirectories: true)
+        if (try? fm.destinationOfSymbolicLink(atPath: runnerLink)) == helperNode { return }
+        try? fm.removeItem(atPath: runnerLink)
+        try fm.createSymbolicLink(atPath: runnerLink, withDestinationPath: helperNode)
+    }
+
+    /// nil on success, otherwise what went wrong in words. Backs up FIRST, and a
+    /// failed backup stops it - install.sh's rule, because the copy below replaces two
+    /// files the settings.json backup does not cover.
+    /// install() and remove() run one at a time. The launch-time refresh runs on a
+    /// background queue and Settings › Reinstall can land at the same moment; two
+    /// installers reading the same settings.json and both writing would lose one.
+    static let lock = NSLock()
+
+    static func install() -> String? {
+        lock.lock(); defer { lock.unlock() }
+        do { try pointRunner() } catch { return "Could not create \(runnerLink): \(error.localizedDescription)" }
+        let b = node("deckhand-backup.mjs", ["backup"])
+        if b.status != 0 { return "The backup failed, so nothing was changed.\n\n\(b.out)" }
+        let fm = FileManager.default
+        for f in scripts {
+            // Copied beside, then RENAMED over the old one: rename is atomic, so a hook
+            // firing mid-update runs the old script or the new one, never a missing
+            // file. (Delete-then-copy left a window with neither.)
+            let dst = claudeDir + "/" + f, tmp = dst + ".deckhand-new"
+            try? fm.removeItem(atPath: tmp)
+            do {
+                try fm.copyItem(atPath: bundledHooksDir + "/" + f, toPath: tmp)
+                guard rename(tmp, dst) == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+            } catch {
+                try? fm.removeItem(atPath: tmp)
+                return "Could not copy \(f) into ~/.claude: \(error.localizedDescription)"
+            }
+        }
+        let r = node("install-hooks.mjs", ["--node", runnerLink])
+        if r.status != 0 { return "Installing the Claude Code hooks failed.\n\n\(r.out)" }
+        if codexPresent {
+            let c = node("install-codex-hooks.mjs", ["--node", runnerLink])
+            if c.status != 0 { return "The Claude Code hooks are installed, but the Codex hooks failed.\n\n\(c.out)" }
+        }
+        consented = true
+        UserDefaults.standard.set(appBuild, forKey: "hooksBuild")
+        return nil
+    }
+
+    /// Takes out exactly what install() put in, either form (hook-command.mjs), and
+    /// leaves every other hook and the user's own statusLine alone.
+    static func remove() -> String? {
+        lock.lock(); defer { lock.unlock() }
+        _ = node("deckhand-backup.mjs", ["backup"])
+        var problems: [String] = []
+        let r = node("install-hooks.mjs", ["--remove"])
+        if r.status != 0 { problems.append(r.out) }
+        if codexPresent {
+            let c = node("install-codex-hooks.mjs", ["--remove"])
+            if c.status != 0 { problems.append(c.out) }
+        }
+        // ONLY when the hooks are actually out of settings.json. If --remove failed (a
+        // settings.json that is not valid JSON, say), the entries still name these
+        // files, and deleting them would make every Claude Code event run a command
+        // that cannot start - the failure install-hooks.mjs's own header warns about.
+        guard problems.isEmpty else {
+            return "Nothing was deleted: the hooks are still registered, so their scripts stay.\n\n" + problems.joined(separator: "\n")
+        }
+        for f in scripts + ["deckhand-node"] { try? FileManager.default.removeItem(atPath: claudeDir + "/" + f) }
+        consented = false
+        return nil
+    }
+
+    /// At every launch: keep the link pointing at THIS copy of the app, and after an
+    /// update bring the scripts up to the new build. Silent, and only ever after the
+    /// user said yes once.
+    static func afterLaunch() {
+        guard consented else { return }
+        if UserDefaults.standard.string(forKey: "hooksBuild") != appBuild {
+            if let err = install() { NSLog("Deckhand: hook refresh after update failed: \(err)") }
+        } else {
+            try? pointRunner()
+        }
+    }
+
+    enum State { case installed, notInstalled, fromSource, needsRepair }
+
+    static func state() -> State {
+        let fm = FileManager.default
+        guard let text = try? String(contentsOfFile: claudeDir + "/settings.json", encoding: .utf8),
+              text.contains("deckhand-session-hook.mjs") else { return .notInstalled }
+        // install.sh's bare-`node` form: works, but on whichever node is on PATH.
+        if !text.contains("deckhand-node") { return .fromSource }
+        // A dev build has no bundled Node of its own to compare the link against,
+        // so the released app's hooks are simply "installed" from here - they are
+        // not this build's to repair. (Found by looking at the window: it said
+        // "Need repair" about a perfectly working install.)
+        if !isBundled { return .installed }
+        let linkOK = (try? fm.destinationOfSymbolicLink(atPath: runnerLink)) == helperNode
+        let scriptsOK = scripts.allSatisfy {
+            fm.contentsEqual(atPath: claudeDir + "/" + $0, andPath: bundledHooksDir + "/" + $0)
+        }
+        return linkOK && scriptsOK ? .installed : .needsRepair
+    }
+
+    /// Deckhand's hook is in ~/.codex/hooks.json, in either form.
+    static func codexInstalled() -> Bool {
+        let f = (NSHomeDirectory() as NSString).appendingPathComponent(".codex/hooks.json")
+        return (try? String(contentsOfFile: f, encoding: .utf8))?.contains("deckhand-session-hook.mjs") ?? false
+    }
+
+    /// The statusLine is set only if there is none; say which, before asking.
+    static func foreignStatusLine() -> Bool {
+        guard let data = FileManager.default.contents(atPath: claudeDir + "/settings.json"),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let sl = obj["statusLine"] as? [String: Any],
+              let cmd = sl["command"] as? String else { return false }
+        return !cmd.contains("deckhand-statusline.mjs")
+    }
+}
+
+extension AppDelegate {
+    func startBundledHost() {
+        let svc = hostAgent()
+        switch svc.status {
+        case .enabled:
+            // Loaded but not answering: KeepAlive restarts a process that EXITS, not
+            // one that hangs, so a stale heartbeat gets a kill-and-restart.
+            run("/bin/launchctl", ["kickstart", "-k", "gui/\(getuid())/\(agentLabel)"])
+        case .requiresApproval:
+            let a = NSAlert()
+            a.messageText = "Deckhand is turned off in Login Items"
+            a.informativeText = "macOS will not run Deckhand's background host until it is allowed again in System Settings \u{203A} General \u{203A} Login Items."
+            a.addButton(withTitle: "Open Login Items")
+            a.addButton(withTitle: "Cancel")
+            NSApp.activate(ignoringOtherApps: true)
+            if a.runModal() == .alertFirstButtonReturn { SMAppService.openSystemSettingsLoginItems() }
+        default:
+            // Clear a stray host first (setup's Bluetooth-prompt one, if its window
+            // was closed), or the agent's host would fight it for the port and BLE.
+            _ = runCapture("/usr/bin/pkill", ["-f", bundledHostScript])
+            do { try svc.register() } catch {
+                let a = NSAlert()
+                a.messageText = "Couldn't start Deckhand's background host"
+                a.informativeText = error.localizedDescription
+                NSApp.activate(ignoringOtherApps: true)
+                a.runModal()
+            }
+        }
+        ServiceState.shared.refresh()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in self?.refresh() }
+    }
+
+    /// A first install (or a switch from install.sh's form) goes through the setup
+    /// window's consent screen: it writes to ~/.claude/settings.json, which is the
+    /// user's. A repair of what they already agreed to does not ask again.
+    func installHooks() {
+        if !Hooks.consented || ServiceState.shared.hooks == .fromSource {
+            presentSetup(forceHooks: true)
+            return
+        }
+        settingsWindow?.model.busy = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            let err = Hooks.install()
+            ServiceState.shared.refreshNow()
+            DispatchQueue.main.async { [weak self] in
+                self?.settingsWindow?.model.busy = false
+                if let err = err { self?.alert("Couldn't install the hooks", err) }
+                self?.settingsWindow?.model.pullServices()
+                self?.refresh()
+            }
+        }
+    }
+
+    func removeHooks() {
+        let a = NSAlert()
+        a.messageText = "Remove Deckhand's Claude Code hooks?"
+        a.informativeText = "Deckhand's entries come out of ~/.claude/settings.json\(Hooks.codexPresent ? " and ~/.codex/hooks.json" : ""), and its two scripts and Node link out of ~/.claude. Your own hooks and status line are left as they are, and a backup is taken first (~/Deckhand-backups).\n\nThe display stops showing sessions until they are installed again."
+        a.addButton(withTitle: "Remove")
+        a.addButton(withTitle: "Cancel")
+        a.buttons.first?.hasDestructiveAction = true
+        NSApp.activate(ignoringOtherApps: true)
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        settingsWindow?.model.busy = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            let err = Hooks.remove()
+            ServiceState.shared.refreshNow()
+            DispatchQueue.main.async { [weak self] in
+                self?.settingsWindow?.model.busy = false
+                if let err = err { self?.alert("Some hooks could not be removed", err) }
+                self?.settingsWindow?.model.pullServices()
+                self?.refresh()
+            }
+        }
+    }
+
+    func alert(_ title: String, _ body: String) {
+        let a = NSAlert()
+        a.messageText = title
+        a.informativeText = body
+        NSApp.activate(ignoringOtherApps: true)
+        a.runModal()
+    }
+
+    @objc func openSetup() { presentSetup(forceHooks: false) }
+
+    func presentSetup(forceHooks: Bool) {
+        if setup == nil { setup = SetupFlow(app: self) }
+        if forceHooks { SetupFlow.hooksDecided = false }
+        setup?.show()
+    }
+
+    @objc func checkForUpdates() {
+        #if SPARKLE
+        updater?.checkForUpdates(nil)
+        #endif
+    }
+
+    /// The app's uninstall.sh: the same list, removed in the same order, and the same
+    /// things KEPT - the pairing keys, ~/Deckhand-backups and ~/Deckhand-audio are
+    /// the user's data, and a reinstall that has to re-pair every device over USB is
+    /// a worse outcome than a few kilobytes left behind.
+    @objc func uninstallDeckhand() {
+        let a = NSAlert()
+        a.messageText = "Uninstall Deckhand?"
+        a.informativeText = """
+            This stops Deckhand's background host, removes its hooks from Claude Code\(Hooks.codexPresent ? " and Codex" : ""), \
+            deletes its session state in ~/.claude, and moves Deckhand to the Trash. A backup is taken first.
+
+            Kept: your pairing keys (~/.claude/deckhand-secret), ~/Deckhand-backups and ~/Deckhand-audio. \
+            Restart Claude Code afterwards so it stops running the hook.
+            """
+        a.addButton(withTitle: "Uninstall")
+        a.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+
+        wantRunning = false
+        // The slow part (stopping the agent, several Node runs for the hooks) off the
+        // main thread, so the menu bar does not freeze while it happens.
+        DispatchQueue.global(qos: .userInitiated).async {
+            try? hostAgent().unregister()
+            _ = runCapture("/usr/bin/pkill", ["-f", bundledHostScript])
+            let err = Hooks.remove()
+            DispatchQueue.main.async { [weak self] in self?.finishUninstall(hooksError: err) }
+        }
+    }
+
+    /// STOPS SHORT of the Trash when the hooks could not be removed: they would
+    /// still run `~/.claude/deckhand-node`, a link into this app, and a hook whose
+    /// runner is in the Trash fails on every Claude Code event once it is emptied.
+    /// The host is already stopped; fixing settings.json and uninstalling again
+    /// finishes the job.
+    func finishUninstall(hooksError err: String?) {
+        if let err = err {
+            alert("Uninstall stopped before removing Deckhand",
+                  "Deckhand's background host is stopped, but its hooks could not be taken out of Claude Code's settings, so the app was left in place for them.\n\n\(err)")
+            ServiceState.shared.refresh { [weak self] in self?.refresh() }
+            return
+        }
+        let fm = FileManager.default
+        for f in ["deckhand-sessions", "deckhand-answers", "deckhand-device-command",
+                  "deckhand-session-hook-debug.log", "deckhand-session-hook-debug.log.1"] {
+            try? fm.removeItem(atPath: claudeDir + "/" + f)
+        }
+        for f in ["host-alive", "host.log", "host.log.1", "oauth-usage.json", "oauth-backoff.json",
+                  "oauth-attempt.json", "mic.wav"] {
+            try? fm.removeItem(atPath: runtimeDir + "/" + f)
+        }
+        try? SMAppService.mainApp.unregister()
+        if let id = Bundle.main.bundleIdentifier { UserDefaults.standard.removePersistentDomain(forName: id) }
+        NSWorkspace.shared.recycle([URL(fileURLWithPath: bundlePath)]) { _, _ in NSApp.terminate(nil) }
+    }
+}
+
+let SETUP_W: CGFloat = 470
+let SETUP_PAD: CGFloat = 22
+
+/// What the setup window shows. Built by SetupFlow.model(), rendered by SetupWindow,
+/// which decides nothing - the PairWindow discipline.
+struct SetupModel {
+    var title = ""
+    var detail = ""
+    var steps: [(String, Int)] = []   // 0 to do, 1 now, 2 done, 3 skipped
+    var primary = ""                  // "" hides the button
+    var secondary = ""
+    var busy = false
+}
+
+final class SetupWindow: NSObject, NSWindowDelegate {
+    let window: NSWindow
+    let titleField = NSTextField(labelWithString: "")
+    let stepsField = NSTextField(labelWithString: "")
+    let detailField = NSTextField(wrappingLabelWithString: "")
+    let spinner = NSProgressIndicator()
+    let primaryButton: NSButton
+    let secondaryButton: NSButton
+    var onClose: (() -> Void)?
+
+    init(target: AnyObject, primary: Selector, secondary: Selector) {
+        primaryButton = NSButton(title: "", target: target, action: primary)
+        secondaryButton = NSButton(title: "", target: target, action: secondary)
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: SETUP_W, height: 300),
+                          styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        super.init()
+        window.title = "Set up Deckhand"
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+
+        titleField.font = NSFont.systemFont(ofSize: 15, weight: .semibold)
+        stepsField.font = F_SMALL
+        stepsField.textColor = .secondaryLabelColor
+        detailField.font = F_BODY
+        detailField.textColor = .labelColor
+        detailField.preferredMaxLayoutWidth = SETUP_W - 2 * SETUP_PAD
+        detailField.isSelectable = true
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.isDisplayedWhenStopped = false
+        primaryButton.bezelStyle = .rounded
+        primaryButton.keyEquivalent = "\r"
+        secondaryButton.bezelStyle = .rounded
+
+        let buttons = NSStackView(views: [spinner, NSView(), secondaryButton, primaryButton])
+        buttons.orientation = .horizontal
+        buttons.spacing = 10
+        let stack = NSStackView(views: [titleField, stepsField, detailField, buttons])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 14
+        stack.edgeInsets = NSEdgeInsets(top: SETUP_PAD, left: SETUP_PAD, bottom: SETUP_PAD, right: SETUP_PAD)
+        stack.setCustomSpacing(8, after: titleField)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        buttons.translatesAutoresizingMaskIntoConstraints = false
+        buttons.widthAnchor.constraint(equalToConstant: SETUP_W - 2 * SETUP_PAD).isActive = true
+        window.contentView = stack
+        stack.widthAnchor.constraint(equalToConstant: SETUP_W).isActive = true
+    }
+
+    func render(_ m: SetupModel) {
+        titleField.stringValue = m.title
+        let marks = ["\u{25CB}", "\u{25B8}", "\u{2713}", "\u{2013}"]
+        stepsField.stringValue = m.steps.map { "\(marks[$0.1]) \($0.0)" }.joined(separator: "     ")
+        detailField.stringValue = m.detail
+        primaryButton.title = m.primary
+        primaryButton.isHidden = m.primary.isEmpty
+        primaryButton.isEnabled = !m.busy
+        secondaryButton.title = m.secondary
+        secondaryButton.isHidden = m.secondary.isEmpty
+        secondaryButton.isEnabled = !m.busy
+        if m.busy { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
+        window.layoutIfNeeded()
+        if let v = window.contentView { window.setContentSize(v.fittingSize) }
+    }
+
+    func show() {
+        if !window.isVisible { window.center() }
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func windowWillClose(_ n: Notification) { onClose?() }
+}
+
+/// First run, as one window that always shows the NEXT thing to do. The step is
+/// derived from the machine every second rather than remembered, so a window left
+/// open while the user drags the app, or runs install.sh in a terminal, follows.
+final class SetupFlow: NSObject {
+    enum Step { case location, conflict, hooks, start, done }
+    enum Phase: Equatable {
+        case idle
+        case working                    // a background job (hooks, stopping the old host)
+        case prompting(Date)            // the helper is open, waiting on the Bluetooth answer
+        case bleRefused
+        case handingOver(Date)          // the agent is registered, waiting on its first beat
+        case failed(String)
+    }
+    static var done: Bool {
+        get { UserDefaults.standard.bool(forKey: "setupDone") }
+        set { UserDefaults.standard.set(newValue, forKey: "setupDone") }
+    }
+    static var hooksDecided: Bool {
+        get { UserDefaults.standard.bool(forKey: "hooksDecided") }
+        set { UserDefaults.standard.set(newValue, forKey: "hooksDecided") }
+    }
+
+    weak var app: AppDelegate?
+    var win: SetupWindow!
+    var phase = Phase.idle
+    var timer: Timer?
+    /// --setup-preview only: render a step the machine is not in.
+    var forcedStep: Step?
+
+    init(app: AppDelegate) {
+        self.app = app
+        super.init()
+        win = SetupWindow(target: self, primary: #selector(primary), secondary: #selector(secondary))
+        win.onClose = { [weak self] in
+            guard let self = self else { return }
+            self.timer?.invalidate(); self.timer = nil
+            // Closed mid-prompt: the helper opened for Bluetooth is running OUTSIDE
+            // launchd, and nothing else would ever stop it. (Review finding.)
+            if case .prompting = self.phase {
+                _ = runCapture("/usr/bin/pkill", ["-f", bundledHostScript])
+                self.phase = .idle
+            }
+            // Closed on the last step is the same as Done - otherwise setup reopened
+            // at every launch and the hang watchdog (which waits for setup) never ran.
+            if self.step() == .done { SetupFlow.done = true }
+        }
+    }
+
+    func show() {
+        render()
+        win.show()
+        if timer == nil {
+            timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.tick() }
+        }
+    }
+
+    /// The two facts step() needs that cost a process or a daemon call (pgrep for an
+    /// old host, the agent's status). Read off the main thread by tick() and cached,
+    /// so a once-a-second render never blocks on them. (Review finding.)
+    var factLegacy = legacyHostPresent()
+    var factAgentEnabled = hostAgent().status == .enabled
+    private var factsInFlight = false
+    func refreshFacts() {
+        guard !factsInFlight else { return }
+        factsInFlight = true
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let legacy = legacyHostPresent(), enabled = hostAgent().status == .enabled
+            DispatchQueue.main.async {
+                self?.factLegacy = legacy
+                self?.factAgentEnabled = enabled
+                self?.factsInFlight = false
+                self?.render()
+            }
+        }
+    }
+
+    func step() -> Step {
+        if let f = forcedStep { return f }
+        if runningFromTemporaryLocation() { return .location }
+        if factLegacy { return .conflict }
+        if !SetupFlow.hooksDecided { return .hooks }
+        if !factAgentEnabled { return .start }
+        return .done
+    }
+
+    func tick() {
+        refreshFacts()
+        let s = readStatus()
+        let beat = heartbeatDate()
+        switch phase {
+        case .prompting(let since):
+            // A beat from BEFORE the helper was opened is the last host's, and so is
+            // its `ble`. Only a fresh one answers the question.
+            if let b = beat, b > since, let ble = s.ble {
+                if ble == "unauthorized" { phase = .bleRefused }
+                else if ble == "poweredOn" || ble == "poweredOff" { handOver() }
+            } else if Date().timeIntervalSince(since) > 120 {
+                _ = runCapture("/usr/bin/pkill", ["-f", bundledHostScript])
+                phase = .failed("The host did not report back within two minutes. The host log (Settings \u{203A} About \u{203A} Host log) says why; then try again.")
+            }
+        case .handingOver(let since):
+            if let b = beat, b > since.addingTimeInterval(1) {
+                phase = .idle
+                app?.wantRunning = true
+                app?.refresh()
+            } else if Date().timeIntervalSince(since) > 60 {
+                phase = .failed("The background host was registered but has not started. The host log (Settings \u{203A} About \u{203A} Host log) says why.")
+            }
+        default: break
+        }
+        render()
+    }
+
+    func model() -> SetupModel {
+        var m = SetupModel()
+        let st = step()
+        let order: [Step] = [.location, .hooks, .start]
+        let names = ["In Applications", "Claude Code hooks", "Background host"]
+        let rank: (Step) -> Int = { [.location: 0, .conflict: 1, .hooks: 1, .start: 2, .done: 3][$0]! }
+        m.steps = order.enumerated().map { i, sname in
+            let r = rank(st)
+            if i == 1 && r > 1 && !Hooks.consented { return (names[i], 3) }
+            return (names[i], i < r ? 2 : (i == r ? 1 : 0))
+        }
+        _ = order
+
+        if case .failed(let why) = phase {
+            m.title = "Something went wrong"
+            m.detail = why
+            m.primary = "Try Again"
+            m.secondary = "Close"
+            return m
+        }
+        switch st {
+        case .location:
+            m.title = "Move Deckhand to Applications first"
+            m.detail = bundlePath.hasPrefix("/Volumes/")
+                ? "Deckhand is running from its disk image. Its hooks and background host would point into the image and stop working when it is ejected.\n\nQuit, drag Deckhand into the Applications folder, and open it from there."
+                // A translocated path does not say where the original is: opening
+                // from the DMG lands here too (measured), not in the /Volumes case.
+                : "macOS is running Deckhand from a temporary read-only copy, because it was opened from the disk image or the Downloads folder. Its hooks would point at that copy, which macOS removes.\n\nQuit, drag Deckhand into the Applications folder in Finder, and open it from there."
+            m.primary = "Quit"
+        case .conflict:
+            m.title = "Deckhand is already running from a source checkout"
+            m.detail = "A host started from the repo (install.sh, or the menu app built by mac-app/build.sh) is running or set to start at login. Two hosts would fight over the USB port and Bluetooth.\n\nStop it will unload com.deckhand.host, move its plist into ~/Deckhand-backups so it does not come back at login, and quit the old menu app. If that app opens at login, Login Items opens next so you can remove it there. The checkout itself is not touched, and deckhand-service.sh install puts it back."
+            m.primary = "Stop It"
+            m.secondary = "Quit"
+        case .hooks:
+            let st = Hooks.state()
+            m.title = st == .fromSource ? "Switch the hooks to Deckhand's own Node" : "Connect Claude Code"
+            var lines = [
+                "Deckhand learns what your sessions are doing from Claude Code hooks. To set them up it will:",
+                "\u{2022} back up ~/.claude\(Hooks.codexPresent ? " and ~/.codex" : "") into ~/Deckhand-backups",
+                "\u{2022} copy deckhand-session-hook.mjs and deckhand-statusline.mjs into ~/.claude, with a link to Deckhand's own Node beside them",
+                "\u{2022} add one hook to nine events in ~/.claude/settings.json\(st == .fromSource ? ", replacing the ones install.sh added" : "")",
+                Hooks.foreignStatusLine()
+                    ? "\u{2022} leave your status line as it is (the quota then comes from the usage endpoint alone)"
+                    : "\u{2022} set the status line, which is how Claude Code reports your quota",
+            ]
+            if Hooks.codexPresent { lines.append("\u{2022} add hooks to ~/.codex/hooks.json; Codex asks you to trust them the next time it starts") }
+            lines.append("\nEverything else in those files stays as it is. Remove in Deckhand's Settings \u{203A} Claude Code takes them out again.")
+            m.detail = lines.joined(separator: "\n")
+            m.primary = "Install Hooks"
+            m.secondary = "Not Now"
+        case .start:
+            switch phase {
+            case .prompting:
+                m.title = "Allow Bluetooth"
+                m.detail = "macOS is asking whether \u{201C}Deckhand Host\u{201D} may use Bluetooth. Allow it so the display can connect without a cable.\n\nIf no question appeared, Bluetooth was already decided; this continues on its own."
+                m.busy = true
+            case .bleRefused:
+                m.title = "Bluetooth was not allowed"
+                m.detail = "Deckhand will work over USB only. To use Bluetooth later, turn on Deckhand Host in System Settings \u{203A} Privacy & Security \u{203A} Bluetooth, then Stop and Start Deckhand from the menu."
+                m.primary = "Continue with USB Only"
+                m.secondary = "Open Bluetooth Settings"
+            default:
+                m.title = "Start Deckhand"
+                m.detail = "Deckhand's host runs in the background, so the display keeps updating with this menu closed. It starts at login and restarts if it stops; the menu's Stop Deckhand turns it off until you start it again.\n\nmacOS will ask once whether it may use Bluetooth."
+                m.primary = "Start"
+                m.busy = phase == .working
+            }
+        case .done:
+            if case .handingOver = phase {
+                m.title = "Starting\u{2026}"
+                m.detail = "Handing the host to macOS so it starts at login."
+                m.busy = true
+                return m
+            }
+            m.title = "Deckhand is running"
+            var d = "Plug your Deckhand display in over USB and it connects on its own. For Bluetooth, choose Pair New Device\u{2026} in the menu.\n\nDeckhand lives in the menu bar; there is no window to come back to."
+            if readStatus().ble == "unauthorized" { d += "\n\nBluetooth is not allowed, so only USB will connect." }
+            if !Hooks.consented { d += "\n\nThe Claude Code hooks are not installed, so the display will not show sessions. Install them in Deckhand's Settings \u{203A} Claude Code." }
+            m.detail = d
+            m.primary = "Done"
+        }
+        return m
+    }
+
+    func render() { win.render(model()) }
+
+    @objc func primary() {
+        if case .failed = phase { phase = .idle; render(); return }
+        switch step() {
+        case .location: NSApp.terminate(nil)
+        case .conflict:
+            background { stopLegacyHost() }
+        case .hooks:
+            background {
+                if let err = Hooks.install() { return err }
+                SetupFlow.hooksDecided = true
+                return nil
+            }
+        case .start:
+            if phase == .bleRefused { handOver() } else { beginStart() }
+        case .done:
+            SetupFlow.done = true
+            win.window.close()
+        }
+    }
+
+    @objc func secondary() {
+        if case .failed = phase { win.window.close(); return }
+        switch step() {
+        case .conflict: NSApp.terminate(nil)
+        case .hooks:
+            SetupFlow.hooksDecided = true
+            render()
+        case .start where phase == .bleRefused:
+            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Bluetooth")!)
+        default: break
+        }
+    }
+
+    /// Off the main thread, with the window showing it is busy; an error string ends
+    /// in .failed so it is read, not lost.
+    func background(_ job: @escaping () -> String?) {
+        phase = .working
+        render()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let err = job()
+            DispatchQueue.main.async { [weak self] in
+                self?.phase = err.map { .failed($0) } ?? .idle
+                self?.app?.refresh()
+                self?.render()
+                // The step that job finished must not linger for up to a second
+                // on cached facts.
+                self?.refreshFacts()
+            }
+        }
+    }
+    func background(_ job: @escaping () -> Void) { background { job(); return nil } }
+
+    /// BLUETOOTH IS ASKED FOR BY OPENING THE HELPER, the way install.sh asks for it
+    /// with DeckhandBLE.app: an app opened by the user gets a normal TCC prompt. The
+    /// permission belongs to the helper's identity, so the agent - which execs the
+    /// very same signed binary - inherits it. Whether a launchd-started process
+    /// could raise the prompt by itself is not verified, so it is not relied on.
+    func beginStart() {
+        _ = runCapture("/usr/bin/pkill", ["-f", bundledHostScript])
+        let since = Date()
+        phase = .prompting(since)
+        render()
+        _ = runCapture("/usr/bin/open", ["-n", "-g", helperApp, "--args", bundledHostScript])
+    }
+
+    /// The opened helper has answered the Bluetooth question. Stop it and hand the
+    /// host to launchd, which from here on starts it at login and restarts it.
+    func handOver() {
+        _ = runCapture("/usr/bin/pkill", ["-f", bundledHostScript])
+        phase = .handingOver(Date())
+        render()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            guard let self = self else { return }
+            do { try hostAgent().register() } catch {
+                if hostAgent().status == .requiresApproval {
+                    SMAppService.openSystemSettingsLoginItems()
+                    self.phase = .failed("macOS needs you to allow Deckhand in System Settings \u{203A} General \u{203A} Login Items. Turn it on there, then try again.")
+                } else {
+                    self.phase = .failed("Could not register the background host: \(error.localizedDescription)")
+                }
+                self.render()
+                return
+            }
+            // The menu itself at login too: it is how anyone sees the host is up.
+            try? SMAppService.mainApp.register()
+            self.phase = .handingOver(Date())
+            self.render()
+        }
+    }
+}
+
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate
@@ -3099,6 +4269,797 @@ app.setActivationPolicy(.accessory)
 /// parent sits in menu tracking. Menu tracking still runs the run loop, so the
 /// timer that dismisses the menu afterwards does fire - without it the process
 /// would hang holding a menu open over the user's screen.
+// MARK: - The Settings window
+//
+// HOW PEOPLE USE THIS, which is what decided its shape. The menu is opened many
+// times a day to LOOK (is it syncing, how much quota is left, who is waiting) and
+// almost never to CHANGE anything; the settings are changed a handful of times,
+// mostly in the first week. So the menu is for looking and the three things
+// people actually do from it (start or stop, pair, open Settings), and every
+// preference lives here, grouped by the question someone arrives with:
+//   General     - is it running, does it start at login, what happens when a
+//                 session needs me (answer from the device, the sound)
+//   Menu Bar    - what sits beside the boat, with a live preview of it
+//   Devices     - which displays this Mac knows, which one Bluetooth follows,
+//                 forget one, pair one; and what this Mac is called on them
+//   Claude Code - are the hooks in, repair or remove them
+//   About       - version, updates, the log, setup again, uninstall
+// A window can say what a switch DOES under the switch, which a submenu row
+// cannot, and that is most of why this exists: half the old rows needed a tooltip
+// to be understood, and tooltips are found by accident.
+//
+// The window decides nothing and writes nothing itself: every control calls the
+// AppDelegate function that does exactly what the old menu item did (same trigger
+// file line, same UserDefaults key), and the window re-reads the same heartbeat
+// snapshot the menu draws from on every refresh.
+
+enum SettingsPane: Int, CaseIterable {
+    case general, menuBar, devices, claude, about
+    var title: String {
+        switch self {
+        case .general: return "General"
+        case .menuBar: return "Menu Bar"
+        case .devices: return "Devices"
+        case .claude: return "Claude Code"
+        case .about: return "About"
+        }
+    }
+    var symbol: String {
+        switch self {
+        case .general: return "gearshape"
+        case .menuBar: return "menubar.rectangle"
+        case .devices: return "rectangle.portrait.on.rectangle.portrait"
+        case .claude: return "terminal"
+        case .about: return "info.circle"
+        }
+    }
+}
+
+final class SettingsModel: ObservableObject {
+    weak var app: AppDelegate?
+    @Published var s = HostStatus()
+    @Published var agent = SMAppService.Status.notRegistered
+    @Published var login = false
+    @Published var hooks = Hooks.State.notInstalled
+    @Published var codexHooks = false
+    @Published var busy = false
+    @Published var nameDraft = ""
+    /// True while the name field has focus, so the 3s refresh does not overwrite
+    /// what someone is typing with the name the host still has.
+    var nameEditing = false
+    // Mirrors of the Mac-side preferences, re-read on every pull so a change made
+    // anywhere (another window, `defaults write`) shows here too.
+    @Published var prefs: [BarPref: Bool] = [:]
+    @Published var sound = ""
+    @Published var colourful = true
+    // The bar's size: the choice, what Automatic resolved to, and why.
+    @Published var barSize = BarSize.automatic
+    @Published var barTier = BarTier.full
+    @Published var barFitNote = ""
+    @Published var barHidden = false
+
+    func pull(_ s: HostStatus, bar: NSStatusBarButton?) {
+        self.s = s
+        if !nameEditing { nameDraft = s.macTagSource == "name" ? s.macTag : "" }
+        prefs = Dictionary(uniqueKeysWithValues: BarPref.allCases.map { ($0, $0.on) })
+        sound = askSoundName
+        colourful = colourfulIcon
+        barSize = BarSize.current
+        if let app = app {
+            barTier = app.barTier
+            barFitNote = app.barFitNote
+            barHidden = app.barHidden
+        }
+    }
+
+    func pullServices() {
+        let st = ServiceState.shared
+        agent = st.agent
+        login = st.login == .enabled
+        hooks = st.hooks
+        codexHooks = st.codexHooks
+    }
+
+    /// The transports one device is on right now, in words.
+    func linkText(_ device: String) -> String? {
+        let kinds = Set(s.links.filter { $0.device == device }.map { $0.link.hasPrefix("usb") ? "USB" : "Bluetooth" })
+        if kinds.isEmpty { return nil }
+        return kinds.sorted(by: >).joined(separator: " and ")   // "USB and Bluetooth"
+    }
+
+    func batteryText(_ device: String) -> String? {
+        guard let b = s.batts[device], b.ageSec < 180, b.state != 0 else { return nil }
+        switch b.state {
+        case 2: return "\(b.pct)%, charging"
+        case 3: return "\(b.pct)%, full"
+        default: return "\(b.pct)%"
+        }
+    }
+}
+
+/// A Toggle whose label is a title with a sentence under it - what the old menu
+/// rows had to put in a tooltip.
+struct DescribedToggle: View {
+    let title: String
+    let detail: String
+    let isOn: Binding<Bool>
+    var body: some View {
+        Toggle(isOn: isOn) {
+            Text(title)
+            Text(detail)
+        }
+    }
+}
+
+struct GeneralPane: View {
+    @ObservedObject var m: SettingsModel
+
+    var statusColor: Color {
+        !m.s.running ? .secondary : (m.s.deviceConnected ? .green : .orange)
+    }
+    var statusTitle: String {
+        if !m.s.running { return "Stopped" }
+        if m.s.deviceConnected, let d = m.s.device { return "Syncing with \(d)" }
+        return "Running, no display connected"
+    }
+    var statusDetail: String {
+        if !m.s.running { return "The display is not being updated." }
+        if m.s.deviceConnected, let d = m.s.device {
+            return m.linkText(d).map { "Connected over \($0)." } ?? "Connected."
+        }
+        return "Plug a Deckhand in over USB, or turn one on that is paired over Bluetooth."
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                HStack(alignment: .center, spacing: 12) {
+                    Circle().fill(statusColor).frame(width: 10, height: 10)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(statusTitle).font(.headline)
+                        Text(statusDetail).font(.callout).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    if m.s.running { Button("Restart") { m.app?.restartHost() } }
+                    Button(m.s.running ? "Stop" : "Start") { m.app?.toggleHost() }
+                }
+                .padding(.vertical, 2)
+            } header: {
+                Text("Deckhand")
+            } footer: {
+                HStack {
+                    Text(m.app?.hostSupervisionText() ?? "")
+                    Spacer()
+                    Button("Open Host Log") { m.app?.openLog() }.buttonStyle(.link)
+                }
+                .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section {
+                DescribedToggle(
+                    title: "Open Deckhand at login",
+                    detail: isBundled
+                        ? "Keeps this menu-bar icon after a restart. The background host starts at login either way."
+                        : "Keeps this menu-bar icon after a restart.",
+                    isOn: Binding(get: { m.login }, set: { m.app?.setLaunchAtLogin($0) }))
+            }
+
+            Section("When a session needs you") {
+                DescribedToggle(
+                    title: "Answer prompts on the display",
+                    detail: m.s.running
+                        ? "Approve or deny from the device. Claude Code's own dialog stays open, and whichever answers first wins."
+                        : "Available while Deckhand is running.",
+                    isOn: Binding(get: { m.s.remoteAnswer }, set: { m.app?.setRemoteAnswer($0) }))
+                    .disabled(!m.s.running)
+                Picker("Sound", selection: Binding(get: { m.sound }, set: { m.app?.setAskSound($0) })) {
+                    Text("None").tag("")
+                    Divider()
+                    ForEach(ASK_SOUNDS, id: \.self) { Text($0).tag($0) }
+                }
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+struct MenuBarPane: View {
+    @ObservedObject var m: SettingsModel
+
+    func toggle(_ p: BarPref) -> Binding<Bool> {
+        Binding(get: { m.prefs[p] ?? p.on }, set: { m.app?.setBarPref(p, $0) })
+    }
+    var mirrorsOn: Bool { (m.prefs[.usage] ?? true) || (m.prefs[.codex] ?? true) || (m.prefs[.sessions] ?? true) }
+    func preview(_ tier: BarTier) -> NSImage {
+        barImage(barModel(m.s, tier: tier, previewing: true), boat: barBoatStyle(m.s), colourful: m.colourful, height: NSStatusBar.system.thickness)
+    }
+    var hiddenNote: String? {
+        if (m.prefs[.onlyOffline] ?? true) && m.s.deviceConnected && mirrorsOn {
+            return "Usage and session counts are hidden right now because \(m.s.device ?? "a display") is connected and shows them."
+        }
+        return nil
+    }
+    var sizeFooter: String {
+        if m.barHidden {
+            return "macOS has no room for Deckhand's icon at this size. Choose a smaller one, or hold \u{2318} and drag Deckhand's icon further right in the menu bar."
+        }
+        if let note = hiddenNote { return note + " The previews show them anyway." }
+        if m.barSize == .automatic {
+            return m.barFitNote.isEmpty
+                ? "Automatic is showing \(m.barTier.title). It steps down if macOS runs out of room in the menu bar, and tries again when your displays change."
+                : m.barFitNote
+        }
+        return hiddenNote ?? "Hover over the icon in the menu bar for every figure spelled out."
+    }
+
+    /// One size: a radio mark, what it keeps, and what it looks like right now.
+    func sizeRow(_ size: BarSize) -> some View {
+        let selected = m.barSize == size
+        let tier = size.tier ?? m.barTier
+        return Button { m.app?.setBarSize(size) } label: {
+            HStack(spacing: 10) {
+                Image(systemName: selected ? "largecircle.fill.circle" : "circle")
+                    .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(size == .automatic ? "Automatic" : tier.title)
+                    Text(size == .automatic ? "Fits itself to the space in the menu bar." : tier.detail)
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 8)
+                Image(nsImage: preview(tier))
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(RoundedRectangle(cornerRadius: 5).fill(Color(nsColor: .windowBackgroundColor)))
+                    .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color(nsColor: .separatorColor)))
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                ForEach(BarSize.allCases, id: \.self) { sizeRow($0) }
+            } header: {
+                Text("Size")
+            } footer: {
+                Text(sizeFooter).font(.caption).foregroundStyle(m.barHidden ? Color.orange : Color.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Section("Beside the icon") {
+                DescribedToggle(title: "Claude usage", detail: "5-hour figure on top, 7-day below. \u{25B2} means you are using it faster than the clock.", isOn: toggle(.usage))
+                DescribedToggle(title: "Codex usage", detail: "Only on a Mac where Codex reports a quota.", isOn: toggle(.codex))
+                DescribedToggle(title: "Session counts", detail: "\u{25CB} waiting on you, \u{25CF} working.", isOn: toggle(.sessions))
+                DescribedToggle(title: "Needs-input count", detail: "\u{25A0} and how many sessions are waiting for your answer.", isOn: toggle(.asking))
+            }
+
+            Section {
+                DescribedToggle(title: "Hide usage and session counts while a display is connected",
+                                detail: "The display already shows them. The needs-input count stays.", isOn: toggle(.onlyOffline))
+                    .disabled(!mirrorsOn)
+                DescribedToggle(title: "Colourful icon", detail: "Off follows the menu bar's own colour, light or dark.",
+                                isOn: Binding(get: { m.colourful }, set: { m.app?.setColourfulIcon($0) }))
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+struct DevicesPane: View {
+    @ObservedObject var m: SettingsModel
+    @FocusState private var nameFocused: Bool
+
+    var nameLocked: Bool { m.s.macTagSource == "env" }
+
+    var body: some View {
+        Form {
+            Section {
+                if m.s.devices.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("No displays yet")
+                        Text("Connect a Deckhand over USB and it pairs by itself. To add one over Bluetooth only, use Pair New Device.")
+                            .font(.callout).foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 2)
+                }
+                ForEach(m.s.devices, id: \.self) { name in
+                    let link = m.linkText(name)
+                    HStack(spacing: 10) {
+                        Image(systemName: link != nil ? "rectangle.portrait.fill" : "rectangle.portrait")
+                            .foregroundStyle(link != nil ? Color.accentColor : Color.secondary)
+                            .frame(width: 18)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(name)
+                            Text([link.map { "Connected over \($0)" } ?? "Not connected", m.batteryText(name)]
+                                    .compactMap { $0 }.joined(separator: "  \u{00B7}  "))
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("Forget\u{2026}") { m.app?.forgetDevice(name) }
+                            .disabled(!m.s.running)
+                    }
+                }
+            } header: {
+                Text("Paired displays")
+            } footer: {
+                HStack {
+                    Spacer()
+                    Button("Pair New Device\u{2026}") { m.app?.openPairWindow() }
+                }
+            }
+
+            if m.s.devices.count > 1 {
+                Section {
+                    Picker("Bluetooth connects to", selection: Binding(get: { m.s.selected ?? "" }, set: { m.app?.selectDevice($0) })) {
+                        Text("Any paired display").tag("")
+                        Divider()
+                        ForEach(m.s.devices, id: \.self) { Text($0).tag($0) }
+                    }
+                    .disabled(!m.s.running)
+                } footer: {
+                    Text("USB always connects whichever display is plugged in.").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+
+            Section {
+                LabeledContent("Name") {
+                    HStack {
+                        TextField("", text: $m.nameDraft, prompt: Text(m.s.macTagAuto.isEmpty ? "automatic" : m.s.macTagAuto))
+                            .frame(width: 110)
+                            .multilineTextAlignment(.trailing)
+                            .focused($nameFocused)
+                            .onSubmit { m.app?.setMacName(m.nameDraft); nameFocused = false }
+                        Button("Save") { m.app?.setMacName(m.nameDraft); nameFocused = false }
+                            .disabled(m.nameDraft == (m.s.macTagSource == "name" ? m.s.macTag : ""))
+                    }
+                }
+                .disabled(nameLocked || !m.s.running)
+                .onChange(of: nameFocused) { _, f in m.nameEditing = f }
+
+                LabeledContent("Icon") {
+                    let current = m.app?.currentIcon(m.s) ?? ""
+                    LazyVGrid(columns: Array(repeating: GridItem(.fixed(30), spacing: 4), count: 8), spacing: 4) {
+                        ForEach(MAC_ICON_NAMES, id: \.self) { name in
+                            Button { m.app?.setIcon(name) } label: {
+                                Text(MAC_ICON_GLYPHS[name] ?? "?").font(.system(size: 17))
+                                    .frame(width: 30, height: 28)
+                                    .background(RoundedRectangle(cornerRadius: 6)
+                                        .fill(name == current ? Color.accentColor.opacity(0.25) : Color.clear))
+                                    .overlay(RoundedRectangle(cornerRadius: 6)
+                                        .stroke(name == current ? Color.accentColor : Color.clear, lineWidth: 1.5))
+                            }
+                            .buttonStyle(.plain)
+                            .help(name)
+                        }
+                    }
+                }
+                .disabled(m.s.iconFromEnv)
+            } header: {
+                Text("This Mac on the display")
+            } footer: {
+                Text(nameLocked || m.s.iconFromEnv
+                     ? "Set by DECKHAND_MAC_TAG / DECKHAND_MAC_EMOJI in the host's environment, so it cannot be changed here."
+                     : "Shown beside this Mac's sessions when more than one Mac uses the same display. Up to 6 letters or digits; leave it empty for the automatic name.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+struct ClaudePane: View {
+    @ObservedObject var m: SettingsModel
+
+    var state: (symbol: String, color: Color, title: String, detail: String) {
+        switch m.hooks {
+        case .installed:
+            return ("checkmark.circle.fill", .green, "Installed",
+                    isBundled ? "Claude Code reports every session to Deckhand, running on Deckhand's own Node."
+                              : "Claude Code reports every session to Deckhand, through the released app's Node.")
+        case .notInstalled:
+            return ("exclamationmark.circle.fill", .orange, "Not installed",
+                    "Sessions will not appear on the display or in the menu until the hooks are installed.")
+        case .fromSource:
+            return ("info.circle.fill", .blue, "Installed by install.sh",
+                    isBundled ? "They run on the node on your PATH. Switching moves them to Deckhand's own Node, which keeps working through Homebrew upgrades."
+                              : "They run on the node on your PATH, as install.sh set them up.")
+        case .needsRepair:
+            return ("exclamationmark.triangle.fill", .orange, "Need repair",
+                    "The scripts in ~/.claude or the link to Deckhand's Node do not match this copy of Deckhand.")
+        }
+    }
+    var installTitle: String {
+        switch m.hooks {
+        case .installed: return "Reinstall"
+        case .notInstalled: return "Install\u{2026}"
+        case .fromSource: return "Switch to Deckhand's Node\u{2026}"
+        case .needsRepair: return "Repair"
+        }
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: state.symbol).foregroundStyle(state.color).font(.title2)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(state.title).font(.headline)
+                        Text(state.detail).font(.callout).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer()
+                }
+                .padding(.vertical, 2)
+                if isBundled {
+                    HStack {
+                        if m.busy { ProgressView().controlSize(.small) }
+                        Spacer()
+                        Button("Remove\u{2026}") { m.app?.removeHooks() }
+                            .disabled(m.busy || m.hooks == .notInstalled)
+                        Button(installTitle) { m.app?.installHooks() }
+                            .disabled(m.busy)
+                    }
+                }
+                LabeledContent("Codex", value: m.codexHooks ? "Hooks installed" : (Hooks.codexPresent ? "No hooks" : "Not on this Mac"))
+            } header: {
+                Text("Hooks")
+            } footer: {
+                Text(isBundled
+                     ? "Deckhand learns what each session is doing (working, waiting, asking for permission) from hooks in ~/.claude/settings.json. Your own hooks and status line are never changed, and a backup goes to ~/Deckhand-backups before every change."
+                     : "This build drives the host in your checkout, where install.sh manages the hooks.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+struct AboutPane: View {
+    @ObservedObject var m: SettingsModel
+    var version: String {
+        let i = Bundle.main.infoDictionary ?? [:]
+        let v = (i["CFBundleShortVersionString"] as? String) ?? "?"
+        let b = (i["CFBundleVersion"] as? String) ?? "?"
+        let c = (i["DeckhandCommit"] as? String).map { ", \($0)" } ?? ""
+        return "Version \(v) (\(b)\(c))"
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                HStack(spacing: 14) {
+                    Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 56, height: 56)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Deckhand").font(.title2.weight(.semibold))
+                        Text(version).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
+                    }
+                    Spacer()
+                }
+                .padding(.vertical, 4)
+            }
+
+            if let app = m.app, app.updatesAvailable {
+                Section("Updates") {
+                    Toggle("Check for updates automatically", isOn: Binding(
+                        get: { app.autoCheckUpdates }, set: { app.autoCheckUpdates = $0; m.objectWillChange.send() }))
+                    Toggle("Download and install updates automatically", isOn: Binding(
+                        get: { app.autoInstallUpdates }, set: { app.autoInstallUpdates = $0; m.objectWillChange.send() }))
+                        .disabled(!app.autoCheckUpdates)
+                    HStack {
+                        Spacer()
+                        Button("Check Now") { app.checkForUpdates() }
+                    }
+                }
+            }
+
+            Section("Troubleshooting") {
+                LabeledContent("Host log") { Button("Open") { m.app?.openLog() } }
+                if isBundled {
+                    LabeledContent("First-run setup") { Button("Run Again\u{2026}") { m.app?.openSetup() } }
+                    LabeledContent("Remove Deckhand from this Mac") {
+                        Button("Uninstall\u{2026}", role: .destructive) { m.app?.uninstallDeckhand() }
+                    }
+                }
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+/// Clears the first responder on every tab switch. SwiftUI otherwise hands the
+/// keyboard to the first text field it finds, so opening Devices put a blinking
+/// cursor in the Mac-name field - and a field holding focus is one the 3s refresh
+/// stops updating (SettingsModel.nameEditing).
+final class SettingsTabs: NSTabViewController {
+    override func tabView(_ tabView: NSTabView, didSelect item: NSTabViewItem?) {
+        super.tabView(tabView, didSelect: item)
+        DispatchQueue.main.async { [weak self] in self?.view.window?.makeFirstResponder(nil) }
+    }
+}
+
+final class SettingsWindowController: NSObject, NSWindowDelegate {
+    let model = SettingsModel()
+    let window: NSWindow
+    let tabs = SettingsTabs()
+
+    init(app: AppDelegate) {
+        model.app = app
+        tabs.tabStyle = .toolbar
+        for pane in SettingsPane.allCases {
+            let root: AnyView
+            switch pane {
+            case .general: root = AnyView(GeneralPane(m: model))
+            case .menuBar: root = AnyView(MenuBarPane(m: model))
+            case .devices: root = AnyView(DevicesPane(m: model))
+            case .claude: root = AnyView(ClaudePane(m: model))
+            case .about: root = AnyView(AboutPane(m: model))
+            }
+            // ONE size for every pane, so switching tabs does not make the window
+            // jump; a pane taller than this scrolls inside its Form.
+            let host = NSHostingController(rootView: root.frame(width: SETTINGS_W, height: SETTINGS_H))
+            host.title = pane.title
+            let item = NSTabViewItem(viewController: host)
+            item.label = pane.title
+            item.image = NSImage(systemSymbolName: pane.symbol, accessibilityDescription: pane.title)
+            tabs.addTabViewItem(item)
+        }
+        window = NSWindow(contentViewController: tabs)
+        window.styleMask = [.titled, .closable]
+        window.toolbarStyle = .preference
+        window.isReleasedWhenClosed = false
+        window.setContentSize(NSSize(width: SETTINGS_W, height: SETTINGS_H))
+        super.init()
+        window.delegate = self
+        model.pullServices()
+    }
+
+    func show(pane: SettingsPane?) {
+        if let p = pane { tabs.selectedTabViewItemIndex = p.rawValue }
+        if !window.isVisible { window.center() }
+        window.makeKeyAndOrderFront(nil)
+        // An .accessory app is never frontmost on its own; without this the window
+        // opens behind whatever the person was reading.
+        NSApp.activate(ignoringOtherApps: true)
+        DispatchQueue.main.async { [weak self] in self?.window.makeFirstResponder(nil) }
+    }
+}
+
+let SETTINGS_W: CGFloat = 540
+let SETTINGS_H: CGFloat = 560
+
+extension AppDelegate {
+    /// Restart in place. Supervised, through launchd (`kickstart -k`), so there is
+    /// still exactly one supervisor; unsupervised, the old force-clear-and-open.
+    func restartHost() {
+        wantRunning = true
+        lastRestart = Date()
+        downSince = nil
+        if isSupervised() {
+            let label = isBundled ? agentLabel : "com.deckhand.host"
+            DispatchQueue.global(qos: .userInitiated).async {
+                _ = runCapture("/bin/launchctl", ["kickstart", "-k", "gui/\(getuid())/\(label)"])
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in self?.refresh() }
+            }
+        } else {
+            startHost()
+        }
+    }
+
+    /// Sparkle's own two switches, exposed rather than mirrored, so the window and
+    /// Sparkle's second-launch question can never disagree.
+    var updatesAvailable: Bool {
+        #if SPARKLE
+        return updater != nil
+        #else
+        return false
+        #endif
+    }
+    var autoCheckUpdates: Bool {
+        get {
+            #if SPARKLE
+            return updater?.updater.automaticallyChecksForUpdates ?? false
+            #else
+            return false
+            #endif
+        }
+        set {
+            #if SPARKLE
+            updater?.updater.automaticallyChecksForUpdates = newValue
+            #endif
+        }
+    }
+    var autoInstallUpdates: Bool {
+        get {
+            #if SPARKLE
+            return updater?.updater.automaticallyDownloadsUpdates ?? false
+            #else
+            return false
+            #endif
+        }
+        set {
+            #if SPARKLE
+            updater?.updater.automaticallyDownloadsUpdates = newValue
+            #endif
+        }
+    }
+}
+
+/// `--settings-show <pane>`: open the REAL Settings window on that pane against the
+/// live host and stay up, so a capture (or a person) can look at it. Read-only in
+/// the sense every diagnostic here is: dryRun keeps refresh from starting,
+/// stopping or sounding anything. Panes: general menubar devices claude about.
+if let i = CommandLine.arguments.firstIndex(of: "--settings-show") {
+    let name = CommandLine.arguments.count > i + 1 ? CommandLine.arguments[i + 1] : "general"
+    let pane: SettingsPane = ["general": .general, "menubar": .menuBar, "devices": .devices,
+                              "claude": .claude, "about": .about][name] ?? .general
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+    if CommandLine.arguments.contains("--dark") { app.appearance = NSAppearance(named: .darkAqua) }
+    if CommandLine.arguments.contains("--light") { app.appearance = NSAppearance(named: .aqua) }
+    final class Show: NSObject, NSApplicationDelegate {
+        let pane: SettingsPane
+        let d = AppDelegate()
+        init(_ p: SettingsPane) { pane = p }
+        func applicationDidFinishLaunching(_ n: Notification) {
+            d.dryRun = true
+            #if SPARKLE
+            // Sparkle exists in the real app from launch; here it is created NOT
+            // started, so the About pane shows its switches and nothing checks.
+            if isBundled { d.updater = SPUStandardUpdaterController(startingUpdater: false, updaterDelegate: nil, userDriverDelegate: nil) }
+            #endif
+            NSApp.mainMenu = d.buildMainMenu()
+            ServiceState.shared.refreshNow()
+            d.showSettings(pane: pane)
+            Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in self?.d.refresh() }
+        }
+    }
+    let shower = Show(pane)
+    app.delegate = shower
+    app.run()
+    exit(0)
+}
+
+/// `--bar-preview <out.png>`: every SIZE of the menu-bar item for one busy example
+/// (both services, both windows, sessions waiting and working, two asking), drawn by
+/// the real renderer on a light bar and a dark bar at 2x, with each width printed. The
+/// bar can only be judged by looking at it, and the real one shows one size at a time.
+if let i = CommandLine.arguments.firstIndex(of: "--bar-preview"), CommandLine.arguments.count > i + 1 {
+    var s = HostStatus()
+    s.running = true; s.pct5h = 19; s.reset5h = 200; s.pct7d = 41; s.reset7d = 2900; s.quotaAgeSec = 1
+    s.cxPct = 100; s.cxReset = 12; s.cxWinMin = 300; s.cx2Pct = 62; s.cx2Reset = 8400; s.cx2WinMin = 10080; s.cxAgeSec = 5
+    s.sessions = [SessionRow(id: "a", status: "waiting"), SessionRow(id: "b", status: "waiting"), SessionRow(id: "c", status: "working"),
+                  SessionRow(id: "d", status: "asking"), SessionRow(id: "e", status: "asking")]
+    let h = NSStatusBar.system.thickness, scale: CGFloat = 2, pad: CGFloat = 10, rowH = h + 8
+    let tiers = BarTier.allCases.reversed()
+    let width: CGFloat = 2 * (190 + pad * 2)
+    let img = NSImage(size: NSSize(width: width, height: CGFloat(tiers.count) * rowH + pad))
+    img.lockFocus()
+    for (col, dark) in [false, true].enumerated() {
+        let ap = NSAppearance(named: dark ? .darkAqua : .aqua)!
+        ap.performAsCurrentDrawingAppearance {
+            let x0 = CGFloat(col) * width / 2
+            (dark ? NSColor(white: 0.16, alpha: 1) : NSColor(white: 0.93, alpha: 1)).setFill()
+            NSRect(x: x0, y: 0, width: width / 2, height: img.size.height).fill()
+            for (row, t) in tiers.enumerated() {
+                let bar = barImage(barModel(s, tier: t), boat: .solid, colourful: true, height: h)
+                let y = img.size.height - pad - CGFloat(row + 1) * rowH + 4
+                bar.draw(at: NSPoint(x: x0 + pad, y: y), from: .zero, operation: .sourceOver, fraction: 1)
+                if col == 0 { print(String(format: "%-9@ %4.0fpt  %@", t.title as NSString, bar.size.width, barText(barModel(s, tier: t)) as NSString)) }
+            }
+        }
+    }
+    img.unlockFocus()
+    let out = NSImage(size: NSSize(width: img.size.width * scale, height: img.size.height * scale))
+    out.lockFocus(); NSGraphicsContext.current?.imageInterpolation = .none
+    img.draw(in: NSRect(origin: .zero, size: out.size)); out.unlockFocus()
+    try? NSBitmapImageRep(data: out.tiffRepresentation!)!.representation(using: .png, properties: [:])!
+        .write(to: URL(fileURLWithPath: CommandLine.arguments[i + 1]))
+    exit(0)
+}
+
+/// `--setup-do <conflict|hooks|skip-hooks|start|done>`: run ONE setup step's action,
+/// the very function its button calls, from a terminal. A running Deckhand's setup
+/// window shares these UserDefaults and re-derives its step every second, so it
+/// follows along - which is how a first run is tested end to end on a Mac where
+/// nothing may click the window. Prints what the step left behind and exits non-zero
+/// on failure. Released app only: in a dev build there is no bundled host to set up.
+if let i = CommandLine.arguments.firstIndex(of: "--setup-do"), CommandLine.arguments.count > i + 1 {
+    guard isBundled else { print("--setup-do: not the released app (no bundled host here)"); exit(2) }
+    let app = NSApplication.shared
+    app.setActivationPolicy(.prohibited)
+    // Held strongly: SetupFlow's reference is weak, so a temporary AppDelegate was
+    // gone at once and `start` never recorded wantRunning. (Review finding.)
+    let owner = AppDelegate()
+    owner.dryRun = true
+    let flow = SetupFlow(app: owner)
+    func finish(_ ok: Bool, _ msg: String) -> Never { print(msg); exit(ok ? 0 : 1) }
+    switch CommandLine.arguments[i + 1] {
+    case "conflict":
+        stopLegacyHost()
+        finish(!legacyHostPresent(), "legacy host present after stop: \(legacyHostPresent())")
+    case "hooks":
+        if let err = Hooks.install() { finish(false, "hooks: \(err)") }
+        SetupFlow.hooksDecided = true
+        finish(Hooks.state() == .installed, "hooks state: \(Hooks.state())")
+    case "skip-hooks":
+        SetupFlow.hooksDecided = true
+        finish(true, "hooks skipped")
+    case "start":
+        flow.beginStart()
+        let deadline = Date().addingTimeInterval(200)
+        var last = ""
+        while Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(1))
+            flow.tick()
+            let now = "\(flow.phase)"
+            if now != last { print("phase: \(now)  ble=\(readStatus().ble ?? "-")"); last = now }
+            if flow.phase == .bleRefused { flow.handOver() }
+            if case .failed(let why) = flow.phase { finish(false, "start failed: \(why)") }
+            if flow.phase == .idle && hostAgent().status == .enabled { break }
+        }
+        if hostAgent().status == .enabled { owner.wantRunning = true }
+        finish(hostAgent().status == .enabled && readStatus().running,
+               "agent=\(hostAgent().status.rawValue) running=\(readStatus().running) ble=\(readStatus().ble ?? "-")")
+    case "done":
+        SetupFlow.done = true
+        finish(true, "setup marked done")
+    default:
+        finish(false, "--setup-do: unknown step")
+    }
+}
+
+/// `--setup-preview <dir>`: the released app's setup window, EVERY state, as PNGs.
+/// The states are reached by clicking through a first run that registers a launch
+/// agent and writes ~/.claude, so they cannot be looked at any other way without
+/// doing exactly that. Renders the real SetupWindow from the real model(); only the
+/// step and phase are forced. Starts, stops and writes nothing but the PNGs.
+if let i = CommandLine.arguments.firstIndex(of: "--setup-preview"),
+   CommandLine.arguments.count > i + 1 {
+    let dir = CommandLine.arguments[i + 1]
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+    // --dark renders the dark appearance; light by default.
+    let dark = CommandLine.arguments.contains("--dark")
+    app.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+    NSAppearance.current = app.appearance
+    let owner = AppDelegate()
+    let flow = SetupFlow(app: owner)
+    flow.win.window.appearance = app.appearance
+    let cases: [(String, SetupFlow.Step, SetupFlow.Phase)] = [
+        ("1-location", .location, .idle), ("2-conflict", .conflict, .idle), ("3-hooks", .hooks, .idle),
+        ("4-start", .start, .idle), ("5-prompting", .start, .prompting(Date())),
+        ("6-ble-refused", .start, .bleRefused), ("7-handing-over", .done, .handingOver(Date())),
+        ("8-done", .done, .idle), ("9-failed", .hooks, .failed("Installing the Claude Code hooks failed.\n\nerror: example output from the installer"))]
+    for (name, st, ph) in cases {
+        flow.forcedStep = st
+        flow.phase = ph
+        flow.render()
+        // Laid out and drawn into the window's own backing first: cacheDisplay on a
+        // never-displayed view returned a blank white PNG for every state.
+        flow.win.window.contentView?.layoutSubtreeIfNeeded()
+        flow.win.window.display()
+        guard let v = flow.win.window.contentView, let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else { continue }
+        v.cacheDisplay(in: v.bounds, to: rep)
+        // The content view has no fill of its own - the WINDOW paints it - so the
+        // bare capture is text on transparency, which in dark mode is white on
+        // nothing. Composite it onto the window colour, in the appearance asked for.
+        let img = NSImage(size: v.bounds.size)
+        img.lockFocus()
+        NSColor.windowBackgroundColor.setFill()
+        NSRect(origin: .zero, size: v.bounds.size).fill()
+        rep.draw(in: NSRect(origin: .zero, size: v.bounds.size))
+        img.unlockFocus()
+        let out = (dir as NSString).appendingPathComponent("setup-\(name).png")
+        if let tiff = img.tiffRepresentation, let bmp = NSBitmapImageRep(data: tiff) {
+            try? bmp.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: out))
+        }
+        print("\(out)  \(Int(v.bounds.width))x\(Int(v.bounds.height))")
+    }
+    exit(0)
+}
+
 if let i = CommandLine.arguments.firstIndex(of: "--menu-shot"),
    CommandLine.arguments.count > i + 1 {
     let path = CommandLine.arguments[i + 1]
@@ -3200,7 +5161,8 @@ if CommandLine.arguments.contains("--legibility-check") {
     // already. That row is gone - the pairing reading is now the window's, and is
     // checked below where AppKit's ~31% does not apply to it.
     for (name, it, reachable) in [("5h", d.q5, { true }), ("7d", d.q7, { true }),
-                                  ("Codex", d.cxLine, { true }), ("battery", d.battLine, { true })]
+                                  ("Codex", d.cxLine, { true }), ("Codex 2nd window", d.cx2Line, { true }),
+                                  ("connection detail", d.deviceLine, { true })]
                                  as [(String, NSMenuItem, () -> Bool)] {
         guard !it.isHidden, reachable() else { continue }
         if it.isEnabled { print("  \(name): full strength"); continue }
@@ -3245,6 +5207,9 @@ if CommandLine.arguments.contains("--legibility-check") {
 if CommandLine.arguments.contains("--menu-dump") || CommandLine.arguments.contains("--menu-preview") {
     let d = AppDelegate()
     d.dryRun = true
+    // The real app reads these at launch; a dump that skipped it described the
+    // agent as "not running in the background" while it was.
+    ServiceState.shared.refreshNow()
     let m = d.buildMenu()
     d.refresh()
     if CommandLine.arguments.contains("--menu-dump") {
@@ -3253,15 +5218,26 @@ if CommandLine.arguments.contains("--menu-dump") || CommandLine.arguments.contai
         // pace GLYPHS survive, and they are the half that changes meaning - a
         // dump that showed neither could not tell a live 96%▲ from a stale one,
         // so the tooltip's own sentence is printed under it.
-        let label = barTitle(st).string
-        print("menu bar: boat (\(barBoatStyle(st)))"
-              + (label.isEmpty ? " (no label)" : " + label\"\(label)\""))
+        // Every size, with its WIDTH from the same renderer the bar uses - the number
+        // Automatic is deciding about - and which one is in use.
+        let label = barText(barModel(st, tier: d.barTier))
+        print("menu bar: boat (\(barBoatStyle(st))), size \(BarSize.current.rawValue) -> \(d.barTier.title)"
+              + (label.isEmpty ? " (nothing beside it)" : ": \(label)"))
+        let widths = barWidths(st, height: NSStatusBar.system.thickness)
+        for t in BarTier.allCases.reversed() {
+            print(String(format: "  %@ %-9@ %4.0fpt  %@", t == d.barTier ? ">" : " ", t.title as NSString,
+                         widths[t] ?? 0, barText(barModel(st, tier: t)) as NSString))
+        }
         let tip = barTooltip(st)
         print(tip.isEmpty ? "" : tip.split(separator: "\n").map { "  tooltip: \($0)" }.joined(separator: "\n") + "\n")
         print(dumpMenu(m))
     }
     if let i = CommandLine.arguments.firstIndex(of: "--menu-preview"), CommandLine.arguments.count > i + 1 {
-        writeMenuPreview(to: CommandLine.arguments[i + 1], m, bar: barTitle(readStatus()))
+        let st = readStatus()
+        let att = NSTextAttachment()
+        att.image = barImage(barModel(st, tier: d.barTier), boat: barBoatStyle(st), colourful: colourfulIcon,
+                             height: NSStatusBar.system.thickness)
+        writeMenuPreview(to: CommandLine.arguments[i + 1], m, bar: NSAttributedString(attachment: att))
     }
     exit(0)
 }
@@ -3447,7 +5423,7 @@ if CommandLine.arguments.contains("--pace-check") {
     // exists to report comes BEFORE the texture that gives it context, and it is
     // the heaviest thing on the line so the eye lands on it rather than on the
     // label naming it or the bar beside it.
-    let row = quotaTitle("5h", 44, 30, 1, windowMin: WINDOW_5H_MIN)
+    let row = quotaRow(WINDOW_5H_MIN, 44, 30, stale: false).0
     let rowStr = row.string as NSString
     let pctAt = rowStr.range(of: "44%").location
     let barAt = rowStr.range(of: "\u{2588}").location
@@ -3494,7 +5470,7 @@ if CommandLine.arguments.contains("--pace-check") {
     for (name, pct, age) in [("mid", 44, 1), ("barely", 1, 1), ("nearly", 96, 1),
                              ("high", 85, 1), ("critical", 97, 1),
                              ("stale", 44, QUOTA_STALE_SEC + 1)] {
-        let t = quotaTitle(name, pct, 30, age, windowMin: WINDOW_5H_MIN)
+        let t = quotaRow(WINDOW_5H_MIN, pct, 30, stale: age > QUOTA_STALE_SEC).0
         let str = t.string as NSString
         var inkColour: [String: Set<String>] = ["\u{2588}": [], "\u{2591}": []]
         t.enumerateAttributes(in: NSRange(location: 0, length: t.length)) { attrs, r, _ in
@@ -3538,40 +5514,104 @@ if CommandLine.arguments.contains("--pace-check") {
 
     // Staleness suppresses the pace on BOTH surfaces, because the percentage has
     // stopped moving while the clock has not.
+    // THE BAR (barModel / barText, which the image and --menu-dump both read). These
+    // read the real Menu Bar switches, so they run only with the usage switches on.
+    // (The offline-only switch cannot bite: a fresh HostStatus has no device.)
+    let barFull = { (s: HostStatus) in barText(barModel(s, tier: .full)) }
     var st = HostStatus()
     st.running = true; st.pct5h = 96; st.reset5h = 30; st.quotaAgeSec = 1
-    eq(barUsageParts(st).map(\.0).joined().contains("\u{25B2}"), true, "a fresh reading gets its glyph")
-    st.quotaAgeSec = QUOTA_STALE_SEC + 1
-    eq(barUsageParts(st).map(\.0).joined().contains("\u{25B2}"), false, "a stale reading loses it")
+    if BarPref.usage.on {
+        eq(barFull(st).contains("5h 96%\u{25B2}"), true, "a fresh reading ahead of the clock gets its \u{25B2}")
+        st.quotaAgeSec = QUOTA_STALE_SEC + 1
+        eq(barFull(st).contains("\u{25B2}"), false, "a stale reading loses it")
+        eq(barFull(st).contains("96%"), true, "but keeps its digits")
+        st.pct5h = 10; st.quotaAgeSec = 1
+        eq(barFull(st).contains("\u{25BC}") || barFull(st).contains("\u{2248}"), false, "only the warning is drawn: no \u{25BC} or \u{2248} in the bar")
+        st.pct5h = 96
+    }
     eq(quotaBarRuns(96, pace: pacePct(resetInMin: 30, windowMin: WINDOW_5H_MIN))
         .contains { $0.role == .tick }, true,
        "and the tick is what the row loses with it")
 
-    // Codex in the bar: named, on its OWN age and window. These read the real
-    // switches, like the two above, so they only run with both left on. (The
-    // offline-only switch cannot bite: a fresh HostStatus has no device.)
     if BarPref.usage.on && BarPref.codex.on {
         var cx = HostStatus()
         cx.running = true; cx.pct5h = 13; cx.reset5h = 200; cx.quotaAgeSec = 1
         cx.cxPct = 96; cx.cxReset = 30; cx.cxWinMin = 300; cx.cxAgeSec = 1
-        let fresh = barUsageParts(cx).map(\.0).joined()
-        eq(fresh.contains("CX 96%\u{25B2}"), true, "Codex is tagged CX and carries its own pace")
-        eq(fresh.hasPrefix(" 13%"), true, "Claude's figure stays first")
+        let fresh = barFull(cx)
+        eq(fresh.contains("[CX 96%\u{25B2}"), true, "Codex is its own column, tagged CX, with its own pace")
+        eq(fresh.hasPrefix("[5h 13%"), true, "Claude's column comes first")
         cx.quotaAgeSec = QUOTA_STALE_SEC + 1
-        eq(barUsageParts(cx).map(\.0).joined().contains("CX 96%\u{25B2}"), true,
-           "a stale CLAUDE reading does not take Codex's pace with it")
+        eq(barFull(cx).contains("CX 96%\u{25B2}"), true, "a stale CLAUDE reading does not take Codex's pace with it")
         cx.quotaAgeSec = 1; cx.cxAgeSec = QUOTA_STALE_SEC + 1
-        let cxStale = barUsageParts(cx).map(\.0).joined()
-        eq(cxStale.contains("CX 96%") && !cxStale.contains("CX 96%\u{25B2}"), true, "a stale Codex reading keeps digits, loses pace")
+        eq(barFull(cx).contains("CX 96%") && !barFull(cx).contains("CX 96%\u{25B2}"), true, "a stale Codex reading keeps digits, loses pace")
         cx.cxAgeSec = 1; cx.cxWinMin = nil
-        eq(barUsageParts(cx).map(\.0).joined().hasSuffix("CX 96%"), true, "no window, no glyph - never an assumed 7d")
+        eq(barFull(cx).contains("96%\u{25B2}"), false, "no window, no pace mark - never an assumed one")
         eq(barTooltip(cx).contains("Codex published no window length"), true, "and the tooltip names that cause")
         cx.pct5h = nil
-        eq(barUsageParts(cx).map(\.0).joined(), " CX 96%", "Codex alone has no leading gap or separator")
+        eq(barFull(cx).hasPrefix("[CX "), true, "Codex alone is the first column")
         cx.cxPct = nil; cx.pct5h = 13
-        eq(barUsageParts(cx).map(\.0).joined().contains("CX"), false, "no Codex reading, no CX tag")
+        eq(barFull(cx).contains("CX"), false, "no Codex reading, no CX column")
+
+        // Codex's SECOND window (codex2=). Parsed off the real tick-line shape the
+        // host prints, and stacked under the first the way Claude's 7d sits under 5h.
+        let tick: Substring = "5h=15% (resets 57m) 7d=41% (resets 2916m) qage=3 cxage=9 codex=100%/5h (resets 15m) codex2=62%/7d (resets 8000m) sessions(0)=[]"
+        eq(pctReset(tick, "codex=")?.0, 100, "codex= still parses with codex2= beside it")
+        eq(pctReset(tick, "codex2=")?.0, 62, "codex2= parses")
+        eq(codexWindowMin(tick), 300, "the first window is 5h")
+        eq(codexWindowMin(tick, key: "codex2="), 10080, "the second is 7d, read off its own key")
+        // The live misread: after the 5h reset the host prints `codex=?`, and the
+        // window search ran on into codex2's "62%/7d".
+        let reset: Substring = "qage=3 cxage=9 codex=? codex2=62%/7d (resets 8399m) sessions(0)=[]"
+        eq(codexWindowMin(reset), nil, "an expired codex= has no window - it must not borrow codex2's 7d")
+        eq(pctReset(reset, "codex=")?.0, nil, "and no percentage")
+        eq(pctReset(reset, "codex2=")?.0, 62, "while codex2= still reads")
+        // A session TITLE that looks like a field must not be read as one.
+        let titled: Substring = #"5h=10% (resets 30m) codex=40%/5h (resets 60m) sessions(1)=[{"id":"a","name":"x","status":"working","title":"codex2=62%/7d via=usb"}] via=ble"#
+        eq(pctReset(tickFields(titled), "codex2=")?.0, nil, "codex2= inside a session title is not a Codex figure")
+        eq(field(tickFields(titled), "via="), "ble", "and via= is the real one, not the title's")
+        eq(extractSessions(titled).first?.title, "codex2=62%/7d via=usb", "while the session still has its title")
+        cx.pct7d = 41; cx.reset7d = 2916
+        cx.cxPct = 100; cx.cxReset = 15; cx.cxWinMin = 300
+        cx.cx2Pct = 62; cx.cx2Reset = 8000; cx.cx2WinMin = 10080
+        eq(barFull(cx).contains("[CX 100%"), true, "both Codex windows show")
+        eq(barFull(cx).contains("/ 62%"), true, "the 7d under the 5h, sharing Claude's row labels")
+        // A plan whose FIRST window is 7d must not sit in the row Claude calls 5h.
+        cx.cxWinMin = 10080; cx.cx2Pct = nil; cx.cx2WinMin = nil
+        eq(barFull(cx).contains("[CX 7d 100%"), true, "Codex windows that differ from Claude's carry their own labels")
+        cx.cxWinMin = 300; cx.cx2Pct = 62; cx.cx2WinMin = 10080
+        // THE DISAPPEARANCE: the 5h window resets, the host drops its percentage
+        // (windowExpired), and Codex used to vanish with a valid 7d reading in hand.
+        cx.cxPct = nil
+        eq(barFull(cx).contains("[CX \u{2013} / 62%"), true, "an expired 5h window holds its row with a dash; Codex stays")
+        eq(barTooltip(cx).contains("no current reading"), true, "and the tooltip says why there is a dash")
+        cx.cx2Pct = nil
+        eq(barFull(cx).contains("CX"), false, "with neither window, no CX column at all")
+
+        // THE SIZES. Each keeps less, in the order the BarTier comment gives, and
+        // each is no wider than the one above it - measured off the real renderer.
+        var busy = cx
+        busy.cxPct = 100; busy.cx2Pct = 62; busy.pct5h = 13; busy.pct7d = 41
+        busy.sessions = [SessionRow(id: "a", name: "a", status: "waiting"), SessionRow(id: "b", name: "b", status: "working"),
+                         SessionRow(id: "c", name: "c", status: "asking"), SessionRow(id: "d", name: "d", status: "asking")]
+        if BarPref.sessions.on && BarPref.asking.on {
+            eq(barText(barModel(busy, tier: .full)).contains("[\u{25CB}1 / \u{25CF}1]"), true, "Full has the session counts")
+            eq(barText(barModel(busy, tier: .compact)).contains("\u{25CB}"), false, "Compact drops them")
+            eq(barText(barModel(busy, tier: .compact)).hasSuffix("(2)"), true, "Compact keeps the needs-input badge")
+            let mini = barText(barModel(busy, tier: .minimal))
+            eq(mini.hasPrefix("[CX ") && mini.contains("100%") && !mini.contains("13%"), true, "Minimal keeps only the column that needs attention")
+            eq(barModel(busy, tier: .icon), BarModel(dot: true), "Icon only is the boat, with a dot for the waiting answer")
+            let w = barWidths(busy, height: 22)
+            eq(w[.full]! > w[.compact]! && w[.compact]! > w[.minimal]! && w[.minimal]! > w[.icon]!, true,
+               "each size is narrower than the one above it (\(BarTier.allCases.reversed().map { Int(w[$0]!) }))")
+            // 275pt is the OLD one-line text bar for this same content, measured with
+            // its own font before it was removed. Full must stay well under it.
+            eq(w[.full]! < 165, true, "Full fits in 165pt with every column present (\(Int(w[.full]!))pt; the text bar measured 275)")
+            eq(barText(barModel(busy, tier: .minimal)).contains("[CX 5h 100%"), true, "Minimal's lone Codex column labels its own rows")
+        } else {
+            print("note: size checks skipped - Session counts or Needs-input count is switched off")
+        }
     } else {
-        print("note: Codex bar checks skipped - Quota usage or Codex usage is switched off in Menu bar shows")
+        print("note: Codex bar checks skipped - Claude usage or Codex usage is switched off")
     }
 
     print(failed == 0 ? "pace: all \(ran) checks passed" : "pace: \(failed) of \(ran) FAILED")

@@ -65,7 +65,7 @@ it), and **tapping the text box** pages the full prompt over the keys while
 leaving your answer visible. **CAP** cycles off → one-shot → locked (`CAPS`), and
 **holding DEL** repeats after half a second.
 
-Turn off **Settings › Answer prompts on device** in the menu bar to make the device a
+Turn off **Answer prompts on the display** (Settings › General) in the menu-bar app to make the device a
 read-only mirror instead — it still shows every prompt (handy for reading a long
 command from across the room), under an "ANSWER ON YOUR MAC" heading.
 

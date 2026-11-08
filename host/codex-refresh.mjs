@@ -41,6 +41,20 @@ export function shouldRefreshCodex({ ageSec, lastAttemptMs, backoffUntilMs, now,
   return true;
 }
 
+// Does this `rate_limits` event carry a reading at all? Codex writes events for MORE
+// THAN ONE LIMIT into the same rollout, keyed by `limit_id`, and not every one has a
+// window. MEASURED 2026-11-07: the 5-hour `codex` window reached 100% at 04:50:07, and
+// one second later Codex wrote a `limit_id: "premium"` event whose primary and secondary
+// were both null - 13 such events in the last 30 days, none with a window. The host kept
+// "the newest event", so that empty one REPLACED the 100% reading and the Codex figure
+// vanished from the menu bar and the device at exactly the moment it mattered most.
+// A windowless event is not a measurement of anything; it must never replace one.
+export function rateLimitsHaveWindow(rl) {
+  if (!rl || typeof rl !== "object") return false;
+  const has = (w) => !!w && typeof w === "object" && typeof w.used_percent === "number";
+  return has(rl.primary) || has(rl.secondary);
+}
+
 // A percentage for a window that has already reset is not a measurement of the current
 // window - it describes one that no longer exists. The repo's rule is that "--" means
 // never measured, because 0% is a measurement and never-measured is not; a reading whose

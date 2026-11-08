@@ -8,6 +8,10 @@
 // than as a bare `node` process - macOS's TCC framework kills a plain node
 // process outright (not even a permission prompt) if it touches CoreBluetooth
 // without an Info.plist declaring NSBluetoothAlwaysUsageDescription.
+// In the RELEASED app the same job is done by `Deckhand Host.app` inside
+// Deckhand.app (its own Node, started by a launch agent) - docs/reference/release.md.
+// Everything below that says DeckhandBLE.app applies to that bundle too: same
+// `open` for the Bluetooth prompt, same stdout with no reader, same execPath.
 
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
@@ -20,7 +24,9 @@ import readline from "node:readline";
 import crypto from "node:crypto";
 import { SerialPort } from "serialport";
 import noble from "@abandonware/noble";
+import { DatabaseSync } from "node:sqlite";
 import { mergeById } from "./sessions-merge.mjs";
+import { readAntigravitySessions } from "./gemini-sessions.mjs";
 import {
   capUtf8,
   ANSWER_TEXT_MAX_BYTES as VOICE_ANSWER_TEXT_MAX_BYTES,
@@ -56,6 +62,7 @@ const execFileAsync = promisify(execFile);
 import {
   shouldRefreshCodex,
   windowExpired,
+  rateLimitsHaveWindow,
   CODEX_BACKOFF_MS,
 } from "./codex-refresh.mjs";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -1398,7 +1405,9 @@ async function readCodexRollout(file) {
           if (p.type === "task_started" || p.type === "task_complete" || p.type === "turn_aborted") {
             out.lastTask = p.type;
           }
-          if (p.type === "token_count" && p.rate_limits) out.rateLimits = p.rate_limits;
+          // Only an event that carries a window: see rateLimitsHaveWindow() for the
+          // `premium` events that used to blank the figure at 100%.
+          if (p.type === "token_count" && rateLimitsHaveWindow(p.rate_limits)) out.rateLimits = p.rate_limits;
         }
       }
     }
@@ -1453,6 +1462,38 @@ async function readCodexSessions() {
     });
   }
   return out;
+}
+
+// ---------- Gemini (Antigravity) sessions ----------
+// Pulled from Antigravity's own conversation index - see host/gemini-sessions.mjs
+// for what was measured about it. MENU-BAR ONLY for now, deliberately: the firmware
+// draws every agent that is not "cx" as CLAUDE (sessions.ino), so a Gemini row on
+// the wire would be mislabelled on the glass. readSessions() ranks these into the
+// menu's list and keeps them off the device's.
+// readOnly: never a writer on another app's database. SQLite still creates the
+// -shm/-wal beside it if Antigravity is not running, exactly as agy itself does.
+function readGeminiSessions() {
+  return readAntigravitySessions({
+    staleMs: SESSION_STALE_MS,
+    openDb: (file) => new DatabaseSync(file, { readOnly: true }),
+  });
+}
+
+// The row the MENU draws, and nothing else: no ask, no nonce (a typed message
+// goes to Claude Code's inbox, which Antigravity has none of), no prompt.
+async function buildGeminiMenuItem(record) {
+  return {
+    id: record.id.slice(0, 12),
+    name: deviceText(await projectName(record.cwd), 22),
+    status: record.status,
+    path: truncatePath(toAscii(record.cwd), 64),
+    model: "",
+    branch: deviceText(await gitBranch(record.cwd || ""), 20),
+    ...(record.title ? { title: deviceText(record.title, 40) } : {}),
+    ...(record.app ? { app: record.app } : {}),
+    actSec: secondsSinceMidnight(record.updated_at),
+    agent: "gm",
+  };
 }
 
 // ---------- Refreshing the Codex figure ----------
@@ -1579,6 +1620,7 @@ function codexUsage() {
     cxWin: primary?.windowMin ?? null,
     cxPct2: secondary?.pct ?? null,
     cxResetMin2: secondary?.resetInMin ?? null,
+    cxWin2: secondary?.windowMin ?? null,
     cxPlan: rl.plan_type || null,
     // Same reason the Claude quota carries quotaAgeSec: a number read out of a file
     // that stopped being written is not a live reading, and the device dims it.
@@ -2450,6 +2492,9 @@ const focusRecords = new Map();
 // card closes, and harmless if it is ever missed - a stale id simply names a session
 // that is built full for nothing, and one that has ended is not in `top` at all.
 let focusPinnedId = "";
+// The MENU BAR's session list - the device's plus Gemini - set by readUsage() each
+// tick and printed on the tick's log line, which is the menu's only feed.
+let menuSessions = { list: [], total: 0 };
 
 async function readSessions() {
   let files;
@@ -2616,8 +2661,17 @@ async function readSessions() {
   // A lean row's transcript is registered too, so a FOCUSed row can open its history
   // the same way a full one can. Keyed by the SAME truncated id the device sees.
   for (const r of top) if (r.transcript && r.id) transcriptById.set(r.id.slice(0, 12), r.transcript);
+  // THE MENU'S LIST is the device's PLUS Gemini, ranked by the same rule from the
+  // records' own timestamps, so a Gemini row sorts among the others by urgency
+  // rather than trailing them. The device's list above is untouched by it.
+  const gemini = readGeminiSessions();
+  const menuRanked = [
+    ...top.map((r, i) => ({ r, item: list[i] })),
+    ...(await Promise.all(gemini.map(async (r) => ({ r, item: await buildGeminiMenuItem(r) })))),
+  ].sort((a, b) => rank(a.r) - rank(b.r) || b.r.updated_at - a.r.updated_at);
   return {
     list,
+    menu: { list: menuRanked.map((x) => x.item), total: records.length + gemini.length },
     total: records.length,
     // Sessions that did not fit AT ALL - now beyond twenty rather than beyond six.
     // Only nonzero with 21+ simultaneously-asking sessions, but if that ever
@@ -2749,6 +2803,11 @@ async function readUsage() {
     useOauth ? oauthUsage.sevenDayPct : sevenDay?.used_percentage,
     useOauth ? oauthUsage.sevenDayResetsAtMs : sevenDay?.resets_at ? sevenDay.resets_at * 1000 : null
   );
+
+  // The menu's session list is kept OFF the returned `usage`, because `usage` is
+  // spread into the device's payload - see readGeminiSessions() for why Gemini
+  // rows must not travel there. The tick's log line reads it from here instead.
+  menuSessions = sessions.menu ?? { list: sessions.list ?? [], total: sessions.total ?? 0 };
 
   return {
     fiveHourPct: five.pct,
@@ -4966,8 +5025,14 @@ function startBleScan() {
   });
 }
 
+// The adapter's last reported state, into the heartbeat as `ble`. The released app's
+// first-run window reads it to tell "Bluetooth was allowed" (poweredOn) from "it was
+// refused" (unauthorized) without parsing the log; null until noble reports once.
+let bleAdapterState = null;
+
 function startBle() {
   noble.on("stateChange", (state) => {
+    bleAdapterState = state;
     console.log(`BLE: adapter state = ${state}`);
     if (state === "poweredOn") startBleScan();
     else noble.stopScanningAsync().catch(() => {});
@@ -5945,6 +6010,7 @@ async function tick(generation = tickGeneration) {
           connected: usbLinks.length > 0 || !!bleCharacteristic,
           remoteAnswer,
           at: Date.now(),
+          ble: bleAdapterState,
           // `device` = who we're actually talking to (falls back to the choice);
           // `devices`/`selected` let the menu bar render the picker without ever
           // reading the secrets file.
@@ -6083,7 +6149,16 @@ async function tick(generation = tickGeneration) {
         // reads as "no window" and so drew Codex with no pace at all.
         `${usage.cxWin ? (usage.cxWin >= 1440 ? `/${Math.round(usage.cxWin / 1440)}d` : `/${Math.round(usage.cxWin / 60)}h`) : ""}` +
         `${usage.cxResetMin == null ? "" : ` (resets ${usage.cxResetMin}m)`} ` +
-        `sessions(${usage.sessionsTotal})=${JSON.stringify(usage.sessions)} ` +
+        // Codex's SECOND window (7 days on a Plus plan), same shape, its own key.
+        // Without it the menu had only the 5-hour figure, so the moment that window
+        // reset Codex vanished from the bar while a perfectly valid 7-day reading sat
+        // unused. Absent entirely when Codex publishes no second window.
+        (usage.cxPct2 == null ? "" :
+          `codex2=${usage.cxPct2}%${usage.cxWin2 ? (usage.cxWin2 >= 1440 ? `/${Math.round(usage.cxWin2 / 1440)}d` : `/${Math.round(usage.cxWin2 / 60)}h`) : ""}` +
+          `${usage.cxResetMin2 == null ? "" : ` (resets ${usage.cxResetMin2}m)`} `) +
+        // The MENU's list (the device's plus Gemini), not usage.sessions: this
+        // line is the menu bar's feed, and nothing reads it for the device.
+        `sessions(${menuSessions.total})=${JSON.stringify(menuSessions.list)} ` +
         // Every live link by name, not just the transport kinds: "via=usb,ble"
         // read identically whether one board was connected on two transports or
         // two boards were connected on one each, which is exactly the confusion

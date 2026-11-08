@@ -89,7 +89,7 @@ noise, but an icon is yours.
 
 Two ways to set it:
 
-- **The menu-bar app**: Settings › **Mac icon**, and pick one. It takes effect on
+- **The menu-bar app**: Settings › Devices › **Icon**, and pick one. It takes effect on
   the device within a tick (~5s).
 - **The environment**, which is the provisioning path — put it in the host's
   LaunchAgent plist so it survives reinstalls:

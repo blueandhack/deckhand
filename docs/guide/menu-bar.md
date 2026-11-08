@@ -17,43 +17,58 @@ open mac-app/DeckhandMenuBar.app
 Two things that look like faults and are not. **It is `LSUIElement`** — menu-bar
 only, no dock icon and no window — so "I can't see it" almost always means it is
 simply not running; `pgrep -x DeckhandMenuBar` settles that in one command. And it
-is **not a login item** until you switch on `Settings › Launch at login` in its own
-menu, so it stays gone after a reboot until you do.
+is **not a login item** until you switch on *Open Deckhand at login* in its Settings
+window (General), so it stays gone after a reboot until you do.
 
 **The built `.app` is deliberately not committed**, because `build.sh` bakes this
 repo's absolute path into `Info.plist` as `DeckhandHostDir`. **Re-run `build.sh`
 after moving the repo**, or it will point at a directory that no longer exists.
 
-It puts an origami paper-boat icon in the menu bar. The dropdown is grouped:
-where the host stands, what quota is left, who is waiting on you, the last
-dictation, then the controls. The top level is **actions only** — **Start / Stop
-Deckhand** and a **Device** submenu (which is also where **Forget** lives, since
-it is a destructive per-device action) — while every preference sits behind
-**Settings**: *Answer prompts on device*, *Colourful icon*, *Menu bar shows*,
-*Needs-input sound*, *Mac icon* and *Launch at login*. *Mac icon* picks this Mac's
-13x13 icon on the device (the sixteen names are listed under *Giving a Mac its
-own icon*, in **Security of the remote**); with `DECKHAND_MAC_EMOJI` set it reads
-*Mac icon (set by env)* and its entries are disabled, since a click could not
-move that choice. Settings stays reachable with the host
-stopped, since launch-at-login and the bar's own contents are still meaningful
-choices then; Device and Answer-prompts dim with it, because neither can do
-anything without the host.
+It puts an origami paper-boat icon in the menu bar. **The dropdown is for
+looking**: where the host stands, what quota is left, who is waiting on you and
+the last dictation, then just three things to do — **Start / Stop Deckhand**,
+**Pair New Device…** and **Settings…** (⌘,) — and Quit. (The released app adds
+**Check for Updates…**.)
+
+**Every preference is in the Settings window**, grouped by the question you arrive
+with:
+
+| Pane | What is in it |
+|---|---|
+| **General** | Is it running (with Restart / Stop and the host log), *Open Deckhand at login*, and what happens when a session needs you: *Answer prompts on the display* and the alert *Sound* |
+| **Menu Bar** | A live preview of what sits beside the boat, and switches for Claude usage, Codex usage, session counts, the needs-input count, *Hide usage and session counts while a display is connected*, and *Colourful icon* |
+| **Devices** | Every paired display with how it is connected and its battery, *Forget…* per display, *Pair New Device…*, which display Bluetooth follows (shown once you have two), and **this Mac on the display**: its name and its icon |
+| **Claude Code** | Whether the hooks are installed, with Install / Repair / Remove in the released app |
+| **About** | Version, update settings (released app), the host log, run setup again, uninstall |
+
+Every switch says what it does underneath it, which is the reason this moved out of
+the menu: the old *Settings* submenu had grown to eleven rows and five nested
+submenus, several of them only understandable from a tooltip. The icon picker shows
+the sixteen icons as a grid (the names are listed under *Giving a Mac its own icon*,
+in **Security of the remote**); with `DECKHAND_MAC_EMOJI` or `DECKHAND_MAC_TAG` set,
+the name and icon are dimmed and the pane says why, since a click could not move
+that choice. Controls that act through the host (answering, forgetting, the
+Bluetooth choice, the name) dim while it is stopped.
 
 ```
-● Syncing · USB + Bluetooth
-   Deckhand-0528
-──────────────────────────────
-5h    ██░░░░░░░░   16% used
-         resets in 2h 44m
-7d    █░░░░░░░░░    2% used
-         resets in 6d 21h
-Codex ░░░░░░░░░░    0% used
-──────────────────────────────
-SESSIONS
-■  deckhand  ·  needs input
-●  api        ·  working
-         Read the project
+●  Syncing with Deckhand-C114
+      Over USB and Bluetooth  ·  battery 78%
+──────────────────────────────────────────────
+Claude
+5-hour    16% ▼  █▋░░░│░░░░       resets in 2h 44m
+Weekly     2% ▼  ▎░░░░░░│░░░      resets in 6d 21h
+Codex
+5-hour    13% ▲  █│▎░░░░░░░░      resets in 4h 47m
+Weekly    64% ▲  ██│████▍░░░      resets in 5d 19h
+──────────────────────────────────────────────
+Sessions                    1 needs you  ·  1 working
+■  deckhand                              needs you
+●  api   Codex                             working
+       Read the project
 ```
+
+Hover over a usage row for the sentence behind it (how much of the window has passed,
+whether you are ahead of the clock, and the time it resets).
 
 **Battery** appears under the device name — `78% · ~5h left` — and the hours are
 measured, not modelled: the device watches its own voltage fall and says nothing
@@ -85,13 +100,13 @@ Beside the boat, left to right: quota `5h·7d`, then the live sessions by status
 three partition the list rather than overlapping. Each badge disappears at zero,
 so an empty label is a quiet Mac and an absent `○` means "none waiting" rather
 than "not shown". The two device-mirroring badges go quiet once a device is
-connected — that is what *Menu bar shows › Only while no device is connected*
-governs, and every part of it can be switched off there. The needs-input count is
+connected — that is what *Hide usage and session counts while a display is connected*
+(Settings › Menu Bar) governs, and every part of it can be switched off there. The needs-input count is
 not gated that way, because a prompt blocking your work is worth saying whether or
 not the device is also saying it.
 
 **A sound fires when a session starts needing input** — Submarine by default,
-changeable (or silenceable) under *Needs-input sound*, where picking one plays it.
+changeable (or silenceable) under Settings › General › *Sound*, where picking one plays it.
 It sounds on the *edge* into needing input, keyed by session id, and the first
 refresh after launch only primes: whatever was already waiting when the app
 started is not news.

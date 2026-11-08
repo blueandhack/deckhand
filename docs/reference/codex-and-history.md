@@ -187,6 +187,25 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
     `rate_limits` ever seen is retained across ticks and published with `cxAgeSec`, and
     the device dims it past 15 minutes for exactly the reason `quotaAgeSec` exists: a
     value read from a file that stopped being written is not a live reading.
+    **CORRECTED 2026-11-07: it is now TWO numbers, and "the newest event" was the wrong
+    rule.** On this Mac's Plus plan `primary` is a **5-hour** window (`window_minutes:
+    300`) and `secondary` is populated with the **7-day** one (`10080`), so the host now
+    prints both on the tick line (`codex=100%/5h (resets 12m) codex2=62%/7d (resets
+    8413m)`) and the menu bar draws them like Claude's (`CX 100% · 62%`), with a dash in
+    the first slot when only the second has a reading. Before, the 5h window resetting
+    made Codex VANISH from the bar with a valid 7-day reading in hand. And Codex writes
+    `rate_limits` events for MORE THAN ONE LIMIT, keyed by `limit_id`: measured, the
+    `codex` window hit 100% at 04:50:07 and one second later Codex wrote a `limit_id:
+    "premium"` event with `primary` and `secondary` both null (13 such events in 30 days,
+    none with a window). Keeping "the newest event" let that empty one replace the 100%
+    reading, so the figure disappeared at exactly the moment it mattered. The harvest
+    now takes only events that carry a window (`rateLimitsHaveWindow()` in
+    `host/codex-refresh.mjs`, with a structural check in `codex-refresh-check.mjs` bound
+    to `readCodexRollout`'s own body). **How often it changes:** the host re-reads the
+    rollouts every 5s tick, but a new figure exists only when Codex itself writes one -
+    on a Codex turn - so between turns it is the last number Codex reported, and the
+    menu dims it after `QUOTA_STALE_SEC` (15 minutes) like any other. When the reading is
+    over 24h old the host spends one tiny `codex exec` turn to refresh it, at most every 6h.
   - Payload keys are short (`cxPct`/`cxResetMin`/`cxWin`/`cxAgeSec`, `agent:"cc"|"cx"`)
     because they ride in **every** tick and the device's line buffer is sized for asks
     carrying 1400-char details.

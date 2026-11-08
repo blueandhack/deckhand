@@ -1,6 +1,7 @@
 // Run: node host/codex-refresh-check.mjs
 // Imports nothing that reaches CoreBluetooth, so plain node is safe here.
-import { shouldRefreshCodex, windowExpired, CODEX_STALE_MS, CODEX_ATTEMPT_MS } from "./codex-refresh.mjs";
+import fs from "node:fs";
+import { shouldRefreshCodex, windowExpired, rateLimitsHaveWindow, CODEX_STALE_MS, CODEX_ATTEMPT_MS } from "./codex-refresh.mjs";
 
 let failed = 0;
 const t = (got, want, what) => {
@@ -69,6 +70,30 @@ t(windowExpired({ resets_at: nowSec - 3600 }, NOW), true, "a window whose reset 
 t(windowExpired({ resets_at: nowSec + 3600 }, NOW), false, "a window still running is not");
 t(windowExpired({ resets_at: null }, NOW), false, "no reset time: not expired, we cannot tell");
 t(windowExpired(null, NOW), false, "no window at all is not 'expired'");
+
+// --- a windowless event is not a reading. The exact event Codex wrote one second after
+// the 5h window reached 100% (2026-11-07 04:50:08), which used to blank the figure.
+const premium = { limit_id: "premium", limit_name: null, primary: null, secondary: null,
+  credits: { has_credits: false, unlimited: false, balance: "0" }, plan_type: "plus", rate_limit_reached_type: null };
+const codex100 = { limit_id: "codex", primary: { used_percent: 100.0, window_minutes: 300, resets_at: nowSec + 600 }, secondary: null };
+t(rateLimitsHaveWindow(premium), false, "the premium event with no windows is not a reading");
+t(rateLimitsHaveWindow(codex100), true, "the codex event at 100% is");
+t(rateLimitsHaveWindow({ primary: null, secondary: { used_percent: 3 } }), true, "a secondary-only window counts");
+t(rateLimitsHaveWindow({ primary: { used_percent: null } }), false, "a window with no percentage does not");
+t(rateLimitsHaveWindow(null), false, "nothing is not a reading");
+
+// STRUCTURAL: the rule above binds nothing unless the harvest actually calls it. Bound
+// to readCodexRollout's own body, not the file - a neighbouring line cannot satisfy it.
+{
+  const src = fs.readFileSync(new URL("./index.mjs", import.meta.url), "utf8");
+  const m = src.match(/async function readCodexRollout\([\s\S]*?\n\}\n/);
+  t(!!m, true, "readCodexRollout found in index.mjs");
+  const body = m ? m[0] : "";
+  t(/token_count"\s*&&\s*rateLimitsHaveWindow\(p\.rate_limits\)/.test(body), true,
+    "readCodexRollout harvests rate_limits ONLY through rateLimitsHaveWindow()");
+  t(/out\.rateLimits\s*=\s*p\.rate_limits/.test(body.replace(/rateLimitsHaveWindow\(p\.rate_limits\)\)\s*out\.rateLimits\s*=\s*p\.rate_limits/, "")),
+    false, "and nowhere else in it assigns rateLimits unguarded");
+}
 
 console.log(failed ? `codex-refresh: ${failed} FAILED` : "codex-refresh: all checks passed");
 process.exit(failed ? 1 : 0);

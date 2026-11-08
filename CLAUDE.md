@@ -393,6 +393,7 @@ node firmware/deckhand_display/geom-sweep.mjs          # fault-injection sweep, 
 # the wire and the Mac
 node host/{wire-bytes,ask-chips,ask-optdescs,pair-crypto,pair-exchange,voice-answer}-check.mjs
 node host/{codex-refresh,line-address,session-lookup}-check.mjs
+node host/gemini-sessions-check.mjs                     # Antigravity rows: menu yes, device no
 node host/session-inbox-check.mjs                       # the inbox frame, over a stand-in socket
 node host/{host-tag,mac-emoji,run-ledger,watchdog,ccusage}-check.mjs
 node host/whisper-prompt-check.mjs                      # the dictation vocabulary, vs whisper's SILENT prompt cap
@@ -492,6 +493,7 @@ through the measuring command.
 | Codex, the paged history reader | [`docs/reference/codex-and-history.md`](docs/reference/codex-and-history.md) |
 | `host/index.mjs`, OAuth, the watchdog, logs | [`docs/reference/host-runtime.md`](docs/reference/host-runtime.md) |
 | the menu-bar app | [`docs/reference/menu-bar.md`](docs/reference/menu-bar.md) |
+| the released `Deckhand.app`, signing, notarization, Sparkle, `release/` | [`docs/reference/release.md`](docs/reference/release.md) |
 | fonts, generated art, themes, the waiting screen | [`docs/reference/ui-details.md`](docs/reference/ui-details.md) |
 | board 1's known defects and what is unverified | [`docs/reference/board-1-known-state.md`](docs/reference/board-1-known-state.md) |
 
