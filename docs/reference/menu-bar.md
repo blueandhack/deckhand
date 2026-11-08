@@ -174,6 +174,26 @@ Four things are load-bearing:
   preferences door that only opens while a background process is alive is its own bug),
   while `Device` and `Answer prompts on device` dim with it, since neither can do anything
   without the host.
+- **GEMINI USAGE (2026-11-08), read from the Gemini app's own local server.** The interface itself - the descriptor,
+  the call, the answer's shape, and how to probe it - is in [`gemini.md`](gemini.md). Gemini keeps no
+  usage figure on disk (its logs record `doRefreshQuota` but never the numbers). The Gemini app
+  runs an `agy --hub` that writes `~/.gemini/<store>/daemon/hub_<port>.json` (`pid`, `httpPort`,
+  `csrfToken`, `lsVersion`), and that server answers `RetrieveUserQuotaSummary` - the
+  breakdown the app shows its own users - with quota GROUPS of up to two windows: "Gemini
+  Models" (Flash, Pro) 5h + weekly, "Claude and GPT models" 5h + weekly, and "Gemini 4 Argon"
+  weekly only (separate on the Pro plan). Measured against lsVersion 2.28.2. **Corrected the
+  same day:** the first version read `GetUserStatus`'s one `quotaInfo` per MODEL, which carried
+  a single window each (weekly for Argon, 5h for the rest) - so the 5-hour Gemini limit was
+  missing, as the user pointed out - and which even disagreed with the summary for Argon
+  (0.970 against 0.999 remaining in the same minute). The host (`host/gemini-quota.mjs`) asks
+  at most once a minute, in the background, and puts `gmq=Group|5h:used:reset|weekly:...;...`
+  and `gmage=` on the tick line. The bar's `GM` column is the general Gemini group, 5h over
+  weekly like Claude and Codex, with a real pace mark (both window lengths are named), behind
+  its own **Gemini usage** switch; the dropdown's **Gemini** section shows that group as
+  5-hour/Weekly, then Argon, then the Claude/GPT group once used. UNDOCUMENTED API: any failure
+  - app closed, dead pid, refused call, changed shape - is "no reading", and the column simply
+  is not there; a reading 6h old is dropped. Read-only, 127.0.0.1 only, with the token the app
+  wrote for local clients. Menu bar only - the device's firmware would label it wrong.
 - **THE DROPDOWN IS THREE SECTIONS OF ONE-LINE ROWS (2026-11-07).** It is read to answer, in
   order: is it working, how much quota is left and when it comes back, who is waiting on me.
   So: the connection in two lines (`Syncing with Deckhand-C114`, then `Over USB and Bluetooth ·
