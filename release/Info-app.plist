@@ -49,5 +49,9 @@
   <string>@SU_PUBLIC_KEY@</string>
   <key>DeckhandCommit</key>
   <string>@COMMIT@</string>
+  <!-- "alpha" / "beta" for a pre-release, empty for a stable one (build-release.sh
+       --channel). Shown beside the version in Settings › About. -->
+  <key>DeckhandChannel</key>
+  <string>@CHANNEL@</string>
 </dict>
 </plist>

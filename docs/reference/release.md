@@ -20,11 +20,20 @@ release/build-release.sh 0.2.0 --working-tree --no-notarize   # uncommitted code
 
 A release is built from `git archive HEAD`, so it is exactly a commit: uncommitted edits
 and untracked files cannot leak in. `CFBundleVersion` is `git rev-list --count HEAD`,
-which only rises, and is what Sparkle compares. Output: `release/dist/<version>/` with the
-stapled DMG and `appcast.xml`. Publishing (`gh release create v<version>` with both files)
-is a separate, deliberate step. The appcast URL every installed copy polls is
-`https://github.com/blueandhack/deckhand/releases/latest/download/appcast.xml`, so the
-newest GitHub release must carry the newest appcast.
+which only rises, and is what Sparkle compares. Output: `release/dist/<version>/` with the stapled DMG and `appcast.xml`.
+
+**Channels.** `--channel alpha|beta` makes a PRE-RELEASE: the version stays `x.y.z` (it must
+be digits), `DeckhandChannel` in Info.plist makes Settings › About say "0.1.0 alpha", and
+`publish.sh` publishes it with GitHub's pre-release badge.
+
+**Publishing** is `release/publish.sh <x.y.z> [--notes file.md]`, a separate, deliberate step.
+It refuses an unstapled build, a mismatched appcast, an existing tag, or a main that is not
+level with origin; then it creates the GitHub release with the DMG, waits until the DMG
+downloads, and only THEN publishes the feed. **The feed is `release/appcast.xml` on main**
+(`https://raw.githubusercontent.com/blueandhack/deckhand/main/release/appcast.xml`), committed
+by publish.sh. It used to be `releases/latest/download/appcast.xml`, but GitHub's "latest"
+skips pre-releases, so a pre-release alpha would have left every installed alpha with no feed.
+That address is built into every copy shipped and can never change for them.
 
 **Test-only overrides**, refused without `--working-tree`: `DECKHAND_BUILD_NUMBER` (two
 working-tree builds of one commit otherwise share a number and Sparkle sees no update

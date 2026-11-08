@@ -52,7 +52,20 @@ This README is deliberately short. The detail lives in two places, split by who 
 | **a person** setting this up or building the hardware | [`docs/guide/`](docs/guide/) — [overview](docs/guide/overview.md), [hardware](docs/guide/hardware.md), [setup](docs/guide/install-and-uninstall.md), [controls](docs/guide/controls.md), [answering](docs/guide/answering.md), [voice](docs/guide/voice.md), [security](docs/guide/security.md), [menu bar](docs/guide/menu-bar.md), [how it works](docs/guide/how-it-works.md), [Codex](docs/guide/codex.md) |
 | **an AI agent** working on the code | [`CLAUDE.md`](CLAUDE.md) first — it is the rules, and it says which [`docs/reference/`](docs/reference/) file to read before touching what |
 
-## Quick start (macOS)
+## Download the app (alpha)
+
+**[Deckhand.app on the Releases page](https://github.com/blueandhack/deckhand/releases)**
+— a notarized Mac app with the menu bar, the host and its own Node built in, so you need
+no Node, Homebrew or clone of this repo. Apple Silicon, macOS 14 or later. It is an
+**alpha**: it works on the machine it was built on and tested end to end there, and the
+release notes list what has not been verified yet. It updates itself (Sparkle).
+
+Open the DMG, drag Deckhand to **Applications**, open it from there, and follow the setup
+window: it asks before it touches Claude Code's settings, takes a backup first, and asks
+macOS for Bluetooth once. Flashing a board's firmware is still done from this repo
+(below). Details: [Setup](docs/guide/install-and-uninstall.md).
+
+## Quick start from source (macOS)
 
 You need: a Mac with [Node.js](https://nodejs.org) (`brew install node`),
 [arduino-cli](https://arduino.github.io/arduino-cli/), Claude Code, and one of the

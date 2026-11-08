@@ -28,14 +28,21 @@ VERSION="${1:-}"
 shift || true
 NOTARIZE=1
 WORKING_TREE=0
-for a in "$@"; do
-  case "$a" in
+CHANNEL=""
+while [ $# -gt 0 ]; do
+  case "$1" in
     --no-notarize) NOTARIZE=0 ;;
     --working-tree) WORKING_TREE=1 ;;
-    *) echo "unknown option: $a" >&2; exit 2 ;;
+    # --channel alpha|beta: a PRE-RELEASE. The version stays x.y.z (CFBundleShort-
+    # VersionString must be digits); the channel is stamped into Info.plist as
+    # DeckhandChannel, so About says "0.1.0 alpha", and publish.sh marks the GitHub
+    # release as a pre-release.
+    --channel) shift; CHANNEL="${1:-}"; [[ "$CHANNEL" =~ ^(alpha|beta)$ ]] || { echo "--channel takes alpha or beta" >&2; exit 2; } ;;
+    *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
+  shift
 done
-[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "usage: $0 <x.y.z> [--no-notarize] [--working-tree]" >&2; exit 2; }
+[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "usage: $0 <x.y.z> [--channel alpha|beta] [--no-notarize] [--working-tree]" >&2; exit 2; }
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 R="$REPO/release"
@@ -51,7 +58,12 @@ SPARKLE_SHA256="1a856d2a9edb8e628de88121d7be04cf0e2167f8641650b78fca00b14244cf27
 
 IDENTITY="${DECKHAND_SIGN_ID:-Developer ID Application: Yujia Lin (GJFJF2K2L3)}"
 NOTARY_PROFILE="${DECKHAND_NOTARY_PROFILE:-deckhand-notary}"
-FEED_URL="https://github.com/blueandhack/deckhand/releases/latest/download/appcast.xml"
+# THE FEED IS A FILE IN THE REPO, not a release asset. It used to be
+# releases/latest/download/appcast.xml, but GitHub's "latest" SKIPS PRE-RELEASES, so an
+# alpha published with the pre-release badge would have left every installed alpha with
+# no feed at all. This address is built into every copy shipped and cannot change for
+# them later; publish.sh commits the newest appcast here after each release.
+FEED_URL="https://raw.githubusercontent.com/blueandhack/deckhand/main/release/appcast.xml"
 DOWNLOAD_PREFIX="https://github.com/blueandhack/deckhand/releases/download/v$VERSION/"
 
 say() { printf '\n==> %s\n' "$*"; }
@@ -200,7 +212,7 @@ C="$APP/Contents"
 HC="$C/Helpers/Deckhand Host.app/Contents"
 mkdir -p "$C/MacOS" "$C/Resources" "$C/Frameworks" "$C/Library/LaunchAgents" "$HC/MacOS" "$HC/Resources"
 subst() { sed -e "s|@VERSION@|$VERSION|g" -e "s|@BUILD@|$BUILD_NUMBER|g" -e "s|@FEED_URL@|$FEED_URL|g" \
-              -e "s|@SU_PUBLIC_KEY@|$SU_PUBLIC_KEY|g" -e "s|@COMMIT@|$COMMIT|g" -e "s|@ARGS@||g" "$1"; }
+              -e "s|@SU_PUBLIC_KEY@|$SU_PUBLIC_KEY|g" -e "s|@COMMIT@|$COMMIT|g" -e "s|@CHANNEL@|$CHANNEL|g" -e "s|@ARGS@||g" "$1"; }
 subst "$R/Info-app.plist" > "$C/Info.plist"
 subst "$R/Info-host.plist" > "$HC/Info.plist"
 subst "$R/agent.plist" > "$C/Library/LaunchAgents/io.github.blueandhack.deckhand.host.plist"
@@ -311,5 +323,8 @@ if [ "$NOTARIZE" = 1 ]; then
 fi
 
 say "Done"
+# For publish.sh: which channel this build was made for, so it cannot publish an
+# alpha build as a stable release or the reverse.
+echo "$CHANNEL" > "$DIST/channel"
 ls -la "$DIST"
 echo "Publish with: release/publish.sh $VERSION"
