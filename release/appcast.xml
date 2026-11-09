@@ -3,14 +3,14 @@
     <channel>
         <title>Deckhand</title>
         <item>
-            <title>0.1.0</title>
-            <pubDate>Sun, 08 Nov 2026 00:07:44 -0800</pubDate>
+            <title>0.1.1</title>
+            <pubDate>Sun, 08 Nov 2026 23:14:56 -0800</pubDate>
             <link>https://github.com/blueandhack/deckhand</link>
-            <sparkle:version>724</sparkle:version>
-            <sparkle:shortVersionString>0.1.0</sparkle:shortVersionString>
+            <sparkle:version>729</sparkle:version>
+            <sparkle:shortVersionString>0.1.1</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://github.com/blueandhack/deckhand/releases/download/v0.1.0/Deckhand-0.1.0.dmg" length="56800736" type="application/octet-stream" sparkle:edSignature="+4fYNIkcJerzrQYoLV+EhbZBrOV8qA0VvVn9uurZlbfq3ZbS6CAv0B9+8hYMuO2adrQcDU6DgnrjRWK1TiTbCA=="/>
+            <enclosure url="https://github.com/blueandhack/deckhand/releases/download/v0.1.1/Deckhand-0.1.1.dmg" length="52419692" type="application/octet-stream" sparkle:edSignature="++a1FkhKC5lmbjefEHNtyFU+c7/nEx+np2BBKOKzpHX6xTUsDUdjXv62WbVL7JHjLyQiWs8FA3zVhtaZvl82CA=="/>
         </item>
     </channel>
 </rss>
