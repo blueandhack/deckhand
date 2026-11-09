@@ -227,6 +227,23 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
   stalled tick that eventually resumes must not schedule alongside its replacement, or
   every stall would permanently double the tick rate. Proven with a promise that never
   settles: without the watchdog the loop stops dead, with it it resumes.
+- **A hang now names the step it is stuck in.** On 2026-11-08 at about 22:24 the released
+  app logged one genuine hang (`Poll loop stalled for 34s with timers running normally`)
+  right after both `ccusage` runs timed out at 20s. It was not a sleep: Caffeine held a
+  `PreventUserIdleDisplaySleep` assertion throughout, and `pmset -g log` shows no sleep
+  near it. `ccusage` was already off the tick's path (`kickCcusage`), so one of the tick's
+  OTHER awaits hung, and the line could not say which. **The cause is still unknown.**
+  Every await on the tick's path (`tick()`, `readUsage()`, `readSessions()`) now goes
+  through `track(name, promise)` (`makeAwaitTracker` in `host/watchdog.mjs`), and a hang
+  line ends `Waiting on: readSessions:codex 33s, readUsage 33s.` - oldest first, or
+  `No tracked step was pending` when the stuck await is one `track()` does not wrap.
+  `track()` settles exactly as the promise it wraps, so it changes no behaviour.
+  `watchdog-check.mjs` reads `host/index.mjs` and fails, by function and line, on any
+  await in those three bodies that bypasses `track()`. A nested async callback is exempt
+  because the outer tracked promise names it, and so is an `await Promise.all([...])`
+  whose every element is a `track()`. `--selftest` un-wraps each of the 14 sites in turn
+  and requires each to be caught. **Not yet observed live:** the released app runs its
+  own copy of `host/`, so this reaches the log only after the next build is installed.
 - **A death now leaves evidence, and the fatal handlers must NOT use the normal logger.**
   There were no `unhandledRejection`/`uncaughtException` handlers at all, and on modern
   Node an unhandled rejection **terminates the process** - for a status display that is the
