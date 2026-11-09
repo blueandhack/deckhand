@@ -90,6 +90,32 @@ entitlements put on the binary first were silently dropped and Node died at star
 "Failed to reserve virtual memory for CodeRange". The build asserts the helper kept
 `allow-jit`. Library validation stays ON (every addon is signed by the same team).
 
+## The DMG window
+
+Not a bare folder: the app and an Applications link sit on a background with an arrow
+between them, "Drag Deckhand into Applications", and a picture of the menu bar Deckhand will
+live in, with the version and channel in a corner; the mounted volume carries the app's icon.
+The background is drawn by the app being shipped (`Deckhand --dmg-background <prefix>
+"<label>"`, at 1x and 2x, joined into one Retina TIFF), so its menu-bar picture is the real
+boat and the real two-row bar. Finder alone can write a window's layout (it lives in the
+image's `.DS_Store`), so the image is built writable, Finder is scripted to lay it out, and
+only then is it compressed. Three things were found by LOOKING at the mounted result:
+
+- **Finder deletes a `.VolumeIcon.icns`** already on the volume during its layout pass, and
+  clears the custom-icon flag; `hdiutil create -srcfolder` drops one from the source folder
+  too. So the icon is copied in and flagged LAST, after Finder (`GetFileInfo` must show `C`).
+- **The person's own Finder chrome still shows**: a tab bar cannot be turned off per window,
+  and the path bar needed its own `pathbar visible` (toolbar and status bar are not enough).
+  Finder also made the window wider than asked (660 requested, 681 shown), so the background
+  is drawn on an 800x560 canvas with the layout in its top-left 660x420 - extra area is more
+  gradient, never a white strip - and the layout fits in ~370pt of height.
+- **Labels stay readable in dark mode**: Finder draws icon labels dark over a light
+  background picture (seen with this Mac in dark mode).
+
+Positions are shared between the two scripts by hand: app at (170,150), Applications at
+(490,150), 112pt icons, window bounds 660 x 440. Built here needs Finder Automation permission
+for the shell running the build; without it the build stops and says so.
+
 ## First run, and migrating from the repo setup
 
 The setup window (`SetupFlow`) shows the next step, derived from the machine every second:

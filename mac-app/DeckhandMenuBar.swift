@@ -5145,6 +5145,88 @@ if let i = CommandLine.arguments.firstIndex(of: "--settings-show") {
     exit(0)
 }
 
+/// `--dmg-background <out-prefix> <label>`: the release DMG's window background, drawn
+/// by the app itself so its menu-bar picture is the REAL boat and the REAL two-row bar
+/// (barImage), not a drawing of them. Writes <out-prefix>.png (660x420) and
+/// <out-prefix>@2x.png; build-release.sh joins them into one Retina TIFF. `label` is
+/// the version line in the corner ("0.1.0 alpha"). The layout is bound to the DMG
+/// step's icon positions: app at (170,150), Applications at (490,150), icon size 112.
+if let i = CommandLine.arguments.firstIndex(of: "--dmg-background"), CommandLine.arguments.count > i + 2 {
+    let prefix = CommandLine.arguments[i + 1], label = CommandLine.arguments[i + 2]
+    // LAID OUT in a 660x420 window, DRAWN on a larger canvas. Finder draws the
+    // picture from the top-left corner and never scales it, and it makes the window
+    // bigger than asked when the person's own Finder shows a tab bar or other chrome
+    // (measured: 660 asked, 681 shown) - so past 660x420 the gradient simply
+    // continues instead of a white strip. Every position below is in the 660x420
+    // layout, from the top-left, matching the icon positions build-release.sh sets.
+    let LW: CGFloat = 660
+    let W: CGFloat = 800, H: CGFloat = 560
+    let ink = NSColor(srgbRed: 0.11, green: 0.17, blue: 0.24, alpha: 1)
+    let soft = NSColor(srgbRed: 0.30, green: 0.37, blue: 0.45, alpha: 1)
+    let blue = NSColor(srgbRed: 0x2F / 255.0, green: 0x76 / 255.0, blue: 0xB8 / 255.0, alpha: 1)   // DECK_BLUE
+    // A believable bar for the menu-bar picture: both services, both windows.
+    var ex = HostStatus()
+    ex.running = true; ex.deviceConnected = true
+    ex.pct5h = 23; ex.reset5h = 200; ex.pct7d = 41; ex.reset7d = 6000; ex.quotaAgeSec = 1
+    ex.cxPct = 12; ex.cxReset = 250; ex.cxWinMin = 300; ex.cx2Pct = 35; ex.cx2Reset = 7000; ex.cx2WinMin = 10080; ex.cxAgeSec = 1
+    func text(_ t: String, _ f: NSFont, _ c: NSColor, centerX: CGFloat, top: CGFloat) {
+        let a: [NSAttributedString.Key: Any] = [.font: f, .foregroundColor: c]
+        let sz = (t as NSString).size(withAttributes: a)
+        (t as NSString).draw(at: NSPoint(x: centerX - sz.width / 2, y: H - top - sz.height), withAttributes: a)
+    }
+    for scale in [1, 2] {
+        let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(W) * scale, pixelsHigh: Int(H) * scale,
+                                   bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                   colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        rep.size = NSSize(width: W, height: H)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        NSAppearance(named: .aqua)!.performAsCurrentDrawingAppearance {
+            // Paper to a faint blue: the logo's cream and its blue, quietly.
+            NSGradient(colors: [NSColor(srgbRed: 0.985, green: 0.965, blue: 0.93, alpha: 1),
+                                NSColor(srgbRed: 0.93, green: 0.955, blue: 0.985, alpha: 1)])!
+                .draw(in: NSRect(x: 0, y: 0, width: W, height: H), angle: -90)
+            // Corner: the name and what this build is.
+            let boat = deckhandPaperBoatImage(size: 18, style: .solid, colourful: true)
+            boat.draw(in: NSRect(x: 26, y: H - 22 - 18, width: 18, height: 18))
+            let nameAttr: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 15, weight: .semibold), .foregroundColor: ink]
+            ("Deckhand" as NSString).draw(at: NSPoint(x: 50, y: H - 22 - 18), withAttributes: nameAttr)
+            let tagAttr: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 11, weight: .medium), .foregroundColor: soft]
+            let tagSize = (label as NSString).size(withAttributes: tagAttr)
+            let tagRect = NSRect(x: LW - 26 - tagSize.width - 16, y: H - 22 - 20, width: tagSize.width + 16, height: 20)
+            NSColor(white: 1, alpha: 0.75).setFill()
+            NSBezierPath(roundedRect: tagRect, xRadius: 10, yRadius: 10).fill()
+            NSColor(srgbRed: 0.80, green: 0.84, blue: 0.89, alpha: 1).setStroke()
+            NSBezierPath(roundedRect: tagRect.insetBy(dx: 0.5, dy: 0.5), xRadius: 10, yRadius: 10).stroke()
+            (label as NSString).draw(at: NSPoint(x: tagRect.minX + 8, y: tagRect.minY + (20 - tagSize.height) / 2), withAttributes: tagAttr)
+            // The arrow, between the two icons (centres 170 and 490, at 150 from the top).
+            let y = H - 150
+            let arrow = NSBezierPath()
+            arrow.move(to: NSPoint(x: 262, y: y)); arrow.line(to: NSPoint(x: 392, y: y))
+            arrow.lineWidth = 5; arrow.lineCapStyle = .round
+            blue.withAlphaComponent(0.85).setStroke(); arrow.stroke()
+            let head = NSBezierPath()
+            head.move(to: NSPoint(x: 380, y: y + 14)); head.line(to: NSPoint(x: 400, y: y)); head.line(to: NSPoint(x: 380, y: y - 14))
+            head.lineWidth = 5; head.lineCapStyle = .round; head.lineJoinStyle = .round; head.stroke()
+            text("Drag Deckhand into Applications", NSFont.systemFont(ofSize: 17, weight: .semibold), ink, centerX: LW / 2, top: 262)
+            // Where it goes after that: the menu bar - shown, not described.
+            let bar = barImage(barModel(ex, tier: .full, previewing: true), boat: .solid, colourful: true, height: 24)
+            let stripW = bar.size.width + 120, stripRect = NSRect(x: (LW - stripW) / 2, y: H - 334, width: stripW, height: 30)
+            NSColor(srgbRed: 0.13, green: 0.15, blue: 0.19, alpha: 1).setFill()
+            NSBezierPath(roundedRect: stripRect, xRadius: 8, yRadius: 8).fill()
+            NSAppearance(named: .darkAqua)!.performAsCurrentDrawingAppearance {
+                bar.draw(in: NSRect(x: stripRect.minX + 60, y: stripRect.minY + 3, width: bar.size.width, height: bar.size.height))
+            }
+            text("Then open it from Applications. It lives in your menu bar.", NSFont.systemFont(ofSize: 12.5), soft, centerX: LW / 2, top: 344)
+        }
+        NSGraphicsContext.restoreGraphicsState()
+        let out = scale == 1 ? "\(prefix).png" : "\(prefix)@2x.png"
+        try? rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: out))
+        print(out)
+    }
+    exit(0)
+}
+
 /// `--bar-preview <out.png>`: every SIZE of the menu-bar item for one busy example
 /// (both services, both windows, sessions waiting and working, two asking), drawn by
 /// the real renderer on a light bar and a dark bar at 2x, with each width printed. The
