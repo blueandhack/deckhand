@@ -286,12 +286,63 @@ codesign -d --entitlements - --xml "$C/Helpers/Deckhand Host.app" 2>/dev/null | 
 
 # ---- 7. DMG ----
 say "Building the DMG"
+# A DESIGNED window, not a bare folder: the app and an Applications link at fixed
+# places over a background with an arrow between them, a hint that the app lives in
+# the menu bar, no toolbar, and the app's icon on the mounted volume. Finder is the
+# only thing that can write that layout (it lives in the image's .DS_Store), so the
+# image is built writable, Finder is told how to show it, and only then is it
+# compressed. The background is drawn by the app we just built (--dmg-background), so
+# its menu-bar picture is the real boat and the real two-row bar.
 DMG="$DIST/Deckhand-$VERSION.dmg"
 DMGROOT="$BUILD/app/dmg"
-rm -rf "$DMGROOT"; mkdir -p "$DMGROOT"
+DMGRW="$BUILD/app/rw.dmg"
+DMGMNT="/Volumes/Deckhand-build-$$"
+rm -rf "$DMGROOT" "$DMGRW"; mkdir -p "$DMGROOT/.background"
 ditto "$APP" "$DMGROOT/Deckhand.app"
 ln -s /Applications "$DMGROOT/Applications"
-hdiutil create -quiet -volname "Deckhand $VERSION" -srcfolder "$DMGROOT" -fs HFS+ -format UDZO -ov "$DMG"
+"$C/MacOS/Deckhand" --dmg-background "$BUILD/app/bg" "$VERSION${CHANNEL:+ $CHANNEL}" >/dev/null \
+  || die "the app could not draw the DMG background"
+tiffutil -cathidpicheck "$BUILD/app/bg.png" "$BUILD/app/bg@2x.png" -out "$DMGROOT/.background/background.tiff" >/dev/null 2>&1 \
+  || die "could not combine the background into a Retina TIFF"
+hdiutil create -quiet -volname "Deckhand" -srcfolder "$DMGROOT" -fs HFS+ -format UDRW -ov "$DMGRW"
+hdiutil resize -quiet -size 400m "$DMGRW"   # room for Finder's .DS_Store; compression drops it again
+hdiutil attach -quiet -readwrite -noverify -noautoopen -mountpoint "$DMGMNT" "$DMGRW"
+# The positions are the background's: app at (170,150), Applications at (490,150),
+# 112pt icons. Bounds are 660 x 440 (with the 28pt title bar); a person whose Finder
+# shows a tab bar loses ~44pt of that, which the layout leaves room for.
+osascript <<OSA || { hdiutil detach -quiet "$DMGMNT"; die "Finder could not lay out the DMG window (Automation permission for Finder?)"; }
+tell application "Finder"
+  set d to (POSIX file "$DMGMNT" as alias)
+  open d
+  set w to container window of d
+  set current view of w to icon view
+  set toolbar visible of w to false
+  set statusbar visible of w to false
+  set pathbar visible of w to false
+  set bounds of w to {200, 120, 860, 560}
+  set o to icon view options of w
+  set arrangement of o to not arranged
+  set icon size of o to 112
+  set text size of o to 13
+  set background picture of o to (POSIX file "$DMGMNT/.background/background.tiff" as alias)
+  set position of item "Deckhand.app" of d to {170, 150}
+  set position of item "Applications" of d to {490, 150}
+  update d without registering applications
+  delay 2
+  close w
+end tell
+OSA
+# THE VOLUME'S ICON, AFTER FINDER. Measured twice over: `hdiutil create -srcfolder` drops a
+# .VolumeIcon.icns from the source folder, and Finder's own layout pass above DELETES one
+# that is already on the volume and clears its custom-icon flag. So it goes in last.
+cp "$C/Resources/Deckhand.icns" "$DMGMNT/.VolumeIcon.icns"
+SetFile -a C "$DMGMNT"
+GetFileInfo -a "$DMGMNT" | grep -q C || { hdiutil detach -quiet "$DMGMNT"; die "the volume did not take its custom icon"; }
+sync
+for _ in 1 2 3 4 5; do hdiutil detach -quiet "$DMGMNT" && break; sleep 2; done
+[ -d "$DMGMNT" ] && die "could not unmount $DMGMNT"
+hdiutil convert -quiet "$DMGRW" -format UDZO -imagekey zlib-level=9 -ov -o "$DMG"
+rm -f "$DMGRW"
 codesign --force --timestamp --sign "$IDENTITY" "$DMG"   # no runtime flag: not an executable
 
 # ---- 8. notarize ----
