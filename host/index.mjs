@@ -46,7 +46,7 @@ import { asciiFit, describeOffenders } from "./wire-ascii.mjs";
 import { resolveMacEmoji } from "./mac-emoji.mjs";
 import { lineTargetsUs, stripAddress } from "./line-address.mjs";
 import { formatRunStartLine } from "./run-ledger.mjs";
-import { classifyStall, stallMessage } from "./watchdog.mjs";
+import { classifyStall, stallMessage, makeAwaitTracker, describePending } from "./watchdog.mjs";
 import { pickTokens, describeChildError, CCUSAGE_TIMEOUT_MS } from "./ccusage.mjs";
 // The wireless-pairing derivations. Pure functions with no I/O and no clock,
 // pinned byte for byte against pairing.ino by pair-crypto-check.mjs - do not
@@ -66,6 +66,13 @@ import {
   rateLimitsHaveWindow,
   CODEX_BACKOFF_MS,
 } from "./codex-refresh.mjs";
+
+// Every await on the tick's path goes through track(), so a hang names its step
+// (stallMessage). The tracker is module-level, not per tick: an orphaned chain's
+// stuck step must still be visible after the watchdog has started a new one.
+const tickAwaits = makeAwaitTracker();
+const track = (name, promise) => tickAwaits.track(name, promise);
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Spawned as `<this node> <script>`, NOT by executing the .bin shebang. That
 // shebang is `#!/usr/bin/env node`, which needs `node` on PATH - and under
@@ -2500,7 +2507,7 @@ let menuSessions = { list: [], total: 0 };
 async function readSessions() {
   let files;
   try {
-    files = await fs.readdir(SESSIONS_DIR);
+    files = await track("readSessions:dir", fs.readdir(SESSIONS_DIR));
   } catch {
     return []; // no sessions have run since this file was introduced
   }
@@ -2510,7 +2517,7 @@ async function readSessions() {
     if (!file.endsWith(".json")) continue;
     const filePath = path.join(SESSIONS_DIR, file);
     try {
-      const record = JSON.parse(await fs.readFile(filePath, "utf8"));
+      const record = JSON.parse(await track("readSessions:record", fs.readFile(filePath, "utf8")));
       // ENDED IS A DELIBERATE SIGNAL, checked before the general staleness guard
       // and on its own, shorter clock (SESSION_ENDED_GRACE_MS) - see its
       // definition for why the two questions differ. `ended_at` falls back to
@@ -2519,11 +2526,11 @@ async function readSessions() {
       // hook today, so that fallback is only ever exercised by old data.
       if (record.status === "ended") {
         if (Date.now() - (record.ended_at ?? record.updated_at) > SESSION_ENDED_GRACE_MS) {
-          await fs.rm(filePath, { force: true }); // ghost row's grace period is over
+          await track("readSessions:rm", fs.rm(filePath, { force: true })); // ghost row's grace period is over
           continue;
         }
       } else if (Date.now() - record.updated_at > SESSION_STALE_MS) {
-        await fs.rm(filePath, { force: true }); // terminal likely closed without SessionEnd
+        await track("readSessions:rm", fs.rm(filePath, { force: true })); // terminal likely closed without SessionEnd
         continue;
       }
       // The filename IS the session id - carry it so the device can match
@@ -2544,7 +2551,7 @@ async function readSessions() {
   // how much it needs you rather than by which tool it came from. They arrive
   // pre-shaped by readCodexSessions().
   // Codex arrives from both directions now; the hook record wins where both exist.
-  const merged = mergeById(await readCodexSessions(), records);
+  const merged = mergeById(await track("readSessions:codex", readCodexSessions()), records);
   records.length = 0;
   records.push(...merged);
 
@@ -2656,9 +2663,9 @@ async function readSessions() {
     const pin = top.findIndex((r) => (r.id || "").slice(0, 12) === focusPinnedId);
     if (pin >= 0) fullIdx.add(pin);
   }
-  const list = await Promise.all(
+  const list = await track("readSessions:rows", Promise.all(
     top.map((record, i) => (fullIdx.has(i) ? buildSessionItem(record) : buildLeanItem(record))),
-  );
+  ));
   // A lean row's transcript is registered too, so a FOCUSed row can open its history
   // the same way a full one can. Keyed by the SAME truncated id the device sees.
   for (const r of top) if (r.transcript && r.id) transcriptById.set(r.id.slice(0, 12), r.transcript);
@@ -2668,7 +2675,7 @@ async function readSessions() {
   const gemini = readGeminiSessions();
   const menuRanked = [
     ...top.map((r, i) => ({ r, item: list[i] })),
-    ...(await Promise.all(gemini.map(async (r) => ({ r, item: await buildGeminiMenuItem(r) })))),
+    ...(await track("readSessions:gemini", Promise.all(gemini.map(async (r) => ({ r, item: await buildGeminiMenuItem(r) }))))),
   ].sort((a, b) => rank(a.r) - rank(b.r) || b.r.updated_at - a.r.updated_at);
   return {
     list,
@@ -2776,11 +2783,11 @@ async function readUsage() {
   // The full project listing and a project's own session list are NOT built
   // here, deliberately - see the note beside hostSecondsSinceMidnight below.
   const ccusageRun = kickCcusage();
-  if (!ccusageEverFinished) await ccusageRun;
+  if (!ccusageEverFinished) await track("ccusage:first", ccusageRun);
   const [rateLimits, sessions, projectInventory] = await Promise.all([
-    readRateLimits(),
-    readSessions(),
-    countInventory(),
+    track("readRateLimits", readRateLimits()),
+    track("readSessions", readSessions()),
+    track("countInventory", countInventory()),
   ]);
   // A finished run's result is reused tick after tick until the next one lands.
   // A null half is a FAILED call, which pickTokens below carries over as stale.
@@ -6034,65 +6041,68 @@ async function tick(generation = tickGeneration) {
     // answer when a display is genuinely connected right now AND the user has
     // opted into device answering (otherwise blocking would hide the Mac's own
     // dialog, which is exactly what mirror mode avoids).
-    await fs
-      .writeFile(
-        HOST_ALIVE,
-        JSON.stringify({
-          connected: usbLinks.length > 0 || !!bleCharacteristic,
-          remoteAnswer,
-          at: Date.now(),
-          ble: bleAdapterState,
-          // `device` = who we're actually talking to (falls back to the choice);
-          // `devices`/`selected` let the menu bar render the picker without ever
-          // reading the secrets file.
-          device: bleDeviceName || primaryUsbName() || selectedDevice || null,
-          // Every device this host is actually driving, with the link each is on.
-          // The heartbeat's singular `device` is what the menu bar has always
-          // drawn and stays as it was; this is the honest plural beside it, so
-          // "two boards are connected" is answerable without reading the log.
-          links: liveLinks().map((l) => ({ link: l.id, device: l.name || null })),
-          selected: selectedDevice || null,
-          devices: pairedDevices.map((d) => d.name),
-          // The menu-bar picker's icon submenu. `icon` is the fully-resolved
-          // value (env beats the picker's file, same as what the device is
-          // shown) so the checkmark is right regardless of source; `iconFromEnv`
-          // is what makes the picker disable itself and say so, rather than
-          // showing a checkmark a click could never move. The menu-bar app
-          // can't read the host's launchd environment or the plist itself
-          // (that would be a third source of truth), so this heartbeat is the
-          // only way it learns either fact.
-          icon: currentMacEmoji(),
-          iconFromEnv: !!resolveMacEmoji({ env: process.env.DECKHAND_MAC_EMOJI || "", file: "" }),
-          // The "Mac Name..." item: the name the device shows, where it came from
-          // ("env" makes the item say the environment pins it, as iconFromEnv does),
-          // and what "Automatic" would give, so the dialog can name it.
-          ...(() => {
-            const t = currentMacTag();
-            return { macTag: t.tag, macTagSource: t.source, macTagAuto: macTag(hostLabel) };
-          })(),
-          voice: lastVoice,
-          // The pairing dialog's whole state, INCLUDING the code this Mac
-          // derived - the menu bar draws it for the user to compare against the
-          // device's screen, and never reads the secrets file. It is not secret
-          // from the local user, and this file lives in a mode-0700 runtime dir.
-          pairing: pairStatus(),
-          // ageSec is computed on the way out rather than stored, so a stale
-          // reading cannot look fresh just because the heartbeat itself is.
-          batt: (() => {
-            const b = batteryForHeartbeat();
-            return b ? { ...b, ageSec: Math.round((Date.now() - b.at) / 1000) } : null;
-          })(),
-          // Every device's own reading, so nothing has to infer whose `batt` is
-          // whose. `batt` above is one of these, chosen by batteryForHeartbeat().
-          batts: [...battByDevice.values()].map((b) => ({
-            ...b,
-            ageSec: Math.round((Date.now() - b.at) / 1000),
-          })),
-        })
-      )
-      .catch(() => {});
+    await track(
+      "heartbeat",
+      fs
+        .writeFile(
+          HOST_ALIVE,
+          JSON.stringify({
+            connected: usbLinks.length > 0 || !!bleCharacteristic,
+            remoteAnswer,
+            at: Date.now(),
+            ble: bleAdapterState,
+            // `device` = who we're actually talking to (falls back to the choice);
+            // `devices`/`selected` let the menu bar render the picker without ever
+            // reading the secrets file.
+            device: bleDeviceName || primaryUsbName() || selectedDevice || null,
+            // Every device this host is actually driving, with the link each is on.
+            // The heartbeat's singular `device` is what the menu bar has always
+            // drawn and stays as it was; this is the honest plural beside it, so
+            // "two boards are connected" is answerable without reading the log.
+            links: liveLinks().map((l) => ({ link: l.id, device: l.name || null })),
+            selected: selectedDevice || null,
+            devices: pairedDevices.map((d) => d.name),
+            // The menu-bar picker's icon submenu. `icon` is the fully-resolved
+            // value (env beats the picker's file, same as what the device is
+            // shown) so the checkmark is right regardless of source; `iconFromEnv`
+            // is what makes the picker disable itself and say so, rather than
+            // showing a checkmark a click could never move. The menu-bar app
+            // can't read the host's launchd environment or the plist itself
+            // (that would be a third source of truth), so this heartbeat is the
+            // only way it learns either fact.
+            icon: currentMacEmoji(),
+            iconFromEnv: !!resolveMacEmoji({ env: process.env.DECKHAND_MAC_EMOJI || "", file: "" }),
+            // The "Mac Name..." item: the name the device shows, where it came from
+            // ("env" makes the item say the environment pins it, as iconFromEnv does),
+            // and what "Automatic" would give, so the dialog can name it.
+            ...(() => {
+              const t = currentMacTag();
+              return { macTag: t.tag, macTagSource: t.source, macTagAuto: macTag(hostLabel) };
+            })(),
+            voice: lastVoice,
+            // The pairing dialog's whole state, INCLUDING the code this Mac
+            // derived - the menu bar draws it for the user to compare against the
+            // device's screen, and never reads the secrets file. It is not secret
+            // from the local user, and this file lives in a mode-0700 runtime dir.
+            pairing: pairStatus(),
+            // ageSec is computed on the way out rather than stored, so a stale
+            // reading cannot look fresh just because the heartbeat itself is.
+            batt: (() => {
+              const b = batteryForHeartbeat();
+              return b ? { ...b, ageSec: Math.round((Date.now() - b.at) / 1000) } : null;
+            })(),
+            // Every device's own reading, so nothing has to infer whose `batt` is
+            // whose. `batt` above is one of these, chosen by batteryForHeartbeat().
+            batts: [...battByDevice.values()].map((b) => ({
+              ...b,
+              ageSec: Math.round((Date.now() - b.at) / 1000),
+            })),
+          })
+        )
+        .catch(() => {}),
+    );
 
-    const usage = await readUsage();
+    const usage = await track("readUsage", readUsage());
     // Fired from the tick because readUsage() is what refreshes codexRateLimits, so the
     // staleness it decides on is current. Deliberately NOT awaited: the guards inside
     // bound it to at most one turn per 6h, and a turn takes seconds - awaiting it would
@@ -6158,7 +6168,7 @@ async function tick(generation = tickGeneration) {
     // ONE COPY PER LIVE LINK. A cabled board 2 has always received the tick
     // twice (its USB cable and its BLE link) and the firmware is built for that;
     // adding board 1 adds one more LINK, not a second copy to anybody.
-    await broadcastToDevices(line);
+    await track("broadcast", broadcastToDevices(line));
     console.log(
       `5h=${usage.fiveHourPct ?? "?"}% (resets ${usage.fiveHourResetInMin ?? "?"}m) ` +
         `7d=${usage.sevenDayPct ?? "?"}% (resets ${usage.sevenDayResetInMin ?? "?"}m) ` +
@@ -6226,7 +6236,7 @@ setInterval(() => {
   lastWatchdogRun = now;
   if (verdict.verdict === "ok") return;
 
-  console.error(stallMessage(verdict));
+  console.error(stallMessage(verdict, describePending(tickAwaits.pending(), now)));
   lastTickCompleted = Date.now();   // don't re-fire every interval while it recovers
   // Counted apart so the ledger's "watchdog fires" means HANGS. Folding sleeps
   // in is what made 236 fires look like 236 near-misses.
