@@ -26,7 +26,11 @@ which only rises, and is what Sparkle compares. Output: `release/dist/<version>/
 be digits), `DeckhandChannel` in Info.plist makes Settings › About say "0.1.0 alpha", and
 `publish.sh` publishes it with GitHub's pre-release badge.
 
-**Publishing** is `release/publish.sh <x.y.z> [--notes file.md]`, a separate, deliberate step.
+**Publishing** is `release/publish.sh <x.y.z> [--notes file.md]`, a separate, deliberate step. **Its notes go into the FEED as well as the GitHub page** (2026-11-11): they default to
+`release/notes/<x.y.z>.md` (every release's notes are kept there), and `embed-notes.mjs` writes them
+into that version's appcast item as `<description>` HTML (`notes-html.mjs`). Through 0.1.3 only the
+page had them, so Sparkle's update window was EMPTY. The notes are outside the EdDSA signature
+(it covers the DMG), and the app does not set `SURequireSignedFeed`.
 It refuses an unstapled build, a mismatched appcast, an existing tag, or a main that is not
 level with origin; then it creates the GitHub release with the DMG, waits until the DMG
 downloads, and only THEN publishes the feed. **The feed is `release/appcast.xml` on main**

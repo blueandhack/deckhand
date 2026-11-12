@@ -5,6 +5,12 @@
 #
 #   release/publish.sh <x.y.z> [--notes <file.md>]
 #
+# THE NOTES go to TWO places: the GitHub release page, and the update feed's own item,
+# which is what Sparkle's update window shows (embed-notes.mjs). Through 0.1.3 they went
+# only to the page, so every update window was empty. They default to
+# release/notes/<x.y.z>.md, and a --notes file elsewhere is copied there, so every
+# release's notes are kept in the repo beside its feed entry.
+#
 # A build made with `--channel alpha|beta` is published as a GitHub PRE-RELEASE, and
 # its title says so; one made without is a normal release. The channel is read from
 # the build (dist/<version>/channel), never passed here, so an alpha cannot be
@@ -56,8 +62,15 @@ gh release view "$TAG" >/dev/null 2>&1 && die "release $TAG already exists"
 TITLE="Deckhand $VERSION${CHANNEL:+ ($CHANNEL)}"
 PRE=()
 [ -n "$CHANNEL" ] && PRE=(--prerelease)
+KEPT_NOTES="$R/notes/$VERSION.md"
+[ -z "$NOTES" ] && [ -f "$KEPT_NOTES" ] && NOTES="$KEPT_NOTES"
 NOTE_ARGS=(--generate-notes)
-[ -n "$NOTES" ] && { [ -f "$NOTES" ] || die "no notes file $NOTES"; NOTE_ARGS=(--notes-file "$NOTES"); }
+if [ -n "$NOTES" ]; then
+  [ -f "$NOTES" ] || die "no notes file $NOTES"
+  NOTE_ARGS=(--notes-file "$NOTES")
+else
+  echo "warning: no notes ($KEPT_NOTES) - GitHub generates the page's, and Sparkle's update window will be EMPTY"
+fi
 
 echo "==> creating $TAG: \"$TITLE\"${CHANNEL:+ as a pre-release}"
 gh release create "$TAG" "$DMG" --target "$(git rev-parse HEAD)" --title "$TITLE" "${PRE[@]}" "${NOTE_ARGS[@]}"
@@ -72,6 +85,12 @@ done
 
 echo "==> publishing the update feed (release/appcast.xml on main)"
 cp "$DIST/appcast.xml" "$R/appcast.xml"
+if [ -n "$NOTES" ]; then
+  mkdir -p "$R/notes"
+  [ "$(cd "$(dirname "$NOTES")" && pwd)/$(basename "$NOTES")" = "$KEPT_NOTES" ] || cp "$NOTES" "$KEPT_NOTES"
+  node "$R/embed-notes.mjs" "$R/appcast.xml" "$VERSION" "$KEPT_NOTES" || die "could not embed the notes in the feed - it was NOT updated"
+  git add "$KEPT_NOTES"
+fi
 git add "$R/appcast.xml"
 git commit -q -m "Update feed: Deckhand $VERSION${CHANNEL:+ ($CHANNEL)}"
 git push -q origin main
