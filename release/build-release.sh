@@ -146,6 +146,18 @@ fi
 rm -rf "$BUILD/app" "$DIST"
 mkdir -p "$BUILD/app" "$DIST"
 
+# NODE SHIPS STRIPPED OF ITS LOCAL SYMBOLS. `strip -x` measured 146,490,912 -> 108,807,392
+# bytes on v26.13.0 (-37.7MB, a quarter of the whole app). It keeps the EXPORTED symbols,
+# which are what a native addon resolves against when it loads - so the smoke test below
+# runs THIS binary, not the tarball's, and an addon that needed a stripped symbol fails
+# the build instead of a user's Mac. strip voids the signature and arm64 will not run an
+# unsigned binary, so it is ad-hoc signed here; step 6 re-signs it with the real identity.
+SHIP_NODE="$BUILD/app/node"
+cp "$NODE_DIR/bin/node" "$SHIP_NODE"
+strip -x "$SHIP_NODE" 2>/dev/null
+codesign --force --sign - "$SHIP_NODE"
+[ "$("$SHIP_NODE" -p process.version)" = "$NODE_VERSION" ] || die "the stripped Node does not run"
+
 # SRC is what gets built: the commit, or (--working-tree) the checkout as it stands.
 if [ "$WORKING_TREE" = 1 ]; then
   SRC="$REPO"
@@ -176,12 +188,12 @@ while IFS= read -r -d '' pb; do
   done
 done < <(find "$STAGE/node_modules" -type d -name prebuilds -print0)
 find "$STAGE/node_modules" -type d \( -name obj.target -o -name .deps \) -prune -exec rm -rf {} +
-# A smoke test of the staged tree with the shipped Node. NOT `import noble`: that
+# A smoke test of the staged tree with the shipped (stripped) Node. NOT `import noble`: that
 # starts CoreBluetooth, and a Node with no Info.plist is killed by TCC on the spot
 # (CLAUDE.md, "THE HOST MUST RUN VIA DeckhandBLE.app"). Loading noble's native addon
 # through its own loader proves the same thing - the addon loads into this Node -
 # without creating a Bluetooth manager. serialport is safe to import whole.
-( cd "$STAGE" && "$NODE_DIR/bin/node" --input-type=module -e '
+( cd "$STAGE" && "$SHIP_NODE" --input-type=module -e '
   import { createRequire } from "node:module";
   const require = createRequire(process.cwd() + "/");
   const nobleDir = require.resolve("@abandonware/noble/package.json").replace(/package\.json$/, "");
@@ -190,7 +202,7 @@ find "$STAGE/node_modules" -type d \( -name obj.target -o -name .deps \) -prune 
   await import("serialport");
   console.log("  host modules load");' )
 # Every import in the staged host must resolve in the staged tree - see the script.
-"$NODE_DIR/bin/node" "$R/check-host-imports.mjs" "$STAGE" \
+"$SHIP_NODE" "$R/check-host-imports.mjs" "$STAGE" \
   || die "the staged host imports something the bundle does not contain - commit it, or add it to package.json"
 
 # ---- 3. compile ----
@@ -218,7 +230,7 @@ subst "$R/Info-host.plist" > "$HC/Info.plist"
 subst "$R/agent.plist" > "$C/Library/LaunchAgents/io.github.blueandhack.deckhand.host.plist"
 plutil -lint -s "$C/Info.plist" "$HC/Info.plist" "$C/Library/LaunchAgents/io.github.blueandhack.deckhand.host.plist"
 cp "$BIN/Deckhand" "$C/MacOS/Deckhand"
-cp "$NODE_DIR/bin/node" "$HC/MacOS/Deckhand Host"
+mv "$SHIP_NODE" "$HC/MacOS/Deckhand Host"
 cp "$BIN/deckhand-host-launch" "$HC/MacOS/deckhand-host-launch"
 cp "$SRC/host/Deckhand.icns" "$C/Resources/Deckhand.icns"
 cp "$SRC/host/Deckhand.icns" "$HC/Resources/Deckhand.icns"
@@ -341,7 +353,10 @@ GetFileInfo -a "$DMGMNT" | grep -q C || { hdiutil detach -quiet "$DMGMNT"; die "
 sync
 for _ in 1 2 3 4 5; do hdiutil detach -quiet "$DMGMNT" && break; sleep 2; done
 [ -d "$DMGMNT" ] && die "could not unmount $DMGMNT"
-hdiutil convert -quiet "$DMGRW" -format UDZO -imagekey zlib-level=9 -ov -o "$DMG"
+# LZMA (ULMO), not zlib (UDZO): measured on 0.1.2's DMG, 52,420,260 -> 37,548,226 bytes
+# with the mount and the drag to Applications about as fast. LZFSE (ULFO) only reached
+# 50,668,665. ULMO needs macOS 10.15, and this app needs 14.
+hdiutil convert -quiet "$DMGRW" -format ULMO -ov -o "$DMG"
 rm -f "$DMGRW"
 codesign --force --timestamp --sign "$IDENTITY" "$DMG"   # no runtime flag: not an executable
 
