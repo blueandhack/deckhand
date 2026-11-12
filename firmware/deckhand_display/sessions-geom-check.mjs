@@ -2887,7 +2887,7 @@ for (const b of [1, 2]) {
       // this cannot lean on the binary; it only says the shape vocabulary is still THERE, so a future tidy-up that
       // collapsed both boards onto the mark would fail here and not merely move
       // a binary somebody might re-baseline.
-      chk(/uiRing\(cx, cy, r, 2, color, bg\);/.test(b1) && /drawAgentSpinner\(cx, cy, bg, codex\)/.test(b1),
+      chk(/uiRing\(cx, cy, r, 2, color, bg\);/.test(b1) && /drawAgentSpinner\(cx, cy, bg, agent\)/.test(b1),
           "board 1 keeps its square/ring/spinner vocabulary untouched");
       chk(/drawAgentMark\(/.test(b2),
           "board 2 draws the agent mark from drawStatusDot");
@@ -2905,7 +2905,7 @@ for (const b of [1, 2]) {
       chk(/const uint16_t markColor =\s*\n\s*working \? colorForStatus\(status\) : \(ended \? COLOR_UNKNOWN : COLOR_LABEL\);/.test(b2),
           "at rest the mark is COLOR_LABEL (COLOR_UNKNOWN when ended) and unanimated; while working " +
           "it is the status colour and animated");
-      chk(/drawAgentMark\(cx - SPARK_SIZE \/ 2, cy - SPARK_SIZE \/ 2, codex, markColor, bg, working\);/.test(b2),
+      chk(/drawAgentMark\(cx - SPARK_SIZE \/ 2, cy - SPARK_SIZE \/ 2, agent, markColor, bg, working\);/.test(b2),
           "drawAgentMark() is called with that same markColor - not a second, re-inlined ternary " +
           "that could disagree with it");
     }

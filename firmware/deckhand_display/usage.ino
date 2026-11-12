@@ -36,6 +36,8 @@ void resetUsageCaches() {
   resetAt2Cache[0] = '\0'; bar2Cache = -2; border2Cache = -1;
   cxPctCache[0] = '\0'; cxRightCache[0] = '\0'; cxBorderCache = -1;
   cxBarCache = -1; cxStaleCache = -1;
+  agPctCache[0] = '\0'; agRightCache[0] = '\0'; agBorderCache = -1;
+  agBarCache = -1; agStaleCache = -1;
 #if BOARD_USAGE_V2
   // The NOW/WEEK cards' own fields - drawUsageStatic() repaints the chrome
   // these are drawn ON, so a cache left out of this reset leaves its field
@@ -112,7 +114,7 @@ static bool usageAccountKeyLive(const char* key) {
 // independently by cxAgeSec. A negative age means "never measured" and must never win
 // against a real reading, which a plain comparison on -1 would let it do.
 static void mergeAccount(int a) {
-  int rep = usageAcctFirstLink[a], best = -1, bestCx = -1;
+  int rep = usageAcctFirstLink[a], best = -1, bestCx = -1, bestAg = -1;
   for (int i = 0; i < MAX_LINKS; i++) {
     if (!hostLinks[i].used || !linksShareAccount(rep, i)) continue;
     const Usage& u = hostLinks[i].usage;
@@ -125,6 +127,11 @@ static void mergeAccount(int a) {
       if (bestCx < 0 || (u.cxAgeSec >= 0 &&
           (hostLinks[bestCx].usage.cxAgeSec < 0 ||
            u.cxAgeSec < hostLinks[bestCx].usage.cxAgeSec))) bestCx = i;
+    }
+    if (u.agPct >= 0) {
+      if (bestAg < 0 || (u.agAgeSec >= 0 &&
+          (hostLinks[bestAg].usage.agAgeSec < 0 ||
+           u.agAgeSec < hostLinks[bestAg].usage.agAgeSec))) bestAg = i;
     }
   }
   Usage m;   // defaults are the "no reading" sentinels
@@ -144,6 +151,12 @@ static void mergeAccount(int a) {
     m.cxPct = u.cxPct;  m.cxResetInMin = u.cxResetInMin;
     m.cxWindowMin = u.cxWindowMin;  m.cxAgeSec = u.cxAgeSec;
   }
+  // Antigravity the same way, and with the same no-cross-account rule.
+  if (bestAg >= 0) {
+    const Usage& u = hostLinks[bestAg].usage;
+    m.agPct = u.agPct;  m.agResetInMin = u.agResetInMin;
+    m.agWindowMin = u.agWindowMin;  m.agAgeSec = u.agAgeSec;
+  }
   usageAcct[a] = m;
   usageAcctSrc[a] = best;
   usageAcctCxSrc[a] = bestCx;
@@ -156,7 +169,7 @@ void mergeUsage() {
   for (int i = 0; i < MAX_LINKS; i++) {
     if (!hostLinks[i].used) continue;
     const Usage& u = hostLinks[i].usage;
-    if (!usageHasClaude(u) && u.cxPct < 0) continue;
+    if (!usageHasClaude(u) && u.cxPct < 0 && u.agPct < 0) continue;
     bool seen = false;
     for (int a = 0; a < usageAcctCount; a++)
       if (linksShareAccount(usageAcctFirstLink[a], i)) { seen = true; break; }
@@ -473,6 +486,23 @@ bool usageCodexShown() {
   long win = usage.cxWindowMin > 0 ? usage.cxWindowMin : CODEX_HIDE_FALLBACK_MIN;
   return usage.cxAgeSec <= win * 60;
 }
+
+// THE AGY STRIP'S PREDICATE, on the same rule: shown while its reading is younger than
+// the window it describes. In practice the host already drops an Antigravity reading
+// at 6 hours (GEMINI_QUOTA_DROP_MS) and then sends no ag fields, which parse to -1 and
+// hide the strip at once; this is the device's own bound on top of that, not a
+// second copy of it. AG_HIDE_FALLBACK_MIN covers a percentage that arrives without
+// its window, exactly as CODEX_HIDE_FALLBACK_MIN does for Codex.
+bool usageAgShown() {
+  if (usage.agPct < 0) return false;
+  if (usage.agAgeSec < 0) return false;
+  long win = usage.agWindowMin > 0 ? usage.agWindowMin : AG_HIDE_FALLBACK_MIN;
+  return usage.agAgeSec <= win * 60;
+}
+
+// How many agent strips sit under the Claude cards: 0, 1 or 2. On board 2 this picks
+// the column (solo / duo / trio); on board 1 two strips SHARE the one row, side by side.
+int usageStripCount() { return (usageCodexShown() ? 1 : 0) + (usageAgShown() ? 1 : 0); }
 
 #if BOARD_USAGE_V2
 // ---------- The USAGE trend ring ----------
@@ -832,22 +862,36 @@ void drawUsageSpark(uint32_t* cache, int x, int y, int w, int h, uint16_t fg, ui
 // its chrome is in the other, and this tab already has the ingredients (the
 // fields and the chrome are painted by different functions on different ticks).
 // The cost is a handful of comparisons per render, against a 41ms full flush.
-int nowCardH()      { return usageCodexShown() ? NOW_CARD_H      : NOW_CARD_H_SOLO; }
-int nowSparkH()     { return usageCodexShown() ? NOW_SPARK_H     : NOW_SPARK_H_SOLO; }
-int nowMetaY()      { return usageCodexShown() ? NOW_META_Y      : NOW_META_Y_SOLO; }
-int weekCardH()     { return usageCodexShown() ? WEEK_CARD_H     : WEEK_CARD_H_SOLO; }
-int weekNumY()      { return usageCodexShown() ? WEEK_NUM_Y      : WEEK_NUM_Y_SOLO; }
-int weekBurnY()     { return usageCodexShown() ? WEEK_BURN_Y     : WEEK_BURN_Y_SOLO; }
-int weekBarY()      { return usageCodexShown() ? WEEK_BAR_Y      : WEEK_BAR_Y_SOLO; }
-int weekMetaY()     { return usageCodexShown() ? WEEK_META_Y     : WEEK_META_Y_SOLO; }
-int weekFableY()    { return usageCodexShown() ? WEEK_FABLE_Y    : WEEK_FABLE_Y_SOLO; }
-int weekFableBarY() { return usageCodexShown() ? WEEK_FABLE_BAR_Y: WEEK_FABLE_BAR_Y_SOLO; }
+// THREE columns now, picked by usageStripCount(): SOLO (no strip), DUO (one - the
+// layout this tab always had with Codex) and TRIO (Codex AND Antigravity). Each
+// accessor names its three constants once, in solo/duo/trio order.
+static int usageCol(int solo, int duo, int trio) {
+  int n = usageStripCount();
+  return n == 0 ? solo : n == 1 ? duo : trio;
+}
+int nowCardH()      { return usageCol(NOW_CARD_H_SOLO,       NOW_CARD_H,       NOW_CARD_H_TRIO); }
+int nowSparkH()     { return usageCol(NOW_SPARK_H_SOLO,      NOW_SPARK_H,      NOW_SPARK_H_TRIO); }
+int nowMetaY()      { return usageCol(NOW_META_Y_SOLO,       NOW_META_Y,       NOW_META_Y_TRIO); }
+int weekCardH()     { return usageCol(WEEK_CARD_H_SOLO,      WEEK_CARD_H,      WEEK_CARD_H_TRIO); }
+int weekNumY()      { return usageCol(WEEK_NUM_Y_SOLO,       WEEK_NUM_Y,       WEEK_NUM_Y_TRIO); }
+int weekBurnY()     { return usageCol(WEEK_BURN_Y_SOLO,      WEEK_BURN_Y,      WEEK_BURN_Y_TRIO); }
+int weekBarY()      { return usageCol(WEEK_BAR_Y_SOLO,       WEEK_BAR_Y,       WEEK_BAR_Y_TRIO); }
+int weekMetaY()     { return usageCol(WEEK_META_Y_SOLO,      WEEK_META_Y,      WEEK_META_Y_TRIO); }
+int weekFableY()    { return usageCol(WEEK_FABLE_Y_SOLO,     WEEK_FABLE_Y,     WEEK_FABLE_Y_TRIO); }
+int weekFableBarY() { return usageCol(WEEK_FABLE_BAR_Y_SOLO, WEEK_FABLE_BAR_Y, WEEK_FABLE_BAR_Y_TRIO); }
+// The strips' own height and offsets: CODEX_H's in the duo column, the compact
+// STRIP_*_TRIO set when two strips share the space one used to have.
+int stripH()        { return usageStripCount() >= 2 ? STRIP_H_TRIO      : CODEX_H; }
+int stripTextY()    { return usageStripCount() >= 2 ? STRIP_TEXT_Y_TRIO : CODEX_TEXT_Y; }
+int stripBarY()     { return usageStripCount() >= 2 ? STRIP_BAR_Y_TRIO  : CODEX_BAR_Y; }
 // SP_2 IS visible here - it is declared in deckhand_display.ino, which the
 // board header cannot see (hence the header's own literal 8 in CARD2_Y/CODEX_Y)
 // but this file can, being concatenated after it. So the gap is named at the
 // only two sites that can name it.
 int weekCardY()     { return CARD1_Y + nowCardH() + SP_2; }
 int codexRowY()     { return weekCardY() + weekCardH() + SP_2; }
+// Codex first, Antigravity under it; alone, Antigravity takes Codex's slot.
+int agRowY()        { return usageCodexShown() ? codexRowY() + stripH() + SP_2 : codexRowY(); }
 #endif
 
 // The 5-hour card, v2: the 64px hero keeps CARD_HERO_W's box, and the 132px it
@@ -894,8 +938,12 @@ void renderNowCard() {
   drawPaceBar(&bar1Cache, CARD_X + PAD, y0 + NOW_BAR_Y, CARD_W - 2 * PAD, BAR_H,
               usage.fiveHourPct, tickPct, stale ? COLOR_LABEL : color);
 
-  drawUsageSpark(&spark1Cache, CARD_X + PAD, y0 + NOW_SPARK_Y, CARD_W - 2 * PAD,
-                 nowSparkH(), stale ? COLOR_LABEL : color, COLOR_CARD);
+  // The trio column has NO sparkline band (NOW_SPARK_H_TRIO 0): its rows went to the
+  // second strip. The ring keeps sampling either way, so it is whole again the moment
+  // the column changes back.
+  if (nowSparkH() > 0)
+    drawUsageSpark(&spark1Cache, CARD_X + PAD, y0 + NOW_SPARK_Y, CARD_W - 2 * PAD,
+                   nowSparkH(), stale ? COLOR_LABEL : color, COLOR_CARD);
 
   snprintf(buf, sizeof(buf), "%s",
            usage.sessionTokens > 0 ? formatTokens(usage.sessionTokens).c_str() : "");
@@ -912,7 +960,10 @@ void renderNowCard() {
     // partial ring (e.g. two samples five minutes apart) must not read "LAST
     // 2.5H", which is the span of a FULL ring. See usageRingSpanMin()/
     // usageSpanCaption() above.
-    usageSpanCaption(buf, sizeof(buf), usageRingSpanMin());
+    // The caption names the SPARKLINE's span, so with no sparkline (the trio
+    // column) it says nothing rather than captioning a band that is not there.
+    if (nowSparkH() > 0) usageSpanCaption(buf, sizeof(buf), usageRingSpanMin());
+    else buf[0] = '\0';
   }
   // padLeftTo to 10, the longest value this field can hold ("no history"; the
   // others are "LAST 2.5H"/"LAST 59M" and staleTxt's 9). That is all the
@@ -1013,13 +1064,25 @@ void renderWeekCard() {
 // Dimmed on stale data for the same reason the hero numbers are: this figure comes
 // out of a rollout file, and a file that stopped being written keeps its last value
 // forever.
-void renderCodexRow() {
-  // Nothing to draw, and nothing to CLEAR either - on BOTH boards, by two different
-  // routes. Board 2's layout flip repaints the whole content area; board 1's flip
-  // clears this row's own rect and busts the four caches that cover it (see
-  // renderUsageTab's bust). Either way the row's old pixels are gone before this
-  // returns, so an early return here can never strand them.
-  if (!usageCodexShown()) return;
+static void renderStrip(bool ag, int x, int y, int w, int h, int textY, int barY, bool half) {
+  // ONE renderer for both strips: Codex's and Antigravity's data and caches, never a
+  // mix, and the geometry its caller worked out (board 2 stacks the two strips,
+  // board 1 halves its one row - see renderCodexRow()/renderAgRow() below).
+  const int  sPct   = ag ? usage.agPct        : usage.cxPct;
+  const long sReset = ag ? usage.agResetInMin : usage.cxResetInMin;
+  const long sWin   = ag ? usage.agWindowMin  : usage.cxWindowMin;
+  const long sAge   = ag ? usage.agAgeSec     : usage.cxAgeSec;
+  char* laneCache   = ag ? agPctCache   : cxPctCache;
+  char* rightCache  = ag ? agRightCache : cxRightCache;
+  int* borderCache  = ag ? &agBorderCache : &cxBorderCache;
+  int* barCache     = ag ? &agBarCache    : &cxBarCache;
+  // "AGY" is two characters shorter than "CODEX", so every lane derived from CODEX's
+  // longest label still bounds Antigravity's.
+  const char* longName  = ag ? "AGY" : "CODEX";
+  const char* shortName = ag ? "AG"  : "CX";
+  // Antigravity's figure is not a per-Mac reading in the way Codex's rollout file is -
+  // it comes from whichever host had one - so its strip carries no Mac tag or icon.
+  const int src = ag ? -1 : cxSourceLink;
   // Sized by the lane it has to hold, not a literal. padTo() pads to
   // CODEX_LANE_CHARS but stops at `len + 1 < bufSize`, so a buffer one byte too
   // small UNDER-PADS instead of failing - the leftover pixels of a
@@ -1038,14 +1101,10 @@ void renderCodexRow() {
   // above or delete its two branches as "always true now": that compiles,
   // is internally consistent, and silently breaks board 1's --/percentage
   // switch (and its byte-identity) while every assertion here stays green.
-  bool have = usage.cxPct >= 0;
-  bool stale = usage.cxAgeSec > 900;
-  uint16_t color = have ? colorForPct(usage.cxPct) : COLOR_UNKNOWN;
-#if BOARD_USAGE_V2
-  drawCardBorder(&cxBorderCache, CARD_X, codexRowY(), CARD_W, CODEX_H, color);
-#else
-  drawCardBorder(&cxBorderCache, CARD_X, CODEX_Y, CARD_W, CODEX_H, color);
-#endif
+  bool have = sPct >= 0;
+  bool stale = sAge > 900;
+  uint16_t color = have ? colorForPct(sPct) : COLOR_UNKNOWN;
+  drawCardBorder(borderCache, x, y, w, h, color);
 
   // Left lane: the agent's name and its window, so this can never be mistaken for
   // one of the Claude figures above.
@@ -1106,41 +1165,43 @@ void renderCodexRow() {
   // 14). The tag-versus-window trade (see showCxTag below) is kept IDENTICAL
   // on both boards regardless: a roomier lane was never a reason for the two
   // panels to render different text.
-  const char* cxTag = linkTag(cxSourceLink);
+  const char* cxTag = linkTag(src);
   bool showCxTag = cxTag && *cxTag && usedLinkCount() > 1;
   // Icon shown whenever one is set, same reasoning as the Claude cards' chrome:
   // personalisation, not disambiguation, so it isn't gated on a second Mac.
-  int cxEmoji = emojiIdForLink(cxSourceLink);
+  int cxEmoji = emojiIdForLink(src);
   bool showCxIcon = cxEmoji >= 0;
-  if (showCxIcon) {
+  if (half) {
+    // HALF A ROW (board 1, Codex and Antigravity both reporting): the short name and
+    // the window only - no Mac tag or icon, which have no room at STRIP_HALF_W.
+    long d = sWin / 1440;
+    if (sWin <= 0) snprintf(buf, sizeof(buf), "%s", shortName);
+    else if (d >= 1) snprintf(buf, sizeof(buf), "%s %ldd", shortName, d);
+    else snprintf(buf, sizeof(buf), "%s %ldh", shortName, sWin / 60);
+  } else if (showCxIcon) {
     // Same window text as the no-tag branch below, just with "CX" in place of
     // "CODEX" and 4 spaces reserved after it instead of 2 - room for the icon
     // plus its gaps (4px on each side), measured at each board's own monospace
     // advance: 24px of gap against 4+13+4 = 21 needed on board 1 (3px spare),
     // and 32px against 4+16+4 = 24 on board 2 (8px spare). So the window text
     // can never collide with the icon drawn into that gap below.
-    long d = usage.cxWindowMin / 1440;
-    if (usage.cxWindowMin <= 0) snprintf(buf, sizeof(buf), "CX");
-    else if (d >= 1) snprintf(buf, sizeof(buf), "CX    %ldd", d);
-    else snprintf(buf, sizeof(buf), "CX    %ldh", usage.cxWindowMin / 60);
+    long d = sWin / 1440;
+    if (sWin <= 0) snprintf(buf, sizeof(buf), "%s", shortName);
+    else if (d >= 1) snprintf(buf, sizeof(buf), "%s    %ldd", shortName, d);
+    else snprintf(buf, sizeof(buf), "%s    %ldh", shortName, sWin / 60);
   } else if (showCxTag) {
-    snprintf(buf, sizeof(buf), "CX %s", cxTag);
-  } else if (usage.cxWindowMin > 0) {
-    long d = usage.cxWindowMin / 1440;
-    if (d >= 1) snprintf(buf, sizeof(buf), "CODEX  %ldd", d);
-    else snprintf(buf, sizeof(buf), "CODEX  %ldh", usage.cxWindowMin / 60);
+    snprintf(buf, sizeof(buf), "%s %s", shortName, cxTag);
+  } else if (sWin > 0) {
+    long d = sWin / 1440;
+    if (d >= 1) snprintf(buf, sizeof(buf), "%s  %ldd", longName, d);
+    else snprintf(buf, sizeof(buf), "%s  %ldh", longName, sWin / 60);
   } else {
-    snprintf(buf, sizeof(buf), "CODEX");
+    snprintf(buf, sizeof(buf), "%s", longName);
   }
-  padTo(buf, sizeof(buf), CODEX_LANE_CHARS);
-#if BOARD_USAGE_V2
-  drawIfChanged(cxPctCache, CODEX_LANE_CACHE, buf, CARD_X + PAD, codexRowY() + CODEX_TEXT_Y, 2, 1,
+  padTo(buf, sizeof(buf), half ? STRIP_HALF_LANE_CHARS : CODEX_LANE_CHARS);
+  drawIfChanged(laneCache, CODEX_LANE_CACHE, buf, x + PAD, y + textY, 2, 1,
                 COLOR_LABEL, COLOR_CARD);
-#else
-  drawIfChanged(cxPctCache, CODEX_LANE_CACHE, buf, CARD_X + PAD, CODEX_Y + CODEX_TEXT_Y, 2, 1,
-                COLOR_LABEL, COLOR_CARD);
-#endif
-  if (showCxIcon) {
+  if (showCxIcon && !half) {
     // "CX" + 4px gap + the icon, from the label's x, at each board's own
     // advance: 12+4+13 = 29px ending at 55 on board 1, and 16+4+16 = 36px
     // ending at 66 on board 2 - well clear of the right field's clear box
@@ -1149,11 +1210,7 @@ void renderCodexRow() {
     // the row's text, whose own clear box is 2 rows taller than the icon on
     // both boards. See the long derivation above.
     setUIFont(2);
-#if BOARD_USAGE_V2
-    drawEmoji(cxEmoji, CARD_X + PAD + tft.textWidth("CX") + 4, codexRowY() + CODEX_TEXT_Y, COLOR_CARD);
-#else
-    drawEmoji(cxEmoji, CARD_X + PAD + tft.textWidth("CX") + 4, CODEX_Y + CODEX_TEXT_Y, COLOR_CARD);
-#endif
+    drawEmoji(cxEmoji, x + PAD + tft.textWidth(shortName) + 4, y + textY, COLOR_CARD);
   }
 
   // Right lane: the percentage and the reset countdown - two facts, not three.
@@ -1174,20 +1231,17 @@ void renderCodexRow() {
   // the field's rendered width is a fixed 18 characters, not a moving target.
   if (!have) {
     snprintf(buf, sizeof(buf), "--");
-  } else if (usage.cxResetInMin >= 0) {
-    snprintf(buf, sizeof(buf), "%d%%  %s", usage.cxPct,
-             formatResetIn(usage.cxResetInMin).c_str());
+  } else if (half) {
+    snprintf(buf, sizeof(buf), "%d%%", sPct);   // the countdown has no room in half a row
+  } else if (sReset >= 0) {
+    snprintf(buf, sizeof(buf), "%d%%  %s", sPct,
+             formatResetIn(sReset).c_str());
   } else {
-    snprintf(buf, sizeof(buf), "%d%%", usage.cxPct);
+    snprintf(buf, sizeof(buf), "%d%%", sPct);
   }
-  padLeftTo(buf, sizeof(buf), CODEX_RIGHT_CHARS);
-#if BOARD_USAGE_V2
-  drawIfChanged(cxRightCache, CODEX_LANE_CACHE, buf, CARD_X + CARD_W - PAD, codexRowY() + CODEX_TEXT_Y, 2, 1,
+  padLeftTo(buf, sizeof(buf), half ? STRIP_HALF_RIGHT_CHARS : CODEX_RIGHT_CHARS);
+  drawIfChanged(rightCache, CODEX_LANE_CACHE, buf, x + w - PAD, y + textY, 2, 1,
                 stale ? COLOR_LABEL : (have ? COLOR_VALUE : COLOR_LABEL), COLOR_CARD, TR_DATUM);
-#else
-  drawIfChanged(cxRightCache, CODEX_LANE_CACHE, buf, CARD_X + CARD_W - PAD, CODEX_Y + CODEX_TEXT_Y, 2, 1,
-                stale ? COLOR_LABEL : (have ? COLOR_VALUE : COLOR_LABEL), COLOR_CARD, TR_DATUM);
-#endif
 
   // Pace bar, with the same tick the Claude cards carry: fill ahead of the marker means
   // quota is going faster than time. tickPct -1 when either input is missing, which
@@ -1195,15 +1249,42 @@ void renderCodexRow() {
   // The bar dims WITH the number when the reading is stale; a bright bar beside a dimmed
   // percentage would read as live data. drawPaceBar caches on (pct, tick) only, so the
   // colour change alone would not repaint - renderUsageTab busts cxBarCache on the flip.
-  int tickPct = (have && usage.cxResetInMin >= 0 && usage.cxWindowMin > 0)
-                    ? (int) (100 - usage.cxResetInMin * 100 / usage.cxWindowMin)
+  int tickPct = (have && sReset >= 0 && sWin > 0)
+                    ? (int) (100 - sReset * 100 / sWin)
                     : -1;
+  drawPaceBar(barCache, x + PAD, y + barY, w - 2 * PAD, BAR_H,
+              have ? sPct : 0, tickPct, stale ? COLOR_LABEL : color);
+}
+
+// The two strips' placement. Board 2 STACKS them (Codex first, Antigravity below, the
+// trio column's compact height when both are there); board 1 has one 44px row and no
+// room for a second, so two strips SHARE it, Codex on the left half and Antigravity on
+// the right - its cards are already at their minimum (CARD_H 104 ends +102, the reset
+// line on the border's ceiling), so the space could not come from them.
+void renderCodexRow() {
+  // Nothing to draw, and nothing to CLEAR either - on BOTH boards, by two different
+  // routes. Board 2's layout flip repaints the whole content area; board 1's flip
+  // clears this row's own rect and busts the four caches that cover it (see
+  // renderUsageTab's bust). Either way the row's old pixels are gone before this
+  // returns, so an early return here can never strand them.
+  if (!usageCodexShown()) return;
 #if BOARD_USAGE_V2
-  drawPaceBar(&cxBarCache, CARD_X + PAD, codexRowY() + CODEX_BAR_Y, CARD_W - 2 * PAD, BAR_H,
-              have ? usage.cxPct : 0, tickPct, stale ? COLOR_LABEL : color);
+  renderStrip(false, CARD_X, codexRowY(), CARD_W, stripH(), stripTextY(), stripBarY(), false);
 #else
-  drawPaceBar(&cxBarCache, CARD_X + PAD, CODEX_Y + CODEX_BAR_Y, CARD_W - 2 * PAD, BAR_H,
-              have ? usage.cxPct : 0, tickPct, stale ? COLOR_LABEL : color);
+  const bool half = usageAgShown();
+  renderStrip(false, CARD_X, CODEX_Y, half ? STRIP_HALF_W : CARD_W, CODEX_H, CODEX_TEXT_Y, CODEX_BAR_Y, half);
+#endif
+}
+void renderAgRow() {
+  // The same no-clear early return as Codex's: the layout flip in renderUsageTab()
+  // has already cleared this strip's pixels whenever it stops being shown.
+  if (!usageAgShown()) return;
+#if BOARD_USAGE_V2
+  renderStrip(true, CARD_X, agRowY(), CARD_W, stripH(), stripTextY(), stripBarY(), false);
+#else
+  const bool half = usageCodexShown();
+  renderStrip(true, half ? CARD_X + CARD_W - STRIP_HALF_W : CARD_X, CODEX_Y,
+              half ? STRIP_HALF_W : CARD_W, CODEX_H, CODEX_TEXT_Y, CODEX_BAR_Y, half);
 #endif
 }
 void renderUsageTab() {
@@ -1252,6 +1333,16 @@ void renderUsageTab() {
     cxPctCache[0] = '\0';
     cxBarCache = -1;
     cxBorderCache = -1;
+  }
+  // The AGY strip's own dim flag, on its own reading's age - the same trap, the
+  // same fix: a colour-only change reaches no text-comparing cache by itself.
+  int agStale = usage.agAgeSec > 900 ? 1 : 0;
+  if (agStale != agStaleCache) {
+    agStaleCache = agStale;
+    agRightCache[0] = '\0';
+    agPctCache[0] = '\0';
+    agBarCache = -1;
+    agBorderCache = -1;
   }
   // A source change moves no percentage, so nothing else would repaint - the
   // same trap the stale-dim flip above has, where the digits stay identical.
@@ -1308,7 +1399,10 @@ void renderUsageTab() {
   char labelNow[sizeof(labelCache)];
   snprintf(labelNow, sizeof(labelNow), "%c%s", usageAcctNamed() ? '1' : '0', usageAcctLabel());
   int emojiNow = emojiIdForLink(usageAcctLabelLink());
-  int codexShownNow = usageCodexShown() ? 1 : 0;
+  // WHICH STRIPS are up, as a mask (1 Codex, 2 Antigravity) - still named for the
+  // one strip it once tracked, because every flip of it is a layout change: on
+  // board 2 the column itself (solo/duo/trio), on board 1 whether the row is split.
+  int codexShownNow = (usageCodexShown() ? 1 : 0) | (usageAgShown() ? 2 : 0);
   if (srcCache != usageSourceLink || cxSrcCache != cxSourceLink ||
       acctCache != acctNow || strcmp(labelCache, labelNow) != 0 ||
       emojiCache != emojiNow || codexShownCache != codexShownNow) {
@@ -1346,7 +1440,10 @@ void renderUsageTab() {
   char labelNow[sizeof(labelCache)];
   snprintf(labelNow, sizeof(labelNow), "%c%s", usageAcctNamed() ? '1' : '0', usageAcctLabel());
   int emojiNow = emojiIdForLink(usageAcctLabelLink());
-  int codexShownNow = usageCodexShown() ? 1 : 0;
+  // WHICH STRIPS are up, as a mask (1 Codex, 2 Antigravity) - still named for the
+  // one strip it once tracked, because every flip of it is a layout change: on
+  // board 2 the column itself (solo/duo/trio), on board 1 whether the row is split.
+  int codexShownNow = (usageCodexShown() ? 1 : 0) | (usageAgShown() ? 2 : 0);
   if (srcCache != usageSourceLink || cxSrcCache != cxSourceLink ||
       acctCache != acctNow || strcmp(labelCache, labelNow) != 0 ||
       emojiCache != emojiNow) {
@@ -1383,12 +1480,18 @@ void renderUsageTab() {
   // only cost one redundant repaint on the next tick.
   if (codexShownCache != codexShownNow) {
     if (codexShownCache != -1) {
+      // The whole row, both halves: a split row and a full one cover it differently,
+      // so every flip clears all of it and re-cards whatever is shown now.
       tft.fillRect(CARD_X, CODEX_Y, CARD_W, CODEX_H, COLOR_BG);
       cxPctCache[0] = '\0';
       cxRightCache[0] = '\0';
       cxBorderCache = -1;
       cxBarCache = -1;
-      if (codexShownNow) uiCard(CARD_X, CODEX_Y, CARD_W, CODEX_H, COLOR_CARD);
+      agPctCache[0] = '\0';
+      agRightCache[0] = '\0';
+      agBorderCache = -1;
+      agBarCache = -1;
+      drawStripCards();
     }
     codexShownCache = codexShownNow;
   }
@@ -1405,6 +1508,7 @@ void renderUsageTab() {
              &bar2Cache, &border2Cache, usage.weekFableTokens, usage.weekFablePct);
 #endif
   renderCodexRow();
+  renderAgRow();
 #if !BOARD_USES_TFT_ESPI
   tft.flush();
 #endif
@@ -1433,10 +1537,19 @@ void drawUsageStatic() {
   // ONE gated call, with only the Y behind the guard - board 2's row moves with the
   // layout, board 1's is fixed at CODEX_Y. Board 1 used to paint this card
   // unconditionally, which is what left "CODEX  --" on the glass for ever.
+  drawStripCards();
+}
+
+// The strips' card fills, wherever renderCodexRow()/renderAgRow() will draw them -
+// the same geometry, so a fill and its strip can never be in two places.
+void drawStripCards() {
 #if BOARD_USAGE_V2
-  const int cxY = codexRowY();
+  if (usageCodexShown()) uiCard(CARD_X, codexRowY(), CARD_W, stripH(), COLOR_CARD);
+  if (usageAgShown())    uiCard(CARD_X, agRowY(),    CARD_W, stripH(), COLOR_CARD);
 #else
-  const int cxY = CODEX_Y;
+  const bool split = usageCodexShown() && usageAgShown();
+  if (usageCodexShown()) uiCard(CARD_X, CODEX_Y, split ? STRIP_HALF_W : CARD_W, CODEX_H, COLOR_CARD);
+  if (usageAgShown())    uiCard(split ? CARD_X + CARD_W - STRIP_HALF_W : CARD_X, CODEX_Y,
+                                split ? STRIP_HALF_W : CARD_W, CODEX_H, COLOR_CARD);
 #endif
-  if (usageCodexShown()) uiCard(CARD_X, cxY, CARD_W, CODEX_H, COLOR_CARD);
 }

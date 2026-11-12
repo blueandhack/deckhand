@@ -25,9 +25,9 @@ import crypto from "node:crypto";
 import { SerialPort } from "serialport";
 import noble from "@abandonware/noble";
 import { DatabaseSync } from "node:sqlite";
-import { mergeById } from "./sessions-merge.mjs";
+import { mergeById, mergeAntigravity } from "./sessions-merge.mjs";
 import { readAntigravitySessions } from "./gemini-sessions.mjs";
-import { readGeminiQuota, quotaField, ageQuota } from "./gemini-quota.mjs";
+import { readGeminiQuota, readGeminiQuotaFromCli, quotaField, ageQuota, antigravityDeviceUsage } from "./gemini-quota.mjs";
 import {
   capUtf8,
   ANSWER_TEXT_MAX_BYTES as VOICE_ANSWER_TEXT_MAX_BYTES,
@@ -1472,13 +1472,10 @@ async function readCodexSessions() {
   return out;
 }
 
-// ---------- Gemini (Antigravity) sessions ----------
-// Pulled from Antigravity's own conversation index - see host/gemini-sessions.mjs
-// for what was measured about it. MENU-BAR ONLY for now, deliberately: the firmware
-// draws every agent that is not "cx" as CLAUDE (sessions.ino), so a Gemini row on
-// the wire would be mislabelled on the glass. readSessions() ranks these into the
-// menu's list and keeps them off the device's.
-// readOnly: never a writer on another app's database. SQLite still creates the
+// ---------- Antigravity sessions ----------
+// Pulled from Antigravity's own conversation index - see host/gemini-sessions.mjs for
+// what was measured about it - and merged in readSessions() with the records its hook
+// pushes. readOnly: never a writer on another app's database. SQLite still creates the
 // -shm/-wal beside it if Antigravity is not running, exactly as agy itself does.
 function readGeminiSessions() {
   return readAntigravitySessions({
@@ -1487,21 +1484,26 @@ function readGeminiSessions() {
   });
 }
 
-// The row the MENU draws, and nothing else: no ask, no nonce (a typed message
-// goes to Claude Code's inbox, which Antigravity has none of), no prompt.
-async function buildGeminiMenuItem(record) {
-  return {
-    id: record.id.slice(0, 12),
-    name: deviceText(await projectName(record.cwd), 22),
-    status: record.status,
-    path: truncatePath(toAscii(record.cwd), 64),
-    model: "",
-    branch: deviceText(await gitBranch(record.cwd || ""), 20),
-    ...(record.title ? { title: deviceText(record.title, 40) } : {}),
-    ...(record.app ? { app: record.app } : {}),
-    actSec: secondsSinceMidnight(record.updated_at),
-    agent: "gm",
-  };
+// The device's short agent code. Three agents, three codes; anything else is Claude,
+// which is what a record written before the field existed always was.
+export function wireAgent(agent) {
+  return agent === "codex" ? "cx" : agent === "antigravity" ? "ag" : "cc";
+}
+
+// The model as the device's sub-line shows it. "gemini-4-argon-medium" is 21 characters
+// against the 20-character cap and lost its last letter on the glass (seen 2026-11-11);
+// the firmware strips "claude-" for the same reason, so "gemini-" goes here, before the
+// cap rather than after it.
+export function agentModel(record) {
+  const m = record?.model || "";
+  return record?.agent === "antigravity" ? m.replace(/^gemini-/, "") : m;
+}
+
+// Whether a typed or spoken message can reach this session. Claude Code and Codex
+// take one; Antigravity has no inbox, so its sessions are never offered the control
+// (no pnonce) and a message aimed at one is refused BY NAME on arrival.
+export function msgDeliverable(record) {
+  return record?.agent !== "antigravity";
 }
 
 // ---------- Refreshing the Codex figure ----------
@@ -2342,10 +2344,14 @@ async function sendScrollback(id, filter, maxBytes, link) {
 async function buildSessionItem(record) {
   // One tail read per session per tick, giving both the live model and the session
   // title. Codex has neither in this shape, so it doesn't pay for the read.
+  // Antigravity has none of Claude's transcript format, but its hook (and its own
+  // conversation index) already carry the model, the latest prompt and the title.
   const tx =
     record.agent === "codex"
       ? { model: "", title: "", prompt: "", startedMs: 0 }
-      : await transcriptInfo(record.transcript);
+      : record.agent === "antigravity"
+        ? { model: "", title: record.title || "", prompt: record.prompt || "", startedMs: 0 }
+        : await transcriptInfo(record.transcript);
   const item = {
     id: (record.id || "").slice(0, 12), // 12 uuid chars is plenty to disambiguate
     // 22, matching what the device can actually draw: a tall row's name lane fits 22
@@ -2357,7 +2363,7 @@ async function buildSessionItem(record) {
     // the old cap threw away the middle of any deep worktree path.
     path: truncatePath(toAscii(record.cwd || ""), 64),
     model: deviceText(
-      record.agent === "codex" ? record.model || "" : tx.model || record.model || "",
+      record.agent === "codex" || record.agent === "antigravity" ? agentModel(record) : tx.model || record.model || "",
       20,
     ),
     branch: deviceText(await gitBranch(record.cwd || ""), 20),
@@ -2385,11 +2391,13 @@ async function buildSessionItem(record) {
     actSec: secondsSinceMidnight(record.updated_at),
     // Short on purpose: this rides in every payload, and the device's line
     // buffer is sized for asks carrying 1400-char details.
-    agent: record.agent === "codex" ? "cx" : "cc",
+    agent: wireAgent(record.agent),
   };
   // Remember where this session's transcript lives, keyed by the SAME truncated id
   // the device sees - that id is all it can send back when asking for history.
-  if (record.transcript) transcriptById.set(item.id, record.transcript);
+  // NOT Antigravity's: the history reader parses Claude's transcript format, and an
+  // Antigravity transcript_full.jsonl is a different shape entirely.
+  if (record.transcript && record.agent !== "antigravity") transcriptById.set(item.id, record.transcript);
   // Pending question (already truncated by the hook) rides along so the
   // device can display it and offer the options as buttons. We attach a
   // per-prompt nonce; the device HMACs it back so we can trust the answer.
@@ -2407,7 +2415,10 @@ async function buildSessionItem(record) {
   // credential for a state in which it must not offer the control - the same
   // reason ask.answerable is stamped per prompt rather than read from a live
   // global. handleTypedPrompt re-checks the status on arrival regardless.
-  if (MSG_OK_STATUS.has(record.status) && record.id) item.pnonce = nonceForSession(record.id);
+  // Never for Antigravity: nothing can deliver typed text into a running agy session
+  // (it has no inbox), and a headless `agy --conversation` turn would be a second,
+  // concurrent author of it. No credential, so the device never offers the control.
+  if (MSG_OK_STATUS.has(record.status) && record.id && msgDeliverable(record)) item.pnonce = nonceForSession(record.id);
   if (record.ask) {
     // A SPREAD, not a field list, and that is what carries the hook's newer
     // fields through untouched - `optDescs` (the per-option descriptions,
@@ -2540,7 +2551,7 @@ async function readSessions() {
       records.push({
         ...record,
         id: path.basename(file, ".json"),
-        agent: record.agent === "codex" ? "codex" : "claude",
+        agent: record.agent === "codex" || record.agent === "antigravity" ? record.agent : "claude",
       });
     } catch {
       // ignore unreadable/partially-written file this tick
@@ -2552,8 +2563,19 @@ async function readSessions() {
   // pre-shaped by readCodexSessions().
   // Codex arrives from both directions now; the hook record wins where both exist.
   const merged = mergeById(await track("readSessions:codex", readCodexSessions()), records);
+  // ANTIGRAVITY: pulled from its own conversation index every tick, and pushed by
+  // deckhand-antigravity-hook.mjs when its hook is installed - merged FIELD BY FIELD,
+  // the index's live status winning (mergeAntigravity, sessions-merge.mjs). A hook
+  // record for a SUBAGENT conversation is dropped: the index knows which conversations
+  // have a parent and the hook payload does not, and a subagent is not a session
+  // anyone waits on (the pull path has always skipped them).
+  const ag = readGeminiSessions();
+  const agChildren = ag.children ?? new Set();
+  // Field by field, not record by record - see mergeAntigravity() for the measurement.
+  const agHook = merged.filter((r) => r.agent === "antigravity" && !agChildren.has(r.id));
+  const withAg = [...merged.filter((r) => r.agent !== "antigravity"), ...mergeAntigravity(ag, agHook)];
   records.length = 0;
-  records.push(...merged);
+  records.push(...withAg);
 
   // Urgency first, recency second: the display fits 6 sessions, and when
   // there are more, a session that NEEDS INPUT must never be the hidden one.
@@ -2603,8 +2625,8 @@ async function readSessions() {
     // 79px rather than the 65px rung that fits six on screen. Sending a row whose
     // distinguishing line is blank would have given that height back for nothing.
     const tx =
-      record.agent === "codex"
-        ? { model: record.model || "" }
+      record.agent === "codex" || record.agent === "antigravity"
+        ? { model: agentModel(record) }
         : await transcriptInfo(record.transcript);
     return {
       id: (record.id || "").slice(0, 12),
@@ -2618,7 +2640,7 @@ async function readSessions() {
       // A FOCUSed row gets one from the full builder, which is also the only screen
       // that would show it.
       actSec: secondsSinceMidnight(record.updated_at),
-      agent: record.agent === "codex" ? "cx" : "cc",
+      agent: wireAgent(record.agent),
       // THE FLAG THE DEVICE READS TO KNOW ITS CARD WOULD BE EMPTY. Without it a
       // lean row and a genuinely promptless session are indistinguishable there,
       // and the detail card would say "no prompt" for a session that has one.
@@ -2668,18 +2690,14 @@ async function readSessions() {
   ));
   // A lean row's transcript is registered too, so a FOCUSed row can open its history
   // the same way a full one can. Keyed by the SAME truncated id the device sees.
-  for (const r of top) if (r.transcript && r.id) transcriptById.set(r.id.slice(0, 12), r.transcript);
-  // THE MENU'S LIST is the device's PLUS Gemini, ranked by the same rule from the
-  // records' own timestamps, so a Gemini row sorts among the others by urgency
-  // rather than trailing them. The device's list above is untouched by it.
-  const gemini = readGeminiSessions();
-  const menuRanked = [
-    ...top.map((r, i) => ({ r, item: list[i] })),
-    ...(await track("readSessions:gemini", Promise.all(gemini.map(async (r) => ({ r, item: await buildGeminiMenuItem(r) }))))),
-  ].sort((a, b) => rank(a.r) - rank(b.r) || b.r.updated_at - a.r.updated_at);
+  for (const r of top) if (r.transcript && r.id && r.agent !== "antigravity") transcriptById.set(r.id.slice(0, 12), r.transcript);
+  // THE MENU'S LIST is the device's list now. It used to be the device's PLUS
+  // Antigravity, which was menu-only because the firmware drew every agent that was
+  // not "cx" as CLAUDE; the firmware now knows "ag" (sessions.ino), so both see the
+  // same rows in the same order.
   return {
     list,
-    menu: { list: menuRanked.map((x) => x.item), total: records.length + gemini.length },
+    menu: { list, total: records.length },
     total: records.length,
     // Sessions that did not fit AT ALL - now beyond twenty rather than beyond six.
     // Only nonzero with 21+ simultaneously-asking sessions, but if that ever
@@ -2745,25 +2763,43 @@ function kickCcusage() {
   return ccusageInFlight;
 }
 
-// Gemini usage, from the Gemini app's local server (host/gemini-quota.mjs). A local
-// call that answers in ~35ms, but it is still a network round trip the tick must never
-// wait on: kicked at most once a MINUTE, in the background, single-flight like
-// ccusage, and the tick prints whatever the last answer was. MENU BAR ONLY - like
-// Gemini's sessions it never reaches the device. A reading older than 6h (the app has
-// been closed that long) is dropped rather than shown as stale forever.
+// Antigravity usage (host/gemini-quota.mjs), from one of TWO sources, best first:
+//   1. an Antigravity app's local server, if one is running - ~35ms, so asked at most
+//      once a MINUTE;
+//   2. the CLI's own `agy -p /usage`, when no server answered - a process spawn of
+//      ~3.6s and no model turn, so asked at most every GEMINI_QUOTA_CLI_EVERY_MS. This
+//      is what makes usage work with only a terminal agy (measured 2026-11-11).
+// Both are background and single-flight like ccusage: the tick never waits, it prints
+// whatever the last answer was. A reading older than 6h is dropped rather than shown
+// as stale forever. The device gets it too now (antigravityUsageForDevice()).
 const GEMINI_QUOTA_EVERY_MS = 60_000;
+const GEMINI_QUOTA_CLI_EVERY_MS = 5 * 60_000;
 const GEMINI_QUOTA_DROP_MS = 6 * 3600_000;
-let geminiQuota = null;            // { list, at }
+let geminiQuota = null;            // { list, at, src: "app"|"cli" }
 let geminiQuotaInFlight = null;
 let geminiQuotaAskedAt = 0;
+let geminiQuotaCliAskedAt = 0;
 function kickGeminiQuota() {
   if (geminiQuotaInFlight || Date.now() - geminiQuotaAskedAt < GEMINI_QUOTA_EVERY_MS) return;
   geminiQuotaAskedAt = Date.now();
-  geminiQuotaInFlight = readGeminiQuota()
-    .then((list) => { if (list) geminiQuota = { list, at: Date.now() }; })
+  geminiQuotaInFlight = (async () => {
+    const fromApp = await readGeminiQuota();
+    if (fromApp) { geminiQuota = { list: fromApp, at: Date.now(), src: "app" }; return; }
+    if (Date.now() - geminiQuotaCliAskedAt < GEMINI_QUOTA_CLI_EVERY_MS) return;
+    // Stamped BEFORE the spawn, so a hang or a crash still counts as an attempt.
+    geminiQuotaCliAskedAt = Date.now();
+    const fromCli = await readGeminiQuotaFromCli();
+    if (fromCli) geminiQuota = { list: fromCli, at: Date.now(), src: "cli" };
+  })()
     .catch(() => {})
     .finally(() => { geminiQuotaInFlight = null; });
 }
+function antigravityUsageForDevice() {
+  if (!geminiQuota || Date.now() - geminiQuota.at > GEMINI_QUOTA_DROP_MS) return {};
+  const ageMs = Date.now() - geminiQuota.at;
+  return antigravityDeviceUsage(ageQuota(geminiQuota.list, Math.floor(ageMs / 60000)), Math.round(ageMs / 1000));
+}
+
 function geminiQuotaLine() {
   if (!geminiQuota || Date.now() - geminiQuota.at > GEMINI_QUOTA_DROP_MS) return "";
   // Aged to NOW: resets count down between reads, and a window that has reset since
@@ -2861,6 +2897,7 @@ async function readUsage() {
     // data on screen - the footer's freshness only covers the transport.
     quotaAgeSec: quotaAt > 0 ? Math.round((Date.now() - quotaAt) / 1000) : null,
     ...codexUsage(),
+    ...antigravityUsageForDevice(),
     sessions: sessions.list,
     sessionsTotal: sessions.total,
     hiddenAsking: sessions.hiddenAsking,
@@ -3336,6 +3373,11 @@ async function deliverTextToSession(target, text, tag = "Voice", via = null) {
     record = JSON.parse(await fs.readFile(path.join(SESSIONS_DIR, `${sessionId}.json`), "utf8"));
     cwd = record.cwd || undefined;
   } catch {}
+  if (sessionId && !msgDeliverable(record)) {
+    console.error(`${tag}: session ${target} is an Antigravity conversation, which has no inbox to post into - not dispatched.`);
+    setVoice("error", { text, reply: "Antigravity sessions cannot take a message" });
+    return;
+  }
   if (!sessionId) {
     console.error(`${tag}: could not read the session record for ${target} - not dispatched.`);
     setVoice("error", { text, reply: "no matching session" });
@@ -3746,6 +3788,12 @@ async function handleTypedPrompt(line, via) {
     console.error(
       `Prompt: session ${id12} is "${record.status}", not one of ${[...MSG_OK_STATUS].join("/")} - refusing.`
     );
+    return;
+  }
+  // The same rule the nonce is withheld by (msgDeliverable), re-checked here because a
+  // gate that exists only where the credential is issued is not a gate.
+  if (!msgDeliverable(record)) {
+    console.error(`Prompt: session ${id12} is an Antigravity conversation, which has no inbox to post into - refusing.`);
     return;
   }
 

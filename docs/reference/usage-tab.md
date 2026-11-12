@@ -582,3 +582,48 @@ of which board 1 compiles.
   `SCREENSHOT` reads the shadow framebuffer the renderer just composed, not the panel (see the
   verification trap under Two boards) — so it vouches for the GEOMETRY this task built and says
   nothing about how any of it actually looks on the glass.
+
+#### USAGE: an Antigravity strip, a TRIO column on board 2, a split row on board 1 (2026-11-11)
+
+**What arrives.** The host sends one Antigravity figure in Codex's shape - `agPct`,
+`agResetMin`, `agWin`, `agAgeSec` - the MOST-USED Gemini window (`antigravityDeviceUsage`,
+`docs/reference/gemini.md` says why it is not "Gemini Models" by name). It parses into
+`usage.agPct` and friends, merges per account like Codex's (`mergeAccount()`'s `bestAg`, same
+no-cross-account rule), and is shown while `usageAgShown()` - Codex's predicate on its own
+fields, with `AG_HIDE_FALLBACK_MIN` in both headers. The host drops a reading at 6 hours and
+then sends no `ag` fields, which parse to -1 and hide the strip at once.
+
+**One renderer.** `renderCodexRow()`'s body became `renderStrip(ag, x, y, w, h, textY, barY,
+half)` - the same lane derivation, the same caches by POINTER (`laneCache = ag ? agPctCache :
+cxPctCache`), labels from the agent's names (`CODEX`/`CX`, `AGY`/`AG`; `AGY` is two characters
+shorter than `CODEX`, so every lane derived from Codex's longest label still bounds it). The AGY
+strip carries no Mac tag or icon. `renderCodexRow()`/`renderAgRow()` are thin placement
+wrappers; `drawStripCards()` paints both card fills from the same geometry.
+
+**Board 2: THREE columns.** `usageStripCount()` (0, 1, 2) picks SOLO / DUO / TRIO through
+`usageCol(solo, duo, trio)`, and every accessor names its three constants once.
+TRIO is `8 + 144 + 8 + 132 + 8 + 48 + 8 + 48 + 10 = 414`:
+
+- **NOW** drops its sparkline band and nothing else (`NOW_SPARK_H_TRIO 0`; the meta row closes
+  up on the duo card's rhythm; the span caption goes blank, since it names a band that is not
+  there). The ring keeps sampling, so the trend is whole the moment the column goes back.
+- **WEEK** keeps every line and both bars and gives up GAP: 126 + 6k at k = 1, each offset
+  stepped by the same per-gap rate the solo/duo pair proves (NUM 23+k, BAR 52+2k, META 69+3k,
+  FABLE 87+4k, FABLE_BAR 108+5k). `usage-geom-check.mjs` re-derives every TRIO offset from the
+  parsed solo and duo values rather than restating it.
+- **The strips** are 48 rows (`STRIP_H_TRIO`), text at +6, bar at +28, content ending +43.
+
+**Board 1: one row, split.** Its cards cannot give 48 rows - content ends +102 inside `CARD_H`
+104 and the 39px hero is what the 122->104 pass protected - so with both reporting, Codex takes
+the left half and Antigravity the right (`STRIP_HALF_W` = (CARD_W - 4) / 2 = 106), each showing
+the short name and window (`CX 7d`, `AG 5h`) and the percentage only. The half lane (8 chars)
+is re-derived in the checker from the right field's "100%". With one strip it is the full row,
+unchanged. This is a departure from the "fourth strip, smaller cards" choice for board 2, made
+because board 1 had no rows to give - stated here so it is not mistaken for an oversight.
+
+**Measured on glass, board 2:** the AGY strip in the DUO column (`AGY 7d  34%  3d 0h left`, a
+real reading from `agy -p /usage`, under unchanged NOW/WEEK cards). **NOT seen on glass:** the
+TRIO column - it needs one account reporting Codex AND Antigravity; `MULTITEST` now injects both,
+but its synthetic Mac needs a free link slot and two real Macs held both - and anything on
+board 1, which was not cabled. 18 source faults in `usage-geom-check.mjs --selftest`, 7 of them
+new for these rules, are caught.

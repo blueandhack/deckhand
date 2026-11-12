@@ -98,11 +98,13 @@ final class ServiceState {
     private var _login = SMAppService.Status.notRegistered
     private var _hooks = Hooks.State.notInstalled
     private var _codexHooks = false
+    private var _agHooks = false
 
     var agent: SMAppService.Status { lock.withLock { _agent } }
     var login: SMAppService.Status { lock.withLock { _login } }
     var hooks: Hooks.State { lock.withLock { _hooks } }
     var codexHooks: Bool { lock.withLock { _codexHooks } }
+    var agHooks: Bool { lock.withLock { _agHooks } }
 
     /// On the calling thread. Only for launch and the --setup-do / preview modes,
     /// where nothing is drawn yet that a 35ms wait could freeze.
@@ -111,7 +113,8 @@ final class ServiceState {
         let l = SMAppService.mainApp.status
         let h = Hooks.state()
         let c = Hooks.codexInstalled()
-        lock.withLock { _agent = a; _login = l; _hooks = h; _codexHooks = c }
+        let g = Hooks.antigravityInstalled()
+        lock.withLock { _agent = a; _login = l; _hooks = h; _codexHooks = c; _agHooks = g }
     }
 
     /// Off the main thread; `then` runs on the main thread afterwards.
@@ -356,18 +359,25 @@ struct GeminiGroup: Equatable {
     var name: String
     var buckets: [Bucket]
     func bucket(_ w: String) -> Bucket? { buckets.first { $0.window == w } }
-    /// The group the bar's GM column shows: the app's general Gemini bucket ("Flash,
-    /// Pro"). Argon and the third-party models are separate allowances; they are in
-    /// the dropdown.
-    ///
-    /// Never a non-Gemini group: if the app renames "Gemini Models", the fallback is
-    /// the first GEMINI group with a 5h window, then any Gemini group - not simply the
-    /// first, which could be "Claude and GPT models". (Review finding.)
+    /// The group the bar's AG column shows: the one holding the MOST-USED window
+    /// among Antigravity's own Gemini groups - the same rule the host applies to the
+    /// device's AGY strip (antigravityDeviceUsage), so the bar and the glass never
+    /// disagree. It used to be "Gemini Models" by name, which read 0% on 2026-11-11
+    /// while "Gemini 4 Argon" was 35% through its week on a Mac running Argon.
+    /// A tie keeps the earlier group, which is the app's own order ("Gemini Models"
+    /// first). Never the "Claude and GPT models" group: other vendors' models, and
+    /// beside Claude's own column it would read as the person's Claude quota.
+    static func isOwn(_ g: GeminiGroup) -> Bool {
+        let n = g.name.lowercased()
+        return !n.contains("claude") && !n.contains("gpt")
+    }
     static func primary(_ gs: [GeminiGroup]) -> GeminiGroup? {
-        let own = gs.filter { $0.name.lowercased().hasPrefix("gemini") }
-        return own.first { $0.name.lowercased() == "gemini models" }
-            ?? own.first { $0.bucket("5h") != nil }
-            ?? own.first
+        var best: GeminiGroup? = nil, bestPct = -1
+        for g in gs where isOwn(g) {
+            let top = g.buckets.map(\.pct).max() ?? -1
+            if top > bestPct { best = g; bestPct = top }
+        }
+        return best
     }
 }
 
@@ -805,7 +815,7 @@ enum BarPref: String, CaseIterable {
         switch self {
         case .usage: return "Quota usage"
         case .codex: return "Codex usage"
-        case .gemini: return "Gemini usage"
+        case .gemini: return "Antigravity usage"
         case .sessions: return "Waiting / working counts"
         case .asking: return "Needs-input count"
         case .onlyOffline: return "Only while no device is connected"
@@ -970,19 +980,20 @@ func barModel(_ s: HostStatus, tier: BarTier, previewing: Bool = false) -> BarMo
             windows: [s.cxWinMin, s.cx2WinMin]))
     }
     if allowed(.gemini), let g = GeminiGroup.primary(s.gemini) {
-        // The app's general Gemini allowance, 5h over weekly like the others - from
-        // its own quota summary, which names both windows, so the pace is real too.
+        // Antigravity's most-used Gemini allowance (GeminiGroup.primary), 5h over weekly
+        // like the others - from its own quota summary, which names both windows, so
+        // the pace is real too.
         let stale = (s.gmAgeSec ?? 0) > QUOTA_STALE_SEC
         let five = g.bucket("5h"), week = g.bucket("weekly")
         let cell = { (b: GeminiGroup.Bucket?) in
             barCell(b?.pct, reset: b?.reset, window: b.flatMap { geminiWindowMinutes($0.window) }, stale: stale) }
         if five != nil {
             // 5h over weekly; a missing weekly is a dash holding its row.
-            m.quotas.append(BarQuota(tag: "GM", top: cell(five), bottom: cell(week)))
+            m.quotas.append(BarQuota(tag: "AG", top: cell(five), bottom: cell(week)))
         } else if let only = week ?? g.buckets.first {
             // No 5h window: ONE row, labelled by the tooltip - not a dash in a "5h"
             // row that this group does not have. (Review finding.)
-            m.quotas.append(BarQuota(tag: "GM", top: cell(only), bottom: nil, windows: [geminiWindowMinutes(only.window)]))
+            m.quotas.append(BarQuota(tag: "AG", top: cell(only), bottom: nil, windows: [geminiWindowMinutes(only.window)]))
         }
     }
     if tier == .minimal { m.quotas = m.quotas.filter(\.needsAttention) }
@@ -1203,7 +1214,7 @@ func geminiTooltip(_ s: HostStatus) -> String? {
     guard barMirrorAllowed(.gemini, s), let g = GeminiGroup.primary(s.gemini) else { return nil }
     let age = s.gmAgeSec ?? 0
     return g.buckets.map { b in
-        let name = "GM (Gemini) \(b.window == "weekly" ? "7d" : b.window)"
+        let name = "AG (Antigravity) \(b.window == "weekly" ? "7d" : b.window)"
         if age > QUOTA_STALE_SEC { return "\(name): \(b.pct)% used, no pace: this reading is \(humanMinutes(age / 60)) old" }
         return "\(name): " + paceWords(pct: b.pct, pace: pacePct(resetInMin: b.reset, windowMin: geminiWindowMinutes(b.window)))
     }.joined(separator: "\n")
@@ -1497,7 +1508,7 @@ let SESSION_TITLE_SHOW = 39
 func sessionTitle(_ r: SessionRow) -> NSAttributedString {
     let asking = r.status == "asking"
     let glyph = asking ? "\u{25A0}" : (r.status == "waiting" ? "\u{25CB}" : "\u{25CF}")
-    let agent = r.agent == "cx" ? "Codex" : (r.agent == "gm" ? "Gemini" : "")
+    let agent = r.agent == "cx" ? "Codex" : (r.agent == "ag" ? "Antigravity" : "")
     let age = sessionAge(r.actSec)
     let state: String
     switch r.status {
@@ -2369,7 +2380,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // way draws exactly like the system's own - dim is the platform's header style.
     let claudeHeader = NSMenuItem.sectionHeader(title: "Claude")
     let codexHeader = NSMenuItem.sectionHeader(title: "Codex")
-    let geminiHeader = NSMenuItem.sectionHeader(title: "Gemini")
+    let geminiHeader = NSMenuItem.sectionHeader(title: "Antigravity")
     // One row per Gemini quota WINDOW (a group has up to two), a fixed pool shown or hidden like the
     // session rows (never added or removed while the menu may be open).
     let geminiRows = (0..<6).map { _ in NSMenuItem(title: "", action: nil, keyEquivalent: "") }
@@ -2719,18 +2730,24 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let primary = GeminiGroup.primary(s.gemini)
         for g in s.gemini {
             let isPrimary = g.name == primary?.name
-            let isOwn = g.name.lowercased().hasPrefix("gemini")
+            let isOwn = GeminiGroup.isOwn(g)
             guard isPrimary || isOwn || g.buckets.contains(where: { $0.pct > 0 }) else { continue }
-            // "C/GPT", never "Claude": inside the Gemini section a row called "Claude
-            // 5h" read as your own Claude quota. (Review finding.)
-            let short = isPrimary ? nil : (g.name.lowercased().contains("argon") ? "Argon"
-                        : (g.name.lowercased().contains("claude") ? "C/GPT" : String(g.name.prefix(5))))
+            // "C/GPT", never "Claude": inside this section a row called "Claude 5h" read
+            // as your own Claude quota. (Review finding.) The general group is "Gemini",
+            // not prefix(5)'s "Gemin" - it is labelled now that Argon can be the primary.
+            // The primary row stays unlabelled ("5-hour"/"Weekly") ONLY when it is the
+            // general group; any other primary names itself, or a bare "Weekly 35%" would
+            // not say it is Argon's week.
+            let n = g.name.lowercased()
+            let name = n.contains("argon") ? "Argon" : (n.contains("claude") ? "C/GPT"
+                       : (n == "gemini models" ? "Gemini" : String(g.name.prefix(6))))
+            let short: String? = isPrimary && n == "gemini models" ? nil : name
             for b in g.buckets {
                 let w = b.window == "weekly" ? "7d" : b.window
                 gRows.append((short.map { "\($0) \(w)" }, g.name, b))
             }
         }
-        geminiHeader.attributedTitle = menuHeader("Gemini", note: ageNote(gStale, s.gmAgeSec))
+        geminiHeader.attributedTitle = menuHeader("Antigravity", note: ageNote(gStale, s.gmAgeSec))
         geminiHeader.isHidden = gRows.isEmpty
         for (i, item) in geminiRows.enumerated() {
             guard i < gRows.count else { item.isHidden = true; continue }
@@ -2740,7 +2757,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // The tooltip names the GROUP and the WINDOW ("Gemini 4 Argon, weekly"),
             // never the row's short label.
             let tip = quotaRow(win, r.b.pct, r.b.reset, stale: gStale).1
-            let sentence = "\(r.group), " + tip.prefix(1).lowercased() + tip.dropFirst() + "\nRead from the Gemini app while it is running."
+            let sentence = "\(r.group), " + tip.prefix(1).lowercased() + tip.dropFirst() + "\nRead from Antigravity: the app while it runs, otherwise the agy CLI."
             item.attributedTitle = title
             item.toolTip = sentence
             item.isHidden = false
@@ -3729,7 +3746,7 @@ func heartbeatDate() -> Date? {
 /// The installers are the repo's own (claude-hooks/), so the rules about what is ours
 /// and what is yours are exactly install.sh's - see hook-command.mjs.
 enum Hooks {
-    static let scripts = ["deckhand-session-hook.mjs", "deckhand-statusline.mjs"]
+    static let scripts = ["deckhand-session-hook.mjs", "deckhand-statusline.mjs", "deckhand-antigravity-hook.mjs"]
     /// The person's choice for Codex's hooks, REMEMBERED - default on, as before. It
     /// has to be a stored choice and not just a removal: install() runs again after
     /// every update and on Reinstall, and used to add Codex's hooks back whenever
@@ -3753,6 +3770,33 @@ enum Hooks {
 
     static var codexPresent: Bool {
         FileManager.default.fileExists(atPath: (NSHomeDirectory() as NSString).appendingPathComponent(".codex"))
+    }
+
+    /// The same remembered choice for Antigravity's hook, default on, for the same
+    /// reason as Codex's: install() reruns after every update.
+    static var antigravityWanted: Bool {
+        get { UserDefaults.standard.object(forKey: "antigravityHooks") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "antigravityHooks") }
+    }
+    /// ~/.gemini is where every Antigravity surface (the CLI, the app, the IDE) keeps
+    /// its data and where its global hooks.json lives.
+    static var antigravityPresent: Bool {
+        FileManager.default.fileExists(atPath: (NSHomeDirectory() as NSString).appendingPathComponent(".gemini"))
+    }
+    /// Add or take out ONLY Antigravity's hook, and remember the choice. nil on success.
+    static func setAntigravity(_ on: Bool) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        antigravityWanted = on
+        guard antigravityPresent else { return nil }
+        _ = node("deckhand-backup.mjs", ["backup"])
+        if on { try? pointRunner() }
+        let r = node("install-antigravity-hooks.mjs", on ? ["--node", runnerLink] : ["--remove"])
+        return r.status == 0 ? nil : r.out
+    }
+    /// Deckhand's hook is in ~/.gemini/config/hooks.json.
+    static func antigravityInstalled() -> Bool {
+        let f = (NSHomeDirectory() as NSString).appendingPathComponent(".gemini/config/hooks.json")
+        return (try? String(contentsOfFile: f, encoding: .utf8))?.contains("deckhand-antigravity-hook.mjs") ?? false
     }
     /// The user agreed once. Updates then re-copy without asking again; Remove clears it.
     static var consented: Bool {
@@ -3806,6 +3850,10 @@ enum Hooks {
             let c = node("install-codex-hooks.mjs", ["--node", runnerLink])
             if c.status != 0 { return "The Claude Code hooks are installed, but the Codex hooks failed.\n\n\(c.out)" }
         }
+        if antigravityPresent && antigravityWanted {
+            let a = node("install-antigravity-hooks.mjs", ["--node", runnerLink])
+            if a.status != 0 { return "The Claude Code hooks are installed, but the Antigravity hook failed.\n\n\(a.out)" }
+        }
         consented = true
         UserDefaults.standard.set(appBuild, forKey: "hooksBuild")
         return nil
@@ -3822,6 +3870,10 @@ enum Hooks {
         if codexPresent {
             let c = node("install-codex-hooks.mjs", ["--remove"])
             if c.status != 0 { problems.append(c.out) }
+        }
+        if antigravityPresent {
+            let a = node("install-antigravity-hooks.mjs", ["--remove"])
+            if a.status != 0 { problems.append(a.out) }
         }
         // ONLY when the hooks are actually out of settings.json. If --remove failed (a
         // settings.json that is not valid JSON, say), the entries still name these
@@ -3932,6 +3984,19 @@ extension AppDelegate {
                 if let err = err { self?.alert("Couldn't install the hooks", err) }
                 self?.settingsWindow?.model.pullServices()
                 self?.refresh()
+            }
+        }
+    }
+
+    func setAntigravityHooks(_ on: Bool) {
+        settingsWindow?.model.busy = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            let err = Hooks.setAntigravity(on)
+            ServiceState.shared.refreshNow()
+            DispatchQueue.main.async { [weak self] in
+                self?.settingsWindow?.model.busy = false
+                if let err = err { self?.alert(on ? "Couldn't add the Antigravity hook" : "Couldn't remove the Antigravity hook", err) }
+                self?.settingsWindow?.model.pullServices()
             }
         }
     }
@@ -4534,6 +4599,7 @@ final class SettingsModel: ObservableObject {
     @Published var login = false
     @Published var hooks = Hooks.State.notInstalled
     @Published var codexHooks = false
+    @Published var agHooks = false
     @Published var busy = false
     @Published var nameDraft = ""
     /// True while the name field has focus, so the 3s refresh does not overwrite
@@ -4570,6 +4636,7 @@ final class SettingsModel: ObservableObject {
         login = st.login == .enabled
         hooks = st.hooks
         codexHooks = st.codexHooks
+        agHooks = st.agHooks
     }
 
     /// The transports one device is on right now, in words.
@@ -4743,7 +4810,7 @@ struct MenuBarPane: View {
             Section("Beside the icon") {
                 DescribedToggle(title: "Claude usage", detail: "5-hour figure on top, 7-day below. \u{25B2} means you are using it faster than the clock.", isOn: toggle(.usage))
                 DescribedToggle(title: "Codex usage", detail: "Only on a Mac where Codex reports a quota.", isOn: toggle(.codex))
-                DescribedToggle(title: "Gemini usage", detail: "GM: the Gemini app's 5-hour and weekly limits, read from the app while it is running.", isOn: toggle(.gemini))
+                DescribedToggle(title: "Antigravity usage", detail: "AG: Antigravity's most-used Gemini limit, from the Antigravity app while it runs, otherwise from the agy CLI.", isOn: toggle(.gemini))
                 DescribedToggle(title: "Session counts", detail: "\u{25CB} waiting on you, \u{25CF} working.", isOn: toggle(.sessions))
                 DescribedToggle(title: "Needs-input count", detail: "\u{25A0} and how many sessions are waiting for your answer.", isOn: toggle(.asking))
             }
@@ -4923,6 +4990,15 @@ struct ClaudePane: View {
                         .disabled(m.busy)
                 } else {
                     LabeledContent("Codex", value: m.codexHooks ? "Hooks installed" : (Hooks.codexPresent ? "No hooks" : "Not on this Mac"))
+                }
+                if isBundled && Hooks.antigravityPresent && m.hooks != .notInstalled {
+                    DescribedToggle(
+                        title: "Antigravity hook",
+                        detail: "Adds the model and the latest prompt to Antigravity sessions. It never answers or holds up a tool call: Antigravity has no hook while its approval prompt is up, so those prompts are answered in Antigravity. Without it, sessions still appear, as working or waiting.",
+                        isOn: Binding(get: { m.agHooks }, set: { m.app?.setAntigravityHooks($0) }))
+                        .disabled(m.busy)
+                } else {
+                    LabeledContent("Antigravity", value: m.agHooks ? "Hook installed" : (Hooks.antigravityPresent ? "No hook" : "Not on this Mac"))
                 }
             } header: {
                 Text("Hooks")
@@ -5976,31 +6052,35 @@ if CommandLine.arguments.contains("--pace-check") {
     eq(gq[0].buckets.map(\.window), ["5h", "weekly"], "with its windows")
     eq(gq[2].buckets.map(\.pct), [3], "Argon has its weekly one only")
     eq(parseGeminiQuota("Bad|5h:x:1;Ok|5h:3:4").map(\.name), ["Ok"], "a malformed bucket is skipped (and its empty group), never read as 0%")
-    eq(GeminiGroup.primary(gq)?.name, "Gemini Models", "the bar's group is the general Gemini allowance")
-    eq(GeminiGroup.primary(parseGeminiQuota("Claude_and_GPT_models|5h:9:1;Gemini_Renamed|5h:1:1"))?.name, "Gemini Renamed",
-       "a renamed group still finds Gemini's own, never the Claude/GPT one first in the list")
+    eq(GeminiGroup.primary(gq)?.name, "Gemini Models", "the bar's group is the most-used Antigravity group (85% here)")
+    eq(GeminiGroup.primary(parseGeminiQuota("Gemini_Models|5h:0:300|weekly:0:5287;Claude_and_GPT_models|5h:0:300|weekly:0:10080;Gemini_4_Argon|weekly:35:4381"))?.name,
+       "Gemini 4 Argon", "MEASURED 2026-11-11: Gemini Models at 0%, Argon 35% through its week - the bar shows Argon")
+    eq(GeminiGroup.primary(parseGeminiQuota("Gemini_Models|5h:0:1;Gemini_4_Argon|weekly:0:1"))?.name, "Gemini Models",
+       "a tie keeps the app's own order, general group first")
+    eq(GeminiGroup.primary(parseGeminiQuota("Claude_and_GPT_models|5h:99:1;Gemini_Renamed|5h:1:1"))?.name, "Gemini Renamed",
+       "never the Claude/GPT group, however used it is")
     eq(GeminiGroup.primary(parseGeminiQuota("Claude_and_GPT_models|5h:9:1")) == nil, true, "and with no Gemini group, nothing")
     eq(geminiWindowMinutes("3d"), 4320, "an unforeseen 3d window reads the way the host reads it")
     if BarPref.gemini.on {
         var g = HostStatus()
         g.running = true; g.gemini = gq; g.gmAgeSec = 20
         let txt = barText(barModel(g, tier: .full))
-        eq(txt.contains("[GM 5h 85%"), true, "GM is 5h over weekly, labelled when no Claude column is beside it (\(txt))")
+        eq(txt.contains("[AG 5h 85%"), true, "AG is 5h over weekly, labelled when no Claude column is beside it (\(txt))")
         eq(txt.contains("/ 7d 9%"), true, "with the weekly figure below")
         g.pct5h = 10; g.pct7d = 20; g.quotaAgeSec = 1
-        eq(barText(barModel(g, tier: .full)).contains("[GM 85%"), true, "and borrows Claude's 5h/7d labels when it is there")
-        eq(barText(barModel(g, tier: .full)).contains("[GM 85%\u{25B2}"), true, "85% with 60% of 5h gone is ahead of the clock: a real pace")
-        eq(barText(barModel(g, tier: .minimal)).contains("[GM 5h 85%"), true, "85% needs attention, so Minimal keeps it - with its own labels")
+        eq(barText(barModel(g, tier: .full)).contains("[AG 85%"), true, "and borrows Claude's 5h/7d labels when it is there")
+        eq(barText(barModel(g, tier: .full)).contains("[AG 85%\u{25B2}"), true, "85% with 60% of 5h gone is ahead of the clock: a real pace")
+        eq(barText(barModel(g, tier: .minimal)).contains("[AG 5h 85%"), true, "85% needs attention, so Minimal keeps it - with its own labels")
         g.gemini = parseGeminiQuota("Gemini_Models|5h:2:120|weekly:9:9000")
-        eq(barText(barModel(g, tier: .minimal)).contains("GM"), false, "2% does not, so Minimal drops it")
-        eq(barTooltip(g).contains("GM (Gemini) 5h:"), true, "the tooltip names the window")
+        eq(barText(barModel(g, tier: .minimal)).contains("AG"), false, "2% does not, so Minimal drops it")
+        eq(barTooltip(g).contains("AG (Antigravity) 5h:"), true, "the tooltip names the window")
         g.gemini = parseGeminiQuota("Gemini_Models|weekly:7:9000")
-        eq(barModel(g, tier: .full).quotas.first { $0.tag == "GM" }?.bottom == nil, true,
+        eq(barModel(g, tier: .full).quotas.first { $0.tag == "AG" }?.bottom == nil, true,
            "a group with only a weekly window is ONE row, not a dash in a 5h row it does not have")
         g.gemini = []
-        eq(barText(barModel(g, tier: .full)).contains("GM"), false, "no reading (the app is closed), no GM column")
+        eq(barText(barModel(g, tier: .full)).contains("AG"), false, "no reading (the app is closed), no AG column")
     } else {
-        print("note: Gemini bar checks skipped - Gemini usage is switched off")
+        print("note: Antigravity bar checks skipped - Antigravity usage is switched off")
     }
 
     print(failed == 0 ? "pace: all \(ran) checks passed" : "pace: \(failed) of \(ran) FAILED")

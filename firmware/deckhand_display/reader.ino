@@ -268,7 +268,22 @@ void requestHistory(int idx, const char* want) {
   // session and would have nothing useful to reply with anyway.
   sendLineToHost(line, sessions[idx].hostSlot);
 }
+// WHETHER A SESSION HAS A HISTORY THE DEVICE CAN SHOW. Not an Antigravity one: its
+// transcript is not in Claude Code's format, so the host never registers it for the
+// reader (index.mjs, transcriptById) and stays SILENT when asked - the request is a
+// broadcast that only the Mac holding the transcript answers. Measured 2026-11-11: the
+// reader sat on "fetching 0/1" until its timeout, which then reads as "could not reach
+// the Mac" - false. So the card does not offer it, and every opener refuses by name.
+bool historyOffered(int idx) {
+  return idx >= 0 && idx < sessionCount && agentKind(sessions[idx].agent) != AGENT_AG;
+}
+
 void openHistory(int idx) {
+  if (!historyOffered(idx)) {
+    Serial.printf("HISTORY: not offered for session %d - an Antigravity session has no "
+                  "transcript this reader can show\n", idx);
+    return;
+  }
 #if BOARD_HISTORY_SCROLL
   histActive = true;                       // handleTouch dispatches on this
   strncpy(histId, sessions[idx].id, sizeof(histId) - 1);

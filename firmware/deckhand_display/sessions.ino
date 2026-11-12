@@ -463,7 +463,8 @@ void buildSessionSubline(int i, char* out, size_t n) {
   // and 3 characters of model text is a fair price for never having to guess. It is
   // deliberately TEXT and not a colour or an icon: it has to survive a model rename
   // and stay readable for a colourblind user, same rule as the status shapes.
-  const char* tag = strcmp(s.agent, "cx") == 0 ? "CX" : "CC";
+  const uint8_t ak = agentKind(s.agent);
+  const char* tag = ak == AGENT_CX ? "CX" : ak == AGENT_AG ? "AG" : "CC";
   // Which MAC, on the same principle as which AGENT: text, never a colour or
   // an icon - it has to survive a rename and stay readable for a colourblind
   // user. "/" and not a middle dot - Cozette is ASCII 0x20-0x7E only, and
@@ -751,7 +752,7 @@ void drawSessionBand(int x, int y, int w, int i, uint16_t col) {
   tft.fillRect(x, y + r, w, h - r, fill);
 
   drawAgentMark(bandMarkX(x), bandMarkY(y),
-                strcmp(s.agent, "cx") == 0, COLOR_CARD, fill, /*animate=*/working);
+                agentKind(s.agent), COLOR_CARD, fill, /*animate=*/working);
 
   // THE DURATION'S LANE IS A CONSTANT, NOT A MEASUREMENT, and that is the whole
   // reason it can be a change-only field: bandDurLeft() is the same number whatever
@@ -829,7 +830,7 @@ void drawSessionBand(int x, int y, int w, int i, uint16_t col) {
 // 32x32 patch of flat status colour punched into a breathing band.
 void drawBandMarkAt(int x, int y, int i) {
   drawAgentMark(bandMarkX(x), bandMarkY(y),
-                strcmp(sessions[i].agent, "cx") == 0,
+                agentKind(sessions[i].agent),
                 COLOR_CARD, bandFillShown, /*animate=*/true);
 }
 void drawBandMark(int pos) {
@@ -1411,7 +1412,7 @@ void drawSessionRow(int pos) {
   int dotCy = large ? y + SESSION_DOT_DY : y + rowH / 2;
   if (!expanded)   // the band carries this card's mark; see the band note above
   drawStatusDot(SESSION_DOT_CX, dotCy, large ? 9 : 7, s.status, COLOR_CARD,
-                strcmp(s.agent, "cx") == 0);
+                agentKind(s.agent));
 
   // ---- Name: MEASURE the lane, then shrink one step rather than truncate ----
   // The lane's right bound is whatever else sits at the top of the row: the
@@ -1444,7 +1445,10 @@ void drawSessionRow(int pos) {
   char agentTag[24];
   int rowEmoji = emojiIdForLink(s.hostSlot);
   {
-    const char* base = strcmp(s.agent, "cx") == 0 ? "CODEX" : "CLAUDE";
+    // "AGY", the CLI's own command name: 3 characters, so an Antigravity row's name
+    // lane is WIDER than a Claude row's, never narrower (chosen 2026-11-11).
+    const uint8_t ak = agentKind(s.agent);
+    const char* base = ak == AGENT_CX ? "CODEX" : ak == AGENT_AG ? "AGY" : "CLAUDE";
     const char* mac = dispMacTag(s.hostSlot);
     // With an icon, the agent word stays TEXT (that rule is explicit: which agent must
     // survive a model rename and be readable to a colourblind user) and the icon
@@ -3478,8 +3482,10 @@ void drawSessionDetail(int idx) {
   // Says what the screen actually does. It read "tap anywhere to go back", which stopped
   // being true when back moved to the header row only, and is doubly wrong now the body
   // opens the history reader.
-  tft.drawString("< Back up top  -  tap here for history", tft.width() / 2,
-                 contentBottom() - 10);
+  // Only what the screen does: an Antigravity card has no history to open
+  // (historyOffered(), reader.ino), so it does not promise one.
+  tft.drawString(historyOffered(idx) ? "< Back up top  -  tap here for history" : "< Back up top",
+                 tft.width() / 2, contentBottom() - 10);
   tft.setTextDatum(TL_DATUM);
 }
 // The duration ticks on its own cache so it can update every second without
