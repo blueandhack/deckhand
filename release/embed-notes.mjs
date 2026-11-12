@@ -21,7 +21,11 @@ export function embedNotes(xml, version, md) {
   const it = items.find((m) => m[0].includes(`<sparkle:shortVersionString>${version}</sparkle:shortVersionString>`));
   if (!it) return null;
   let item = it[0].replace(/\s*<description>[\s\S]*?<\/description>/, "");
-  item = item.replace(/(<title>[^<]*<\/title>)/, `$1\n            ${desc}`);
+  const TITLE = /<title>[^<]*<\/title>/;
+  if (!TITLE.test(item)) return null;    // nowhere to anchor the notes: refuse, never drop them
+  // A FUNCTION replacer: a string one would read `$1`, `$&`, `$$` in the NOTES as patterns
+  // ("costs $1" became the item's <title>). notes-check.mjs asserts the round trip.
+  item = item.replace(TITLE, (t) => `${t}\n            ${desc}`);
   return xml.slice(0, it.index) + item + xml.slice(it.index + it[0].length);
 }
 
@@ -29,7 +33,7 @@ if (process.argv[1] && fs.realpathSync(process.argv[1]) === fs.realpathSync(file
   const [file, version, notes] = process.argv.slice(2);
   if (!file || !version || !notes) { console.error("usage: embed-notes.mjs <appcast.xml> <x.y.z> <notes.md>"); process.exit(2); }
   const out = embedNotes(fs.readFileSync(file, "utf8"), version, fs.readFileSync(notes, "utf8"));
-  if (out === null) { console.error(`embed-notes: no item for ${version} in ${file}`); process.exit(1); }
+  if (out === null) { console.error(`embed-notes: no item with a <title> for ${version} in ${file}`); process.exit(1); }
   fs.writeFileSync(file, out);
   console.log(`embedded ${notes} into ${file} (${version})`);
 }
