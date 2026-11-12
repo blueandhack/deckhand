@@ -3093,7 +3093,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             alert("Couldn't change the login item",
                   "\(error.localizedDescription)\n\nMoving Deckhand to the Applications folder usually fixes it.")
         }
-        ServiceState.shared.refresh { [weak self] in self?.refresh() }
+        // pullServices() too, like every other setter here: without it the switch
+        // read the stale `login` until the 15s timer, so it snapped back after a
+        // click and looked like it had not taken (measured 2026-11-11: four
+        // register() calls in one second from one person turning it on).
+        ServiceState.shared.refresh { [weak self] in
+            self?.settingsWindow?.model.pullServices()
+            self?.refresh()
+        }
     }
 
     // On (the default) the device can answer prompts as well as show them, and
@@ -4347,6 +4354,15 @@ final class SetupFlow: NSObject {
         case .start:
             if phase == .bleRefused { handOver() } else { beginStart() }
         case .done:
+            // handOver() is the only other place the menu becomes a login item, and
+            // step() skips it when the host agent is ALREADY enabled (a reinstall
+            // that kept the agent, or `Deckhand --host start` from flash.sh). The
+            // host then started at login and the menu did not. First run only:
+            // SetupFlow.done keeps this from overriding a later "off".
+            if isBundled, ServiceState.shared.login == .notRegistered {
+                try? SMAppService.mainApp.register()
+                ServiceState.shared.refresh()
+            }
             SetupFlow.done = true
             win.window.close()
         }
