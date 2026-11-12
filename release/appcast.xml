@@ -4,6 +4,17 @@
         <title>Deckhand</title>
         <item>
             <title>0.1.3</title>
+            <description><![CDATA[
+<p><strong>Fourth alpha of Deckhand.app.</strong> Installed 0.1.x copies update to this automatically (Sparkle); new installs download the DMG below.</p>
+<p><strong>Requires:</strong> Apple Silicon, macOS 14 or later, and a Deckhand display (firmware is flashed from the repo with <code>./flash.sh</code>). <strong>The display needs new firmware</strong> to show Antigravity sessions and usage; an older display keeps working and simply does not show them.</p>
+<h4>What's new</h4>
+<ul><li><strong>Antigravity, everywhere.</strong> Google has retired Gemini CLI in favour of Antigravity CLI (<code>agy</code>), and Deckhand now calls it Antigravity throughout: the menu bar's <strong>AG</strong> column (it was GM) and its Antigravity section.</li><li><strong>Antigravity sessions on the display.</strong> They appear beside Claude Code and Codex, tagged <strong>AGY</strong> with their own animated mark, showing working or ready, the model and your latest prompt.</li><li><strong>An Antigravity hook.</strong> Settings › Hooks › <em>Antigravity hook</em> (on by default when Antigravity is installed). It adds the model and the latest prompt to Antigravity sessions. It never answers or holds up a tool call: Antigravity has no hook that runs while its approval prompt is on screen, so those prompts are still answered in Antigravity.</li><li><strong>Antigravity usage without the app.</strong> With only <code>agy</code> in a terminal, Deckhand now reads usage from the CLI itself (no model turn, so it costs no quota). The figure shown is your most-used Gemini limit, so if you mostly use Argon, you see Argon's.</li><li><strong>Antigravity usage on the display.</strong> A new <strong>AGY</strong> strip on the USAGE tab. When Codex is reporting too, the tab makes room for both strips.</li><li><strong>A smaller download.</strong> About 35 MB instead of 52 MB, and about 119 MB installed instead of 155 MB.</li></ul>
+<h4>Install (new users)</h4>
+<ol><li>Download <code>Deckhand-0.1.3.dmg</code>, open it, and drag <strong>Deckhand</strong> onto <strong>Applications</strong>.</li><li>Open it from Applications and follow the setup window (it asks before touching Claude Code's settings and backs up first).</li><li>Restart Claude Code so it picks up the hooks.</li></ol>
+<h4>Still not verified</h4>
+<p>The USAGE tab with Codex <strong>and</strong> Antigravity both reporting, on the display itself (it is checked offline only); anything new on the smaller (2.8") display; a Mac with no Node or Homebrew installed; a notched MacBook screen's menu bar; a first-time Bluetooth prompt from a fresh permission state; and <strong>Uninstall</strong>. Antigravity's usage and session data come from interfaces Google does not document and can change in an update.</p>
+<p>Feedback and bug reports: <a href="https://github.com/blueandhack/deckhand/issues">Issues</a>.</p>
+]]></description>
             <pubDate>Wed, 11 Nov 2026 21:26:04 -0800</pubDate>
             <link>https://github.com/blueandhack/deckhand</link>
             <sparkle:version>736</sparkle:version>
