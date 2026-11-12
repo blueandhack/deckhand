@@ -209,10 +209,14 @@ find "$STAGE/node_modules" -type d \( -name obj.target -o -name .deps \) -prune 
 say "Compiling"
 BIN="$BUILD/app/bin"
 mkdir -p "$BIN"
-swiftc -O -target arm64-apple-macos14.0 -D SPARKLE \
+# Every file under mac-app/Sources, as one module (-wmo) - see mac-app/build.sh.
+SWIFT_SOURCES=()
+while IFS= read -r f; do SWIFT_SOURCES+=("$f"); done < <(find "$SRC/mac-app/Sources" -name '*.swift' | sort)
+[ ${#SWIFT_SOURCES[@]} -gt 0 ] || die "no Swift sources under $SRC/mac-app/Sources"
+swiftc -O -wmo -target arm64-apple-macos14.0 -D SPARKLE \
   -F "$SPARKLE_DIR" -framework Sparkle \
   -Xlinker -rpath -Xlinker @executable_path/../Frameworks \
-  "$SRC/mac-app/DeckhandMenuBar.swift" -o "$BIN/Deckhand" \
+  "${SWIFT_SOURCES[@]}" -o "$BIN/Deckhand" \
   -framework Cocoa -framework ServiceManagement 2>&1 | grep -E "error|warning: unre" || true
 [ -x "$BIN/Deckhand" ] || die "swiftc failed"
 clang -O2 -Wall -Werror -mmacosx-version-min=14.0 -arch arm64 -o "$BIN/deckhand-host-launch" "$R/host-launch.c"

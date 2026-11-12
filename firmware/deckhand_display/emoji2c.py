@@ -62,7 +62,7 @@ oversight to work around: exactly one size is correct for a given panel.
 THE SIXTEEN NAMES ARE THE WIRE FORMAT AND MUST NOT CHANGE. The payload carries a
 name, never an index, and host/mac-emoji-check.mjs compares three hand-maintained
 copies of the list (the generated header, host/mac-emoji.mjs, and MAC_ICON_NAMES in
-mac-app/DeckhandMenuBar.swift). A renamed icon breaks an already-configured Mac
+mac-app/Sources/Menu/AskSound.swift). A renamed icon breaks an already-configured Mac
 silently on both sides - so a broken icon is fixed by choosing a different
 CHARACTER for the same name, which is what SIZE_OVERRIDES below does.
 

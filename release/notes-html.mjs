@@ -18,12 +18,17 @@ const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, 
 
 export function inline(s) {
   // Escape first, then add only the markup we generate, so no input can inject HTML.
-  let t = esc(s);
-  t = t.replace(/`([^`]+)`/g, "<code>$1</code>");
-  t = t.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-  t = t.replace(/(^|[^*])\*([^*\s][^*]*)\*/g, "$1<em>$2</em>");
-  t = t.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2">$1</a>');
-  return t;
+  // Code spans are cut out BEFORE the other rules run (the odd parts of the split), so
+  // `a*b*c` stays literal instead of italicising its middle. A link URL may not contain
+  // `"`: esc() leaves quotes alone (text needs them, e.g. 2.8"), and one inside href=""
+  // would close the attribute and open another - notes-check.mjs asserts both.
+  return esc(s).split(/(`[^`]+`)/).map((part, i) => i % 2
+    ? `<code>${part.slice(1, -1)}</code>`
+    : part
+        .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+        .replace(/(^|[^*])\*([^*\s][^*]*)\*/g, "$1<em>$2</em>")
+        .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s"]+)\)/g, '<a href="$2">$1</a>')
+  ).join("");
 }
 
 export function notesHtml(md) {

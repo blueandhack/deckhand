@@ -18,7 +18,12 @@ echo "Building $APP (host dir: $HOSTDIR)"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
-swiftc -O DeckhandMenuBar.swift -o "$APP/Contents/MacOS/DeckhandMenuBar" \
+# Every file under Sources/ (main.swift holds the only top-level code). -wmo compiles
+# them as ONE module, which is how the single DeckhandMenuBar.swift they were split
+# from was optimised; without it each file is optimised alone.
+SOURCES=()
+while IFS= read -r f; do SOURCES+=("$f"); done < <(find Sources -name '*.swift' | sort)
+swiftc -O -wmo "${SOURCES[@]}" -o "$APP/Contents/MacOS/DeckhandMenuBar" \
   -framework Cocoa -framework ServiceManagement
 
 [ -f "$HOSTDIR/Deckhand.icns" ] && cp "$HOSTDIR/Deckhand.icns" "$APP/Contents/Resources/Deckhand.icns"

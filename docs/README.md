@@ -50,7 +50,7 @@ CLAUDE.md this replaced, so the measurements and the reasoning are intact.
 | [hooks-and-answering.md](reference/hooks-and-answering.md) | the hook scripts, the `ask` object, which event blocks |
 | [codex-and-history.md](reference/codex-and-history.md) | Codex push and pull, the paged history reader |
 | [host-runtime.md](reference/host-runtime.md) | `host/index.mjs`: the watchdog, OAuth refresh, log rotation |
-| [menu-bar.md](reference/menu-bar.md) | `DeckhandMenuBar.swift` and its own checkers |
+| [menu-bar.md](reference/menu-bar.md) | `mac-app/Sources/` and its own checkers |
 | [ui-details.md](reference/ui-details.md) | the type scale, generated art, themes, the waiting screen |
 | [board-1-known-state.md](reference/board-1-known-state.md) | board-1 defects, unverified claims, open items |
 
