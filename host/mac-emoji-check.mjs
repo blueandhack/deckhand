@@ -69,7 +69,7 @@ function namesFrom(rel, marker, open, close) {
 const tables = [
   namesFrom("firmware/deckhand_display/MacEmoji.h", "MAC_EMOJI_NAMES[MAC_EMOJI_COUNT]", "{", "}"),
   namesFrom("host/mac-emoji.mjs", "export const MAC_EMOJI_NAMES", "[", "]"),
-  namesFrom("mac-app/DeckhandMenuBar.swift", "let MAC_ICON_NAMES", "[", "]"),
+  namesFrom("mac-app/Sources/Menu/AskSound.swift", "let MAC_ICON_NAMES", "[", "]"),
 ];
 const canonical = tables[0];
 
@@ -118,7 +118,7 @@ if (!canonical.err) {
 // ---------------------------------------------------------------------------
 // The menu bar's PICKER GLYPHS, against the generator that rendered the art.
 //
-// mac-app/DeckhandMenuBar.swift's MAC_ICON_GLYPHS exists so the picker can show
+// mac-app/Sources/Menu/AskSound.swift's MAC_ICON_GLYPHS exists so the picker can show
 // the picture next to the name, and it is display-only - the wire carries the
 // name, so a wrong character here cannot break an icon on the device. What it
 // CAN do is offer a picture the device does not draw, silently, forever: the
@@ -163,7 +163,7 @@ function pairsFrom(rel, marker, open, close, sep) {
 }
 
 const gen = pairsFrom("firmware/deckhand_display/emoji2c.py", "\nICONS =", "[", "]", ",");
-const swift = pairsFrom("mac-app/DeckhandMenuBar.swift", "let MAC_ICON_GLYPHS: [String: String] =", "[", "]", ":");
+const swift = pairsFrom("mac-app/Sources/Menu/AskSound.swift", "let MAC_ICON_GLYPHS: [String: String] =", "[", "]", ":");
 for (const t of [gen, swift]) {
   if (!t.err) continue;
   console.error(`FAIL ${t.rel}: ${t.err} - the parser, not the table, may be what broke`);
@@ -181,7 +181,7 @@ if (!gen.err && !swift.err) {
   for (const [name, ch] of swift.pairs) {
     const want = byName.get(name);
     if (want === undefined || want === ch) continue;
-    console.error(`FAIL mac-app/DeckhandMenuBar.swift MAC_ICON_GLYPHS["${name}"] is ${cps(ch)}, but emoji2c.py rendered the art from ${cps(want)} - the picker would offer a picture the device does not draw`);
+    console.error(`FAIL mac-app/Sources/Menu/AskSound.swift MAC_ICON_GLYPHS["${name}"] is ${cps(ch)}, but emoji2c.py rendered the art from ${cps(want)} - the picker would offer a picture the device does not draw`);
     failed++;
   }
 }

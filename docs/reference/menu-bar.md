@@ -9,8 +9,40 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
 
 ---
 
+## Where the code is
+
+`mac-app/Sources/`, compiled as ONE module (`swiftc -O -wmo`) by both `mac-app/build.sh`
+and `release/build-release.sh`, which pick up every `*.swift` under it - a new file needs
+no build edit. Until 2026-11-11 this was one 6,598-line `DeckhandMenuBar.swift`; the split
+moved lines and changed no behaviour, and that was measured rather than assumed:
+`--pace-check`, `--pair-check`, `--legibility-check` and `--sound-check` printed
+byte-identical output before and after, `--menu-dump` against the live host matched line
+for line, and `--bar-preview` / `--icon-preview` wrote byte-identical PNGs. The Sparkle
+(`-D SPARKLE`) build compiled from the new layout too.
+
+| folder | what |
+|---|---|
+| `main.swift` | the ONLY top-level code: the app and its delegate, each `--mode` in the original order, then `app.run()` |
+| `App/` | paths and bundle detection, the cached SMAppService state, `AppDelegate` (the menu itself, the watchdog, start/stop) |
+| `Status/` | reading the host: heartbeat, tick-line parsing, `HostStatus`, pace arithmetic |
+| `Menu/` | the menu-bar item and its quota bar, the dropdown's rows, the ask sound and Mac icons, session targets, the paper boat, `--menu-preview`'s renderer |
+| `Pairing/` | wireless pairing: the pure state machine and `PairWindow` |
+| `Release/` | the released app only: bundled host, `Hooks` (Claude Code + Antigravity), uninstall |
+| `Setup/` | first-run setup: `SetupWindow` renders, `SetupFlow` decides |
+| `Settings/` | the Settings window: model, panes, window controller |
+| `Modes/` | every command-line mode, one function each (`modePaceCheck()` is `--pace-check`): `CommandModes` (`--host`, `--setup-do`, `--open-session`), `Checks`, `PairCheck`, `Previews` |
+
+**A new `--mode` is a function in `Modes/` AND a call in `main.swift`.** Swift allows
+executable top-level statements only in `main.swift`, and the modes run in call order -
+the first one whose flag matches either exits or runs the app itself.
+
+**Globals outside `main.swift` initialise lazily** (on first use), where the single file
+initialised them in source order. Nothing here depended on the order - every global is a
+constant, a path or a font - but a global with a SIDE EFFECT in its initialiser would now
+run when first touched, not at launch.
+
 **The menu-bar app must drive launchd, not go around it, and going around it fails
-quietly.** `mac-app/DeckhandMenuBar.swift` used to start/stop with `pkill` + `open` and
+quietly.** `mac-app/DeckhandMenuBar.swift` (since 2026-11-11 split into `mac-app/Sources/`) used to start/stop with `pkill` + `open` and
 carried its own watchdog. Once the `KeepAlive` LaunchAgent exists that is actively
 wrong: a `pkill` stop is undone within ~1s (measured - pid 48211 came back as 48230),
 so **Stop looks broken**; an `open` start launches a host OUTSIDE launchd while launchd
