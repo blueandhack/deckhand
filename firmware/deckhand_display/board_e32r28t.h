@@ -328,6 +328,21 @@ const int CODEX_Y = 254, CODEX_H = 44;
 // other constant this predicate touches is, and a header is where a future board
 // with a different plan would change it.
 const int CODEX_HIDE_FALLBACK_MIN = 10080;   // 7 days, the observed Codex window
+// Antigravity's fallback on the same pattern - see usageAgShown() (usage.ino).
+const int AG_HIDE_FALLBACK_MIN = 10080;
+// TWO STRIPS SHARE THE ONE ROW on this board (2026-11-11): with Codex AND Antigravity
+// both reporting, each takes half of CODEX_Y's row, 4px apart, rather than a second
+// row - there are no rows to give one. The cards end +102 inside CARD_H 104 (the reset
+// line sits on the border's ceiling) and the 39px hero is the figure the 122->104 pass
+// protected, so 48 rows could only have come from dropping a line from both cards.
+//   STRIP_HALF_W = (CARD_W - 4) / 2 = 106: Codex at 12..117, Antigravity at 122..227.
+// The half lanes, on renderStrip()'s own rule: the right field is the percentage only
+// ("100%", 4 chars = 24px) right-aligned at x + w - PAD = x + 92, so it spans
+// x + 68..x + 92 and clears from x + 67; the label starts at x + PAD = x + 14, so
+// (67 - 14) / 6 = 8.83 -> 8 characters, for "CX 7d"/"AG 5h" (5) and "CX 30d" (6).
+const int STRIP_HALF_W           = (CARD_W - 4) / 2;
+const int STRIP_HALF_LANE_CHARS  = 8;
+const int STRIP_HALF_RIGHT_CHARS = 4;
 // RADIUS is defined FROM R_MD rather than repeated, so the two cannot drift -
 // drawCardBorder() strokes with RADIUS over a fill uiCard() drew with R_MD, and
 // a mismatch fringes every card corner. Same value as before on this board.

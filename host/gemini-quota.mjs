@@ -20,6 +20,7 @@
 // refused call, a changed shape - all return null, and the menu simply shows no Gemini
 // usage. The call is read-only and goes to 127.0.0.1 only, with the CSRF token the app
 // wrote for local clients in the user's own home directory. Nothing is sent elsewhere.
+import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -39,19 +40,28 @@ export function windowMinutes(w) {
 /// The summary -> [{ name, buckets: [{ window, used, resetMin }] }], groups in the
 /// app's own order, each group's buckets 5h first. A bucket without a number is
 /// skipped - an absent number is not 0%.
+///
+/// TWO SPELLINGS of the same breakdown are read: the local server's camelCase
+/// (`displayName`, `remainingFraction`, `resetTime`, under `response`) and the CLI's
+/// snake_case (`name`, `remaining_fraction`, `reset_time`, under `command.data` in
+/// `agy -p /usage --output-format json` - measured 2026-11-11, agy 1.5.6). Same groups,
+/// same buckets, same windows; only the field names differ.
 export function summarizeQuota(body, nowMs) {
-  const groups = (body?.response ?? body)?.groups;
+  // The CLI's body ALSO has a `response` - the human table, as a STRING - so `response`
+  // is only the server's envelope when it is an object.
+  const env = body?.response && typeof body.response === "object" ? body.response : body?.command?.data ?? body;
+  const groups = env?.groups;
   if (!Array.isArray(groups)) return null;
   const out = [];
   for (const g of groups) {
-    const name = String(g?.displayName ?? "").trim();
+    const name = String(g?.displayName ?? g?.name ?? "").trim();
     if (!name || !Array.isArray(g.buckets)) continue;
     const buckets = [];
     for (const b of g.buckets) {
-      const rem = Number(b?.remainingFraction);
+      const rem = Number(b?.remainingFraction ?? b?.remaining_fraction);
       if (!Number.isFinite(rem)) continue;
       const used = Math.max(0, Math.min(100, Math.round((1 - rem) * 100)));
-      const resetMs = Date.parse(b.resetTime ?? "");
+      const resetMs = Date.parse(b.resetTime ?? b.reset_time ?? "");
       buckets.push({
         window: String(b.window ?? "?"),
         used,
@@ -131,4 +141,72 @@ export async function readGeminiQuota({ root = GEMINI_ROOT, nowMs = Date.now(), 
     } catch { /* refused, timed out, or not JSON: try the next hub */ }
   }
   return null;
+}
+
+// THE DEVICE'S ONE ANTIGRAVITY FIGURE, shaped like Codex's (cxPct/cxResetMin/cxWin/
+// cxAgeSec) so the firmware's strip renderer reads both the same way.
+//
+// WHICH window: the MOST-USED one among the Gemini groups, not a fixed group. Measured
+// 2026-11-11 on this Mac: "Gemini Models" read 0% on both windows while "Gemini 4 Argon"
+// read 35% of its week - and the sessions here run gemini-4-argon-medium. A fixed
+// "Gemini Models" figure would have shown 0% for a limit a third spent. The "Claude and
+// GPT models" group is left out: those are other vendors' models served through
+// Antigravity, and the device's CLAUDE cards already mean the person's own Claude
+// quota. A tie goes to the SHORTER window, the one that runs out first.
+export function antigravityDeviceUsage(groups, ageSec) {
+  let best = null;
+  for (const g of groups ?? []) {
+    if (/claude|gpt/i.test(g.name)) continue;
+    for (const b of g.buckets) {
+      const win = b.window === "5h" ? 300 : b.window === "weekly" ? 10080 : null;
+      if (!best || b.used > best.used || (b.used === best.used && (win ?? 1e9) < (best.win ?? 1e9))) {
+        best = { used: b.used, resetMin: b.resetMin, win };
+      }
+    }
+  }
+  if (!best) return {};
+  return { agPct: best.used, agResetMin: best.resetMin ?? null, agWin: best.win, agAgeSec: ageSec };
+}
+
+// ---- the CLI's own /usage, for when no app is running a hub ----
+//
+// `agy -p /usage --output-format json` prints the same breakdown with NO model turn:
+// measured 2026-11-11 on agy 1.5.6, `num_turns: 0`, every token count 0, ~3.6s wall and
+// ~0.3s of CPU, and no conversation left behind (the CLI's brain/ directory count was
+// unchanged). It authenticates as the CLI does - the person's own sign-in - so this
+// works with only a terminal agy and no Antigravity app. It is a process spawn rather
+// than a 35ms local call, so the host asks it far less often than it asks a hub.
+//
+// Where agy lives: the installer puts it in ~/.local/bin, which is not on launchd's
+// PATH, so the usual places are tried before PATH.
+export function agyCandidates(env = process.env, home = os.homedir()) {
+  const out = [path.join(home, ".local", "bin", "agy"), "/opt/homebrew/bin/agy", "/usr/local/bin/agy"];
+  for (const d of String(env.PATH ?? "").split(":")) if (d) out.push(path.join(d, "agy"));
+  return [...new Set(out)];
+}
+
+export async function findAgy(candidates = agyCandidates()) {
+  for (const c of candidates) {
+    try { await fs.access(c, fs.constants.X_OK); return c; } catch {}
+  }
+  return null;
+}
+
+/// Run `agy -p /usage` and summarise it. Resolves to the group list, or null - never
+/// throws. Run from the temp directory, so no workspace's own .agents/ config (its
+/// hooks, its MCP servers) is loaded for a command that needs none of it.
+export async function readGeminiQuotaFromCli({ agy, nowMs = Date.now(), timeoutMs = 30000 } = {}) {
+  const bin = agy ?? (await findAgy());
+  if (!bin) return null;
+  return new Promise((resolve) => {
+    execFile(bin, ["-p", "/usage", "--output-format", "json", "--print-timeout", "20s"],
+      { cwd: os.tmpdir(), timeout: timeoutMs, maxBuffer: 1 << 20, env: { ...process.env, NO_COLOR: "1" } },
+      (err, stdout) => {
+        if (err) return resolve(null);
+        try {
+          const body = JSON.parse(String(stdout).trim().split("\n").filter(Boolean).pop() ?? "");
+          resolve(body?.status === "SUCCESS" ? summarizeQuota(body, nowMs) : null);
+        } catch { resolve(null); }
+      });
+  });
 }

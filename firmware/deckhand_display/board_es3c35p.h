@@ -923,6 +923,51 @@ const int WEEK_META_Y_SOLO      = 93;
 const int WEEK_FABLE_Y_SOLO     = 119;
 const int WEEK_FABLE_BAR_Y_SOLO = 148;
 
+// ---- THE TRIO COLUMN: Codex AND Antigravity both reporting (2026-11-11) ----------
+// 8 + 144 + 8 + 132 + 8 + 48 + 8 + 48 + 10 = 414, the same content area again, with
+// 10 rows of air under the last strip rather than 8 (the two spare rows go there).
+// Picked by usageStripCount() == 2; usage.ino's usageCol() reads solo/duo/trio.
+//
+// NOW gives up its SPARKLINE band and nothing else: the 2.5h trend is the one thing on
+// it that is a picture rather than a figure, and the ring keeps sampling, so it is
+// whole again the moment the column goes back to duo. The bands close up on the
+// same rhythm as the duo card: bar clear ends +114, +4 rhythm, the meta clear starts
+// +119 (NOW_META_Y_TRIO 120, clear +119..+136), +5 trailing, border +142..+143.
+const int NOW_CARD_H_TRIO  = 144;
+const int NOW_SPARK_H_TRIO = 0;     // no sparkline band: renderNowCard() skips it
+const int NOW_META_Y_TRIO  = 120;
+//
+// WEEK keeps EVERY line and both bars and gives up gap instead: its height is
+// 126 + 6k for a uniform gap of k rows (duo is k = 3 -> 144, solo k = 8 -> 174 + 2),
+// and each offset moves by the same per-gap step the solo/duo pair already proves -
+// NUM 23+k, BURN NUM+4, BAR 52+2k, META 69+3k, FABLE 87+4k, FABLE_BAR 108+5k. k = 1.
+const int WEEK_CARD_H_TRIO      = 132;
+const int WEEK_NUM_Y_TRIO       = 24;
+const int WEEK_BURN_Y_TRIO      = 28;
+const int WEEK_BAR_Y_TRIO       = 54;
+const int WEEK_META_Y_TRIO      = 72;
+const int WEEK_FABLE_Y_TRIO     = 91;
+const int WEEK_FABLE_BAR_Y_TRIO = 113;
+//
+// THE STRIPS, 48 rows each instead of CODEX_H's 56, the same text line and pace bar:
+//   +0..+1 border, +5..+22 text clear (STRIP_TEXT_Y_TRIO 6, Spleen8x16 = 18-row clear),
+//   +24..+43 bar clear (STRIP_BAR_Y_TRIO 28, BAR_H 12: clear y-4..y+BAR_H+3),
+//   +46..+47 border - content ends +43, inside the CODEX_H - 3 ceiling's equivalent (+45).
+const int STRIP_H_TRIO      = 48;
+const int STRIP_TEXT_Y_TRIO = 6;
+const int STRIP_BAR_Y_TRIO  = 28;
+
+// How long an Antigravity reading stays on the glass with no window beside it: the
+// fallback usageAgShown() uses, on CODEX_HIDE_FALLBACK_MIN's pattern (the real bound is
+// the reading's own window, and the host drops a reading at 6 hours regardless).
+const int AG_HIDE_FALLBACK_MIN = 10080;
+
+// The HALF-ROW lanes are board 1's (two strips sharing its one row); this board
+// STACKS its strips and never passes half = true. They are declared here only because
+// the shared renderer names them - the same values as board 1's, deliberately unused.
+const int STRIP_HALF_LANE_CHARS  = 8;
+const int STRIP_HALF_RIGHT_CHARS = 4;
+
 // ---------- USAGE tab: inside a Claude card ----------
 // CHECK CLEAR BOXES, NOT GLYPHS. drawIfChanged() clears
 // fillRect(fx-1, fy-1, tw+2, th+2) before drawing, and drawPaceBar() clears

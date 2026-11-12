@@ -1,17 +1,72 @@
-# Gemini (Antigravity): sessions and usage
+# Antigravity: sessions, hooks and usage
 
 Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay in
 [`CLAUDE.md`](../../CLAUDE.md).
 
 ---
 
-"Gemini" on this Mac is Google's **Antigravity** stack: the Gemini desktop app
-(`/Applications/Gemini.app`), the Antigravity app and IDE, and the `agy` CLI - not the
-older Gemini CLI, and nothing here reads `~/.gemini/tmp`. Gemini has **no hook**, so both
-halves are PULL, and both are **MENU-BAR ONLY**: the firmware draws every agent that is not
-`cx` as CLAUDE (`sessions.ino`), so a Gemini row or figure on the wire would be mislabelled
-on the glass. Both read interfaces Google does not document; every failure degrades to "no
-reading" and never to a wrong one.
+This is Google's **Antigravity** stack: the Gemini desktop app (`/Applications/Gemini.app`),
+the Antigravity app and IDE, and the `agy` CLI. Google retired Gemini CLI on 2026-06-18 in
+favour of Antigravity CLI (developers.googleblog.com, "transitioning Gemini CLI to Antigravity
+CLI"); nothing here ever read Gemini CLI (`~/.gemini/tmp`), so there was nothing to remove.
+Everything user-facing says **Antigravity** since 2026-11-11 (menu `AG` column, `AGY` on the
+device); the files keep their `gemini-*` names.
+
+**Corrected 2026-11-11, kept for the record:** this page used to say Antigravity had "no hook"
+and that both halves were "MENU-BAR ONLY" because the firmware drew every non-`cx` agent as
+CLAUDE. Both stopped being true that day: Antigravity CLI has hooks (below), and the firmware
+knows a third agent, `ag` (`agentKind()`, `AGY`, `AgyMark.h`), so Antigravity sessions and
+usage now reach the device. Every read still degrades to "no reading", never a wrong one.
+
+## Hooks (`claude-hooks/deckhand-antigravity-hook.mjs`)
+
+Registered by `install-antigravity-hooks.mjs` under ONE key, `deckhand`, in
+`~/.gemini/config/hooks.json` - Antigravity's hooks file maps a hook NAME to its events
+(https://antigravity.google/docs/hooks/), so nobody else's entries are read or rewritten. The
+released app installs it with the Claude Code hooks (Settings > Hooks > **Antigravity hook**,
+remembered like Codex's switch); `--remove` takes it out.
+
+MEASURED 2026-11-11 against agy 1.5.6, by registering capture hooks in a throwaway workspace
+(`<ws>/.agents/hooks.json`) and running real turns, headless and through a pseudo-terminal:
+
+- **The payload is richer than the docs say.** Every event carries `hookEventName` and `cwd`
+  (the docs say neither is passed), plus `conversationId`, `workspacePaths`, `modelName`,
+  `lastUserInput`, `transcriptPath`, `artifactDirectoryPath`; the hook also inherits
+  `ANTIGRAVITY_CONVERSATION_ID`. Its working directory is `<ws>/.agents`.
+- **A `PreToolUse` hook GATES THE TOOL, so Deckhand never registers one.** `{}` on stdout was
+  read as a missing decision and DENIED the call ("tool call denied by pre-tool hook"); exit 1
+  FAILED it ("JSON hook ... failed: exit status 1"); empty stdout and `{"decision":"allow"}`
+  both fell through to Antigravity's own policy. The four events Deckhand does register -
+  `SessionStart`, `PreInvocation`, `PostToolUse`, `Stop` - were run with the hook crashing,
+  printing nothing, and pointing at a Node that does not exist: the turn completed correctly
+  every time. The commands still end `2>/dev/null; true`. `antigravity-hook-check.mjs`
+  asserts the event list against the installer's own `EVENTS`, and its selftest proves the
+  `PreToolUse` assertion can fail.
+- **There is no hook while the approval prompt is up, so there is no "asking" and no
+  answering.** Driven through a pty to Antigravity's real prompt ("Requesting permission
+  for: echo deckhand-probe / Run this command?" with four options): `PreToolUse` had fired,
+  `PostToolUse` had not, the conversation index said `RUNNING` with `not_fully_idle=1`, and the
+  transcript's last step said `DONE` - the pending tool step is not written until it resolves.
+  `PreToolUse` runs BEFORE the prompt appears, so a hook waiting there would hold the Mac with
+  nothing on screen - the exact failure hooks-and-answering.md records for `AskUserQuestion`.
+  The user chose live status only (2026-11-11). Antigravity prompts are answered in Antigravity.
+- **`Stop` with `fullyIdle: false` is not the end.** A turn whose background work is still
+  running stops with `fullyIdle=false`, and then NO event fires when that work finishes:
+  `Stop` at 04:45:20, `not_fully_idle` cleared in the index at 04:45:54, nothing in between.
+  So the host merges the two sources FIELD BY FIELD (`mergeAntigravity`, sessions-merge.mjs):
+  the index's live status and later timestamp win, and the hook supplies only what the index
+  lacks - the model, the latest prompt, the transcript path. A hook record winning outright
+  (Codex's rule) would have said "working" for the whole 20-minute stale window.
+- **What the hook adds, honestly:** not speed - the host reads hook records and the index on
+  the same 5s tick. It adds the model (the index has none), the latest prompt (the device's
+  detail card shows it) and the folder per turn.
+
+**No messages, no history.** An Antigravity row never gets a `pnonce` (`msgDeliverable()`):
+nothing can post into a running `agy` session, and a headless `agy --conversation` turn would
+be a second author of it; a message aimed at one is refused BY NAME on arrival. Its transcript
+is never registered for the history reader (a different format), the device's card does not
+offer history (`historyOffered()`), and `SCROLLOPEN` refuses BY NAME - measured: without that,
+the broadcast request went unanswered and the reader sat on "fetching 0/1".
 
 ## Sessions: the conversation index (`host/gemini-sessions.mjs`)
 
@@ -46,10 +101,29 @@ MEASURED 2026-10-31 against agy 1.4.8, and re-observed 2026-11-07 with the Gemin
   prompt most likely reads as working. Never claim a prompt we cannot see.
 - Rows older than `SESSION_STALE_MS` (20 minutes) are dropped, like every other agent's.
 
-The menu ranks Gemini rows among the others by the same urgency rule and tags them `Gemini`;
-`host/gemini-sessions-check.mjs` holds the parsing and the "menu yes, device no" rule.
+Antigravity rows join the device's list and the menu's alike, ranked by the same urgency rule,
+sent as agent `ag` (`AGY` on the glass, `Antigravity` in the menu). `host/gemini-sessions-check.mjs`
+holds the parsing, the field-by-field merge and the no-message/no-history rules; until
+2026-11-11 it held the opposite "menu yes, device no" rule.
 
-## Usage: the Gemini app's local language server (`host/gemini-quota.mjs`)
+## Usage: the app's local server, or the CLI's `/usage` (`host/gemini-quota.mjs`)
+
+**Two sources since 2026-11-11, best first.** An Antigravity app's local server (below) when
+one is running - ~35ms, asked once a minute. Otherwise `agy -p /usage --output-format json`,
+asked at most every 5 minutes: MEASURED on agy 1.5.6, it returns the same groups and windows
+with **no model turn** (`num_turns: 0`, every token count 0), ~3.6s wall and ~0.3s CPU, and
+leaves no conversation behind (the CLI's `brain/` count unchanged). Its JSON's `response` is the
+human TABLE as a string; the breakdown is under `command.data`, in snake_case
+(`remaining_fraction`, `reset_time`, `name`) - `summarizeQuota()` reads both spellings. agy lives
+in `~/.local/bin`, which is not on launchd's PATH, so `agyCandidates()` tries it first. Before
+this, usage was invisible with only a terminal `agy` - no app, no hub, no figure.
+
+**The device's one figure, and the bar's column, are the MOST-USED Gemini window**
+(`antigravityDeviceUsage`, and `GeminiGroup.primary` in the app), never "Gemini Models" by
+name: on 2026-11-11 that group read 0% on both windows while "Gemini 4 Argon" was 35% through its
+week, on a Mac whose sessions run `gemini-4-argon-medium`. The "Claude and GPT models" group is
+never chosen (other vendors' models; beside Claude's column it reads as the person's own quota).
+A tie goes to the shorter window.
 
 Gemini writes no usage figure to disk: its CLI logs say `quota_manager.go: doRefreshQuota`
 and never the numbers. The figures come from the app's own local server.
@@ -131,16 +205,18 @@ hours, and a 5h figure outlived its own window.) A reading older than 6 hours is
 
 The menu-bar app (`parseGeminiQuota`, `GeminiGroup`):
 
-- **Bar:** a `GM` column for the **"Gemini Models"** group (if the app renames it: the first
-  Gemini group with a 5h window, then any Gemini group - never the Claude/GPT one), 5h over
-  weekly like Claude's and Codex's, borrowing Claude's `5h`/`7d` row labels when that column is
-  beside it. A group with no 5h window draws one row rather than a dash in a row it lacks. Both window
-  lengths are named, so the ▲ pace mark is real. Behind Settings › Menu Bar › **Gemini usage**.
-- **Dropdown:** a **Gemini** section: that group's 5-hour and Weekly rows, then `Argon 7d`
-  (always - it is Gemini's own), then `C/GPT 5h` / `C/GPT 7d` once any is used (not "Claude",
-  which inside this section read as the user's own Claude quota).
-- **Tooltip:** `GM (Gemini) 5h: ...` with the pace sentence; each dropdown row names its group
-  and window.
+- **Bar:** an `AG` column (it was `GM` until 2026-11-11) for the group holding the MOST-USED
+  window - the device's rule, see above; it used to be "Gemini Models" by name, which read 0%
+  beside a 35% Argon week - never the Claude/GPT one. 5h over weekly like Claude's and Codex's,
+  borrowing Claude's `5h`/`7d` row labels when that column is beside it. A group with no 5h window
+  (Argon) draws one row rather than a dash in a row it lacks. Both window lengths are named, so
+  the ▲ pace mark is real. Behind Settings › Menu Bar › **Antigravity usage** (the stored key is
+  still `barShowGemini`, so an existing choice carries over).
+- **Dropdown:** an **Antigravity** section: the primary group's rows (unlabelled only when it is
+  "Gemini Models"), then the others named - `Gemini`, `Argon`, `C/GPT` (not "Claude", which
+  inside this section read as the user's own Claude quota).
+- **Tooltip:** `AG (Antigravity) 5h: ...` with the pace sentence; each dropdown row names its
+  group and window.
 
 ### Trust and failure
 
@@ -151,7 +227,7 @@ The menu-bar app (`parseGeminiQuota`, `GeminiGroup`):
   liveness check, and the token would go to whatever listens on the old port - on 127.0.0.1
   only, so the exposure is to local processes; accepted, and noted here.
 - **Undocumented**: no hub, a dead pid, a refused call, a timeout (3s), or a changed shape all
-  resolve to `null`, and the GM column and the Gemini section are simply not there. A Gemini
+  resolve to `null`, and the AG column and the Antigravity section are simply not there. A Gemini
   update can change any of this; `host/gemini-quota-check.mjs` pins the parsing and the
   wiring, but only a live read proves the interface is still there.
 

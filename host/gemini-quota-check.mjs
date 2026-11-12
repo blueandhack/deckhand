@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import http from "node:http";
-import { windowMinutes, summarizeQuota, quotaField, readGeminiQuota, ageQuota } from "./gemini-quota.mjs";
+import { windowMinutes, summarizeQuota, quotaField, readGeminiQuota, ageQuota, antigravityDeviceUsage, agyCandidates } from "./gemini-quota.mjs";
 
 let failed = 0, ran = 0;
 const t = (got, want, what) => {
@@ -95,6 +95,40 @@ t(/ageQuota\(geminiQuota\.list,/.test(line) && /quotaField\(groups\)/.test(line)
   "and prints the reading AGED to now, not as it was fetched");
 t(/geminiQuotaLine\(\)\s*\+/.test(fn(/async function tick\([\s\S]*?\n\}\n/)), true,
   "tick() prints geminiQuotaLine() on the tick line");
+
+// ---- the CLI's /usage (agy 1.5.6, 2026-11-11) and the device's one figure ----
+// The body as `agy -p /usage --output-format json` printed it, trimmed: its `response`
+// is the human TABLE as a string, and the breakdown sits under command.data in
+// snake_case. Reading `response` first was a real bug in the first draft (null).
+const cliBody = {
+  conversation_id: "", status: "SUCCESS", response: "Gemini Models\tWeekly Limit Remaining\t100%\t...",
+  num_turns: 0,
+  command: { name: "usage", data: { groups: [
+    { name: "Gemini Models", buckets: [
+      { id: "gemini-weekly", window: "weekly", remaining_fraction: 0.998203456401825, reset_time: "2026-11-15T20:07:34Z" },
+      { id: "gemini-5h", window: "5h", remaining_fraction: 1, reset_time: "2026-11-12T08:47:17Z" } ] },
+    { name: "Claude and GPT models", buckets: [
+      { id: "3p-weekly", window: "weekly", remaining_fraction: 0.1, reset_time: "2026-11-19T03:47:17Z" } ] },
+    { name: "Gemini 4 Argon", buckets: [
+      { id: "gemini-argon-wtu-weekly", window: "weekly", remaining_fraction: 0.6654009222984314, reset_time: "2026-11-15T05:02:13Z" } ] } ] } },
+};
+const CLI_NOW = Date.parse("2026-11-12T03:47:17Z");
+const cq = summarizeQuota(cliBody, CLI_NOW);
+t(cq?.map((g) => g.name).join("|"), "Gemini Models|Claude and GPT models|Gemini 4 Argon", "the CLI's snake_case body parses to the same groups");
+t(cq?.[2].buckets[0].used, 33, "remaining_fraction 0.665 is 33% used");
+t(cq?.[0].buckets.map((b) => b.window).join(","), "5h,weekly", "with 5h first, as the server's are");
+// The device's figure: the MOST-USED Gemini window. Measured: Gemini Models at 0%,
+// Argon at 33-35% - the figure that is a third spent is the one to show.
+const dev = antigravityDeviceUsage(cq, 42);
+t(dev.agPct, 33, "the device gets Argon's 33%, not Gemini Models' 0%");
+t(dev.agWin, 10080, "... with Argon's window, weekly = 10080 minutes");
+t(dev.agAgeSec, 42, "... and the reading's age");
+t(antigravityDeviceUsage([{ name: "Claude and GPT models", buckets: [{ window: "5h", used: 99, resetMin: 1 }] }], 1).agPct, undefined,
+  "the Claude/GPT group is never the device's figure, however used");
+t(antigravityDeviceUsage([{ name: "Gemini Models", buckets: [{ window: "weekly", used: 5, resetMin: 9 }, { window: "5h", used: 5, resetMin: 1 }] }], 1).agWin, 300,
+  "a tie goes to the SHORTER window, the one that runs out first");
+t(JSON.stringify(antigravityDeviceUsage(null, 1)), "{}", "no reading sends no ag fields at all (the strip hides)");
+t(agyCandidates({ PATH: "/usr/bin" }, "/H")[0], "/H/.local/bin/agy", "agy is looked for where its installer puts it first (not on launchd's PATH)");
 
 console.log(failed ? `gemini-quota: ${failed} of ${ran} FAILED` : `gemini-quota: all ${ran} checks passed`);
 process.exit(failed ? 1 : 0);

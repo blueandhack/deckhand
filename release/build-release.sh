@@ -237,7 +237,8 @@ cp "$SRC/host/Deckhand.icns" "$HC/Resources/Deckhand.icns"
 mv "$STAGE" "$C/Resources/host"
 mkdir -p "$C/Resources/hooks"
 for f in deckhand-session-hook.mjs deckhand-statusline.mjs install-hooks.mjs \
-         install-codex-hooks.mjs hook-command.mjs deckhand-backup.mjs; do
+         install-codex-hooks.mjs hook-command.mjs deckhand-backup.mjs \
+         deckhand-antigravity-hook.mjs install-antigravity-hooks.mjs; do
   cp "$SRC/claude-hooks/$f" "$C/Resources/hooks/"
 done
 # Node's licence travels with Node.

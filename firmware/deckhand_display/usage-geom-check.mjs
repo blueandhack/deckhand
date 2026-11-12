@@ -88,6 +88,29 @@ function bumpConstInt(src, name, add) {
     (_, pre, num, semi) => `${pre}${Number(num) + add}${semi}`);
 }
 const SOURCE_FAULTS = [
+  // ---- Antigravity's strip (2026-11-11): each new rule must be able to FAIL ----
+  ["usageAgShown() is neutered to `return true;` (an AGY strip reading -- for ever)",
+    "usage.ino", (t) => bodyOf(t, "bool usageAgShown()", "\n  return true;\n"),
+    "usageAgShown() refuses twice and decides once"],
+  ["usageStripCount() forgets Antigravity (the trio column is never chosen)",
+    "usage.ino", (t) => t.replace("(usageCodexShown() ? 1 : 0) + (usageAgShown() ? 1 : 0)", "(usageCodexShown() ? 1 : 0)"),
+    "usageStripCount() counts BOTH strips' predicates"],
+  ["usageCol() maps two strips to the duo column",
+    "usage.ino", (t) => t.replace("return n == 0 ? solo : n == 1 ? duo : trio;", "return n == 0 ? solo : duo;"),
+    "usageCol() returns solo for 0 strips, duo for 1, trio for 2"],
+  ["weekBarY() passes its duo and trio constants the wrong way round",
+    "usage.ino", (t) => t.replace("usageCol(WEEK_BAR_Y_SOLO,       WEEK_BAR_Y,       WEEK_BAR_Y_TRIO)", "usageCol(WEEK_BAR_Y_SOLO,       WEEK_BAR_Y_TRIO,       WEEK_BAR_Y)"),
+    "weekBarY(): the DUO column (one strip) is WEEK_BAR_Y"],
+  ["renderAgRow() loses its early return (fields drawn into a strip that is not there)",
+    "usage.ino", (t) => t.replace("  if (!usageAgShown()) return;\n#if BOARD_USAGE_V2\n  renderStrip(true", "#if BOARD_USAGE_V2\n  renderStrip(true"),
+    "renderAgRow returns early on its predicate"],
+  ["board 1's split-row flip stops busting the AGY strip's lane cache (its label left BLANK)",
+    "usage.ino", (t) => t.replace("      agPctCache[0] = '\\0';\n      agRightCache[0] = '\\0';\n      agBorderCache = -1;\n      agBarCache = -1;\n      drawStripCards();",
+                                  "      agRightCache[0] = '\\0';\n      agBorderCache = -1;\n      agBarCache = -1;\n      drawStripCards();"),
+    "the flip busts agPctCache"],
+  ["the AGY strip's chrome loses its own gate on board 2",
+    "usage.ino", (t) => t.replace("  if (usageAgShown())    uiCard(CARD_X, agRowY(),", "  uiCard(CARD_X, agRowY(),"),
+    "the AGY card's CHROME is gated by usageAgShown()"],
   ["usageCodexShown() is neutered to `return true;` (board 1 draws CODEX -- for ever)",
     "usage.ino", (t) => bodyOf(t, "bool usageCodexShown()", "\n  return true;\n"),
     "refuses twice on a sentinel and then decides once"],
@@ -1303,7 +1326,12 @@ for (const b of [1, 2]) {
     // occurrences rather than always reading as zero.
     chk((uino.match(/\busageCodexShown\b(?!_SOLO)/g) || []).length > 1,
         "sanity: the regex above DOES count real occurrences (usageCodexShown "
-      + "is read by every accessor's ternary, so it must match more than once)");
+      + "is read at several sites, so it must match more than once)");
+    // The TRIO siblings (2026-11-11) are each read once too - in the same accessor.
+    for (const n of Object.keys(ACCESSOR_FOR)) {
+      const hits = (uino.match(new RegExp(`\\b${n}_TRIO\\b`, "g")) || []).length;
+      chk(hits === 1, `${n}_TRIO is read in exactly ONE place in usage.ino - its accessor (got ${hits})`);
+    }
 
     // THE MAPPING, NOT JUST THE COUNT. "Read in exactly one place" is
     // satisfied just as well by a BACKWARDS ternary
@@ -1319,21 +1347,38 @@ for (const b of [1, 2]) {
       if (at < 0) continue;
       const stmtEnd = uino.indexOf(";", at);
       const stmt = uino.slice(at, stmtEnd + 1);
-      const m = stmt.match(/usageCodexShown\(\)\s*\?\s*(\w+)\s*:\s*(\w+)/);
-      chk(!!m, `${fn}() reads as a ternary on usageCodexShown()`);
+      const m = stmt.match(/usageCol\(\s*(\w+),\s*(\w+),\s*(\w+)\s*\)/);
+      chk(!!m, `${fn}() reads as usageCol(solo, duo, trio)`);
       if (!m) continue;
-      chk(m[1] === base,
-          `${fn}(): the SHOWN branch (before ':') is ${base}, got ${m[1]} - a `
-        + `backwards ternary draws the duo column exactly when Codex is hidden`);
-      chk(m[2] === `${base}_SOLO`,
-          `${fn}(): the HIDDEN branch (after ':') is ${base}_SOLO, got ${m[2]}`);
+      chk(m[1] === `${base}_SOLO`, `${fn}(): the SOLO column (no strip) is ${base}_SOLO, got ${m[1]}`);
+      chk(m[2] === base,
+          `${fn}(): the DUO column (one strip) is ${base}, got ${m[2]} - a swapped `
+        + `argument draws the wrong column for exactly the strip count it names`);
+      chk(m[3] === `${base}_TRIO`, `${fn}(): the TRIO column (two strips) is ${base}_TRIO, got ${m[3]}`);
     }
+    // usageCol() maps the count the right way round, and the count is BOTH strips.
+    const colBody = fnBody(uino, "static int usageCol(", "usage.ino");
+    chk(/return n == 0 \? solo : n == 1 \? duo : trio;/.test(colBody),
+        "usageCol() returns solo for 0 strips, duo for 1, trio for 2");
+    chk(/int n = usageStripCount\(\);/.test(colBody), "usageCol() decides on usageStripCount()");
+    const cntBody = fnBody(uino, "int usageStripCount(", "usage.ino");
+    chk(/usageCodexShown\(\) \? 1 : 0\) \+ \(usageAgShown\(\) \? 1 : 0/.test(cntBody),
+        "usageStripCount() counts BOTH strips' predicates - Codex's and Antigravity's");
 
     // The row's fields and its chrome must be gated by the SAME predicate.
     chk(/if \(!usageCodexShown\(\)\) return;/.test(fnBody(uino, "void renderCodexRow(", "usage.ino")),
         "renderCodexRow returns early on the predicate, so no field draws into a row that is not there");
-    chk(/if \(usageCodexShown\(\)\) uiCard\(/.test(fnBody(uino, "void drawUsageStatic(", "usage.ino")),
-        "the Codex card's CHROME is gated by the same predicate as its fields");
+    {
+      const cards = fnBody(uino, "void drawStripCards(", "usage.ino");
+      chk(/drawStripCards\(\);/.test(fnBody(uino, "void drawUsageStatic(", "usage.ino")),
+          "drawUsageStatic() paints the strips' card fills through drawStripCards()");
+      chk((cards.match(/if \(usageCodexShown\(\)\) uiCard\(/g) || []).length === 2,
+          "the Codex card's CHROME is gated by the same predicate as its fields, on both boards' arms");
+      chk((cards.match(/if \(usageAgShown\(\)\)\s+uiCard\(/g) || []).length === 2,
+          "the AGY card's CHROME is gated by usageAgShown(), on both boards' arms");
+      chk(/if \(!usageAgShown\(\)\) return;/.test(fnBody(uino, "void renderAgRow(", "usage.ino")),
+          "renderAgRow returns early on its predicate, so no field draws into a strip that is not there");
+    }
     // The layout flip must clear the content area, or the old borders survive.
     const tabBody = fnBody(uino, "void renderUsageTab(", "usage.ino");
     chk(/codexShownCache != codexShownNow[\s\S]{0,200}fillRect\(0, CONTENT_Y/
@@ -1758,7 +1803,7 @@ for (const b of [1, 2]) {
 // tail again. Parse the draw site instead, the way settings-geom-check.mjs parses
 // drawSeverityAction's own arguments.
 {
-  const row = fnBody(stripComments("usage.ino"), "void renderCodexRow(", "usage.ino");
+  const row = fnBody(stripComments("usage.ino"), "static void renderStrip(", "usage.ino");
   // The WHOLE argument list, not the first string literal: C concatenates
   // adjacent literals, so `"%d%%  %s"  "  %02ld:%02ld"` reads as one format and
   // a first-literal regex cannot see the half that matters. Balanced to the
@@ -1766,7 +1811,7 @@ for (const b of [1, 2]) {
   const calls = [...row.matchAll(/snprintf\(buf,\s*sizeof\(buf\),([\s\S]*?)\);/g)].map(m => m[1]);
   const right = calls.filter(a => a.includes("%d%%"));
   chk(right.length >= 2,
-      `renderCodexRow's right field has ${right.length} percentage branches (expected >= 2)`);
+      `renderStrip's right field has ${right.length} percentage branches (expected >= 2)`);
   const clock = right.filter(a => /%02ld:%02ld/.test(a));
   chk(clock.length === 0,
       clock.length ? `a right-field branch carries a wall-clock suffix again - that field's width `
@@ -1807,7 +1852,9 @@ for (const b of [1, 2]) {
   for (const [needle, what] of [
     ["bool usageCodexShown()", "the predicate itself"],
     ["if (!usageCodexShown()) return;", "renderCodexRow's early return"],
-    ["if (usageCodexShown()) uiCard(", "drawUsageStatic's gate on the card chrome"],
+    ["void drawStripCards()", "drawStripCards, the strips' card chrome"],
+    ["bool usageAgShown()", "the AGY strip's predicate"],
+    ["if (!usageAgShown()) return;", "renderAgRow's early return"],
   ]) {
     const g = guardsAt(needle);
     chk(g !== null, `found ${what} in usage.ino ("${needle}")`);
@@ -1919,7 +1966,7 @@ for (const b of [1, 2]) {
     // fields draw onto COLOR_BG with no card under them - and every one of them
     // passes COLOR_CARD as its background, so the clear boxes would paint card-
     // coloured rectangles onto a bare page.
-    chk(/if \(codexShownNow\) uiCard\(/.test(flip),
+    chk(/drawStripCards\(\);/.test(flip),
         "the flip repaints the card fill when the row comes back (never fields on bare page)");
     // (c) EVERY CACHE THAT DESCRIBES PIXELS IN THAT RECT IS BUSTED - and the list is
     // DERIVED from renderCodexRow's own draw calls, not transcribed here. That is the
@@ -1927,11 +1974,16 @@ for (const b of [1, 2]) {
     // instead of silently drawing blank after the first hide/show flip, which is this
     // repo's most-repeated defect (chrome repainted, cache not reset, value left
     // BLANK because drawIfChanged reads "hasn't changed").
-    const row = fnBody(uino2, "void renderCodexRow(", "usage.ino");
+    // renderStrip() draws through POINTERS chosen per strip (`laneCache = ag ?
+    // agPctCache : cxPctCache`), so each pointer the draw calls name is expanded to
+    // BOTH caches it can be - and the flip must bust every one of them.
+    const row = fnBody(uino2, "static void renderStrip(", "usage.ino");
+    const choice = Object.fromEntries([...row.matchAll(/(\w+)\s*=\s*ag \? &?(\w+)\s*:\s*&?(\w+);/g)]
+                                        .map((m) => [m[1], [m[2], m[3]]]));
     const drawn = new Set([...row.matchAll(/draw(?:IfChanged|CardBorder|PaceBar)\(\s*&?(\w+)/g)]
-                            .map((m) => m[1]));
-    chk(drawn.size >= 4,
-        `renderCodexRow's cached draw calls parse to ${drawn.size} caches `
+                            .flatMap((m) => choice[m[1]] ?? [m[1]]));
+    chk(drawn.size >= 8,
+        `renderStrip's cached draw calls parse to ${drawn.size} caches `
       + `[${[...drawn].join(", ")}] (an empty parse must fail, not pass vacuously)`);
     for (const cache of drawn)
       chk(new RegExp(`\\b${cache}\\s*(\\[0\\]\\s*=|=)`).test(flip),
@@ -1944,6 +1996,92 @@ for (const b of [1, 2]) {
         flipDead.length ? `board 1's flip block carries a dead-code guard [${flipDead.join(", ")}]`
                         : "board 1's flip block is live, not smothered by a dead-code guard");
   }
+}
+
+// ---- ANTIGRAVITY'S STRIP (2026-11-11) ---------------------------------------
+// Board 2 STACKS two strips in a third column; board 1 SPLITS its one row. Every
+// number below is parsed from the headers, never restated here.
+{
+  const raw = readSource("usage.ino");
+  // The predicate, on Codex's exact pattern: two sentinels, the fallback only when no
+  // window came, and seconds against minutes * 60.
+  const ag = fnBody(raw, "bool usageAgShown()", "usage.ino");
+  const agRet = [...ag.matchAll(/\breturn\b([^;]*);/g)].map((m) => m[1].trim());
+  const agSent = [...ag.matchAll(/if\s*\(\s*usage\.(\w+)\s*<\s*0\s*\)\s*return false;/g)].map((m) => m[1]);
+  chk(agRet.length === 3 && agRet[0] === "false" && agRet[1] === "false",
+      `usageAgShown() refuses twice and decides once [${agRet.join(" | ")}]`);
+  chk(agSent.length === 2 && agSent.includes("agPct") && agSent.includes("agAgeSec"),
+      `usageAgShown() refuses on BOTH unmeasured sentinels [${agSent.join(", ")}]`);
+  chk(/usage\.agWindowMin\s*>\s*0\s*\?\s*usage\.agWindowMin\s*:\s*AG_HIDE_FALLBACK_MIN/.test(ag),
+      "usageAgShown() takes the wire's window, and AG_HIDE_FALLBACK_MIN only when none came");
+  chk(/usage\.agAgeSec\s*<=\s*\w+\s*\*\s*60/.test(agRet[2] || ""),
+      `usageAgShown() compares seconds against minutes * 60 [${agRet[2] || "not found"}]`);
+  for (const b of [1, 2])
+    chk(typeof B[b].AG_HIDE_FALLBACK_MIN === "number", `board ${b} declares AG_HIDE_FALLBACK_MIN`);
+  chk(B[1].AG_HIDE_FALLBACK_MIN === B[2].AG_HIDE_FALLBACK_MIN,
+      `both boards use the same Antigravity hide fallback (${B[1].AG_HIDE_FALLBACK_MIN} == ${B[2].AG_HIDE_FALLBACK_MIN} minutes)`);
+  // Board 2 never halves a row but must still declare the half lanes the shared
+  // renderer names; its header says they are board 1's values, so hold it to that.
+  chk(B[2].STRIP_HALF_LANE_CHARS === B[1].STRIP_HALF_LANE_CHARS && B[2].STRIP_HALF_RIGHT_CHARS === B[1].STRIP_HALF_RIGHT_CHARS,
+      `board 2's unused half lanes are board 1's (${B[2].STRIP_HALF_LANE_CHARS}/${B[2].STRIP_HALF_RIGHT_CHARS} == ${B[1].STRIP_HALF_LANE_CHARS}/${B[1].STRIP_HALF_RIGHT_CHARS})`);
+
+  // BOARD 2: the trio column sums inside the content area with air under it.
+  const c = B[2];
+  const contentBottom = c.BOARD_H - c.FOOTER_H;
+  const trio = [c.SP_2, c.NOW_CARD_H_TRIO, c.SP_2, c.WEEK_CARD_H_TRIO, c.SP_2, c.STRIP_H_TRIO, c.SP_2, c.STRIP_H_TRIO];
+  const trioEnd = c.CONTENT_Y + trio.reduce((a, x) => a + x, 0);
+  chk(contentBottom - trioEnd >= c.SP_2,
+      `board 2 trio column ${trio.join(" + ")} ends at ${trioEnd}, ${contentBottom - trioEnd}px of air `
+    + `above contentBottom ${contentBottom} (at least SP_2 ${c.SP_2}, never flush on the footer)`);
+  // WEEK's trio offsets follow the SAME per-gap step the solo/duo pair proves: each
+  // offset moves (solo - duo) / (8 - 3) rows per gap, so trio = duo - step * (3 - 1).
+  const step = (n) => (c[`${n}_SOLO`] - c[n]) / 5;
+  for (const n of ["WEEK_NUM_Y", "WEEK_BAR_Y", "WEEK_META_Y", "WEEK_FABLE_Y", "WEEK_FABLE_BAR_Y"]) {
+    const want = c[n] - step(n) * 2;
+    chk(c[`${n}_TRIO`] === want, `${n}_TRIO ${c[`${n}_TRIO`]} == ${n} ${c[n]} - 2 gaps x ${step(n)} (${want})`);
+  }
+  chk(c.WEEK_BURN_Y_TRIO - c.WEEK_NUM_Y_TRIO === c.WEEK_BURN_Y - c.WEEK_NUM_Y,
+      `the WEEK burn line keeps its offset from the number in the trio column (+${c.WEEK_BURN_Y - c.WEEK_NUM_Y})`);
+  chk(c.WEEK_CARD_H_TRIO === c.WEEK_CARD_H - 6 * 2,
+      `WEEK_CARD_H_TRIO ${c.WEEK_CARD_H_TRIO} == 126 + 6k at k = 1 (WEEK_CARD_H ${c.WEEK_CARD_H} - 12)`);
+  const bodyH = BODY_H[2];
+  // The WEEK trio's clear boxes stay disjoint, in order, and inside the border.
+  const wk = [["number", c.WEEK_NUM_Y_TRIO - 1, c.WEEK_NUM_Y_TRIO + 24], ["ALL bar", c.WEEK_BAR_Y_TRIO - 4, c.WEEK_BAR_Y_TRIO + c.BAR_H + 3],
+              ["meta", c.WEEK_META_Y_TRIO - 1, c.WEEK_META_Y_TRIO + bodyH], ["Fable line", c.WEEK_FABLE_Y_TRIO - 1, c.WEEK_FABLE_Y_TRIO + bodyH],
+              ["Fable bar", c.WEEK_FABLE_BAR_Y_TRIO - 4, c.WEEK_FABLE_BAR_Y_TRIO + c.BAR_H + 3]];
+  for (let i = 1; i < wk.length; i++)
+    chk(wk[i][1] > wk[i - 1][2], `WEEK trio: ${wk[i - 1][0]} clear ends +${wk[i - 1][2]} before ${wk[i][0]} clear starts +${wk[i][1]}`);
+  chk(wk[wk.length - 1][2] <= c.WEEK_CARD_H_TRIO - 3,
+      `WEEK trio content ends +${wk[wk.length - 1][2]} <= +${c.WEEK_CARD_H_TRIO - 3} (border owns the last 2 rows)`);
+  // NOW's trio card: no sparkline band, the meta row right under the bar, inside.
+  chk(c.NOW_SPARK_H_TRIO === 0, "NOW_SPARK_H_TRIO is 0: the trio column has no sparkline band");
+  const nowBarEnd = c.NOW_BAR_Y + c.BAR_H + 3, nowMeta = c.NOW_META_Y_TRIO - 1;
+  chk(nowMeta > nowBarEnd, `NOW trio: bar clear ends +${nowBarEnd} before meta clear starts +${nowMeta}`);
+  chk(c.NOW_META_Y_TRIO + bodyH <= c.NOW_CARD_H_TRIO - 3,
+      `NOW trio meta clear ends +${c.NOW_META_Y_TRIO + bodyH} <= +${c.NOW_CARD_H_TRIO - 3}`);
+  // The compact strip: text and bar clear disjoint and inside the border.
+  const st = [c.STRIP_TEXT_Y_TRIO - 1, c.STRIP_TEXT_Y_TRIO + bodyH], sb = [c.STRIP_BAR_Y_TRIO - 4, c.STRIP_BAR_Y_TRIO + c.BAR_H + 3];
+  chk(st[0] >= 2, `trio strip text clear starts +${st[0]} inside the border`);
+  chk(st[1] < sb[0], `trio strip text clear ends +${st[1]} before its bar clear starts +${sb[0]}`);
+  chk(sb[1] <= c.STRIP_H_TRIO - 3, `trio strip content ends +${sb[1]} <= +${c.STRIP_H_TRIO - 3} (border owns the last 2 rows)`);
+
+  // BOARD 1: two strips share CODEX_Y's row, each STRIP_HALF_W, 4px apart.
+  const d = B[1];
+  chk(d.STRIP_HALF_W * 2 + 4 === d.CARD_W, `board 1 half strips ${d.STRIP_HALF_W} + 4 + ${d.STRIP_HALF_W} == CARD_W ${d.CARD_W}`);
+  // The half lane, on the full lane's own rule: the right field is "100%" at most.
+  const adv = bodyAdvance(1);
+  const rightW = adv * d.STRIP_HALF_RIGHT_CHARS;
+  const lane = Math.floor((d.STRIP_HALF_W - d.PAD - rightW - 1 - d.PAD) / adv);
+  chk(d.STRIP_HALF_RIGHT_CHARS === "100%".length, `STRIP_HALF_RIGHT_CHARS ${d.STRIP_HALF_RIGHT_CHARS} is "100%", the half row's only right field`);
+  chk(lane === d.STRIP_HALF_LANE_CHARS,
+      `board 1 half lane re-derived: (${d.STRIP_HALF_W} - PAD - ${rightW}px - 1 - PAD) / ${adv} = ${lane}, header says ${d.STRIP_HALF_LANE_CHARS}`);
+  chk("CX 30d".length <= d.STRIP_HALF_LANE_CHARS, `the half label's longest form ("CX 30d") fits ${d.STRIP_HALF_LANE_CHARS} chars`);
+  chk(d.CODEX_LANE_CACHE >= d.STRIP_HALF_LANE_CHARS + 1, "the strip caches hold the half lane too");
+  // The two halves' x positions, parsed from renderAgRow()/drawStripCards() rather
+  // than assumed: Antigravity's half starts where Codex's ends plus the 4px gap.
+  const agBody = fnBody(raw, "void renderAgRow(", "usage.ino");
+  chk(/half \? CARD_X \+ CARD_W - STRIP_HALF_W : CARD_X/.test(agBody),
+      "board 1's Antigravity half sits at CARD_X + CARD_W - STRIP_HALF_W (flush right, 4px after Codex's)");
 }
 
 faultChildEpilogue();

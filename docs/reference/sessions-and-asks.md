@@ -958,3 +958,15 @@ guard are therefore UNMEASURED on hardware.
   a zero gap, and the message changing face without `countLineY()` following). **NOT seen on the
   glass:** an empty list is unreachable while a Claude session is live on a connected Mac, which
   it was for the whole of this fix; a capture of the non-empty list confirmed that path unchanged.
+
+- **A third agent, Antigravity (`ag`), 2026-11-11.** `agentKind()` (a MACRO in
+  deckhand_display.ino - a function defined that high dragged Arduino's generated prototypes
+  above `enum Tab` and `BattState` and the build failed) maps `cc`/`cx`/`ag`; the spinner, the
+  band mark and the status dot take it instead of a `bool codex`. The tag is `AGY` (the CLI's own
+  command name, three characters, so the name lane is wider than a Claude row's, never
+  narrower), the sub-line `AG`, and the mark `AgyMark.h` - ORIGINAL art from `agy2c.py` (a chevron
+  levitating over a ground line), not Google's logo. The spine stays solid; only Codex's is
+  dashed, and the tag and mark carry the agent. An Antigravity row never asks, never offers a
+  message (no `pnonce`) and never offers history (`historyOffered()`); see
+  `docs/reference/gemini.md`. Seen on board 2's glass: a live `agy` turn as WORKING, then READY,
+  and its detail card with the hook's last prompt.

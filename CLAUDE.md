@@ -53,7 +53,7 @@ panel, which reads as a layout bug rather than a build mistake.
 | mic / beeper | both fitted and working | both work, via the ES8311 |
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64 |
-| size today | flash 1429808, RAM 72292 | flash 1187296, RAM 66924 |
+| size today | flash 1433776, RAM 72420 | flash 1191360, RAM 67084 |
 
 **FOUR of the six numbers this file quotes about the binaries are BOUND and two are not.**
 `node firmware/board-baseline.mjs --doc-check` asserts the two **hashes** and the two **sizes**
@@ -257,7 +257,18 @@ line (`shotWaitRoom`, behind the new `BOARD_SERIAL_NATIVE_USB`, 0 on board 1). *
 refusal string. **Board 2: flash +304 against its same-day build (1,186,992 -> 1,187,296), RAM
 unchanged at 66,924** (the timestamp lands in padding). Board 2 was flashed and measured: three
 captures with USB and BLE both live, all 480 rows each, where before every capture lost 40-53
-rows; board 1 was not cabled and not looked at. `arduino-cli`'s
+rows; board 1 was not cabled and not looked at. **Then 2026-11-11 (Antigravity on the
+device), both boards moved, on purpose, all of it shared code.** Sessions gained a third agent
+(`ag`: the `AGY` tag and `AgyMark.h`, 8 frames x 256 bytes = 2,048 of flash on each board), and
+USAGE an Antigravity strip drawn by the same `renderStrip()` as Codex's - board 2 stacks the two
+in a TRIO column, board 1 splits its one row (`docs/reference/usage-tab.md`). **Board 1: flash
++3,968 (1,429,808 -> 1,433,776), RAM +128 (72,292 -> 72,420)** - the AGY strip's caches
+(`agPctCache`/`agRightCache`, `CODEX_LANE_CACHE` 24 each) and its four `Usage` fields. **Board 2:
+flash +4,064 (1,187,296 -> 1,191,360), RAM +160 (66,924 -> 67,084)**, the same terms at its
+32-byte `CODEX_LANE_CACHE`. Board 2 was flashed and looked at (the AGY strip in the duo column,
+an Antigravity session row and its card); the TRIO column is bound by `usage-geom-check.mjs`
+but NOT yet seen on glass - `MULTITEST`'s synthetic Mac needs a free link slot and two real Macs
+held both. Board 1 was not cabled and not looked at. `arduino-cli`'s
 "Sketch uses N" is a
 slightly smaller number than the `.bin` - the same image without its trailing padding - so do
 not expect the compile summary to print these.
@@ -322,7 +333,7 @@ arduino-cli compile --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app" \
 node firmware/board-baseline.mjs /tmp/b1/deckhand_display.ino.bin --check 1
 ```
 
-Today: `5009cd28bc55bc69...`, size 1429808 (board 2: `bf4ac58f2e6afaad...`, size 1187296).
+Today: `706b9d4330409018...`, size 1433776 (board 2: `7ce4fc5aafb48b48...`, size 1191360).
 
 It compares **BYTES, not sizes**, and that matters: a default argument on a shared function
 once changed board 1's codegen with **no size change whatsoever** - invisible to a size
@@ -409,8 +420,8 @@ node firmware/deckhand_display/geom-sweep.mjs          # fault-injection sweep, 
 # the wire and the Mac
 node host/{wire-bytes,ask-chips,ask-optdescs,pair-crypto,pair-exchange,voice-answer}-check.mjs
 node host/{codex-refresh,line-address,session-lookup}-check.mjs
-node host/gemini-sessions-check.mjs                     # Antigravity rows: menu yes, device no
-node host/gemini-quota-check.mjs                        # Gemini usage from the Gemini app's local server
+node host/gemini-sessions-check.mjs                     # Antigravity rows on the device, and the field-by-field merge
+node host/gemini-quota-check.mjs                        # Antigravity usage: the app's local server, or `agy -p /usage`
 node host/session-inbox-check.mjs                       # the inbox frame, over a stand-in socket
 node host/{host-tag,mac-emoji,run-ledger,watchdog,ccusage}-check.mjs
 node host/whisper-prompt-check.mjs                      # the dictation vocabulary, vs whisper's SILENT prompt cap
@@ -418,6 +429,7 @@ node host/whisper-prompt-check.mjs --live               # ... and whether its le
 node firmware/board-baseline.mjs --doc-check           # the quote above vs the JSON
 node host/multi-device-check.mjs                        # two boards on two cables at once
 node claude-hooks/answer-status-check.mjs
+node claude-hooks/antigravity-hook-check.mjs            # the Antigravity hook: never PreToolUse, never stdout
 node docs/design/*/check.mjs                            # committed mocks, bound to the headers
 ```
 
@@ -471,7 +483,7 @@ one is neither handled nor refused.
 | `PERF` / `TEMP` / `TEXTPROBE` | flush timing; SoC DIE temperature; the text-width table |
 | `POWERPROBE <label>` | mV/h in the current state; **battery only**, refuses on USB with the cause |
 | `AUDIOPROBE` / `TONETEST [vol]` / `TONELADDER` | a ladder of claims: on the bus / configured and playing / find the audible floor |
-| `SCROLLFETCH` / `SCROLLOPEN` / `SCROLLTO [line]` / `SCROLLPERF [top\|code\|line]` / `SCROLLCLOSE` | board 2 transcript: fetch without drawing, open, park, measure, close |
+| `SCROLLFETCH` / `SCROLLOPEN` / `SCROLLTO [line]` / `SCROLLPERF [top\|code\|line]` / `SCROLLCLOSE` | board 2 transcript: fetch without drawing, open, park, measure, close. `SCROLLOPEN` REFUSES BY NAME on an Antigravity session (`historyOffered()`, reader.ino): its transcript is not Claude's format, the host never registers it, and the broadcast request would go unanswered until the reader's timeout said "could not reach the Mac" |
 | `PROJFETCH` / `PROJOPEN <n>` / `PSESSOPEN <n>` | board 2 PROJECTS: fetch level 1 without a tap, open project `n`'s own sessions (level 2), open session `n`'s transcript (level 3, the EXISTING scrollback surface via `scrollOpenById()` - no new reader). Each refuses BY NAME on a non-numeric or out-of-range index, PROJECTS not being the live tab, `PSESSOPEN` additionally on level 2 not being open yet or another full-screen surface being up. `PROJOPEN <n>` also DEDUPES a repeat of the SAME `n` within 2000ms and says so BY NAME (`projOpenLevel1()` is not idempotent against its own double delivery: it resets `psessEverReceived`/`psessCount` and re-fetches, which the host's own request dedupe then drops, timing out over a list already loaded) - a later re-open of the same project still works. `PSESSOPEN` needs no such guard: its fetch (`scrollFetch()`, shared with SCROLLFETCH/SCROLLOPEN) already answers a repeat from what is already held in PSRAM rather than re-fetching it. `PROJFETCH` - and `TAB 2`'s own background refresh, and the dead-end retry tap, since all three route through the SAME `requestProjects()` - carries the identical dedupe one level up: a request landing within 2000ms of the LAST successful `projs` reply (`projectsLastLoadMs`) is a no-op that reports "PROJSFETCH held N project(s)" rather than re-fetching, because level 1's own fetch has no per-request key the host could dedupe by identity the way `PSESSOPEN`'s does - only a time window tells a double-delivered echo from a genuine, later re-open (leaving PROJECTS and coming back a minute later still fetches for real). Board 1 refuses all three from `UNAVAILABLE_COMMANDS[]` |
 | `RESUME <text>` | a HEADLESS continuation (`claude -p --resume <id> <text>`) of whichever transcript is open, addressed to `scrollLoadedId`. **This does not open a session on the Mac** - one turn runs, replies, and exits; the session hook republishes the record afterwards, which is how it reappears in the live list. Refuses BY NAME on no transcript open, on a LIVE session (a headless turn would become a second, concurrent author of it - `scrollFromProjects`/`scrollProjLive` gate this), and on empty text. Board 1 refuses it from `UNAVAILABLE_COMMANDS[]`. Not yet reachable from a tap - see `docs/reference/scrollback.md` |
 | `BLEMTU` | board 2: the negotiated ATT MTU per link |
@@ -485,7 +497,7 @@ one is neither handled nor refused.
 | `USAGEACCT <n>` | BOTH boards: show Claude ACCOUNT `n` (0-based, slot order - the order a tap on the cards pages through) on the USAGE tab, so a capture can see an account other than the first. **ABSOLUTE, never "next"**: the host's double delivery would make a relative step toggle there and back, and an absolute one is idempotent, so it is not deduped. Reports `USAGEACCT idx=<0-based> count=<n> key=<acct key> label=<header label> src=<link>`. Refuses BY NAME - naming WHICH one - on a surface over the cards (compose panel, full-text reader, history reader, icon grid, octopus, voice card, mic processing bar, transcript, pairing panel - wider than `TAB`'s set because it repaints the cards in place rather than through `switchTab()`), on USAGE not being the live tab, on no account having a reading yet, and on a non-numeric or out-of-range `n` (quoting `0..count-1`). Nothing on the glass says `N/M` on either board - `BOARD_USAGE_ACCT_INDEX` is `0` on both because the indicator does not fit beside the widest card label (`usage-geom-check.mjs` re-derives the overflow) - so the header's changing account label is the carrier. `MULTITEST` injects `"acct":"feedacct"`, so it always makes a second account |
 | `MSGPRI` / `MSGPRI now\|next\|later` | report or set how a message sent FROM this device lands in the Mac's session queue. NVS-backed, on the SETTINGS tab; the device announces it at boot and on `WHOAMI`, and the host asks for it when a HELLO names a link it has no priority for |
 | `WHOAMI` | re-emits the boot `HELLO <name> v2` line on demand, over USB. Both boards. The host sends it to an anonymous link before considering a reset - `HELLO` is a boot-only burst, so a host that attached to an already-running board otherwise had to REBOOT it to learn its name |
-| `MULTITEST <n>` / `PAIRVECTOR` | inject a synthetic second Mac; check the pairing crypto against RFC 7748 |
+| `MULTITEST <n>` / `PAIRVECTOR` | inject a synthetic second Mac (its account carries Codex AND Antigravity readings, for board 2's TRIO column and board 1's split strip row, and its row 1 is an `ag` session; it needs a FREE link slot, so it cannot appear while two real Macs hold both); check the pairing crypto against RFC 7748 |
 
 **`SCROLLPERF` and `SCROLLTO` are separate on purpose.** `SCROLLPERF` times twenty frames of
 each of two render paths, which sweeps the view top-to-bottom twice - reported twice as the
@@ -508,7 +520,7 @@ through the measuring command.
 | pairing, keys, two Macs at once | [`docs/reference/pairing-and-multi-mac.md`](docs/reference/pairing-and-multi-mac.md) |
 | hooks, remote answering, the `ask` object | [`docs/reference/hooks-and-answering.md`](docs/reference/hooks-and-answering.md) |
 | Codex, the paged history reader | [`docs/reference/codex-and-history.md`](docs/reference/codex-and-history.md) |
-| Gemini / Antigravity: sessions, and usage from the app's local server | [`docs/reference/gemini.md`](docs/reference/gemini.md) |
+| Antigravity: sessions, its hook, usage (app server or `agy -p /usage`), the `ag` agent on the device | [`docs/reference/gemini.md`](docs/reference/gemini.md) |
 | `host/index.mjs`, OAuth, the watchdog, logs | [`docs/reference/host-runtime.md`](docs/reference/host-runtime.md) |
 | the menu-bar app | [`docs/reference/menu-bar.md`](docs/reference/menu-bar.md) |
 | the released `Deckhand.app`, signing, notarization, Sparkle, `release/` | [`docs/reference/release.md`](docs/reference/release.md) |
