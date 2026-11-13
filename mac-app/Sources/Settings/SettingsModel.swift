@@ -27,11 +27,12 @@ import SwiftUI
 // snapshot the menu draws from on every refresh.
 
 enum SettingsPane: Int, CaseIterable {
-    case general, menuBar, devices, claude, about
+    case general, menuBar, agents, devices, claude, about
     var title: String {
         switch self {
         case .general: return "General"
         case .menuBar: return "Menu Bar"
+        case .agents: return "Agents"
         case .devices: return "Devices"
         case .claude: return "Claude Code"
         case .about: return "About"
@@ -41,6 +42,7 @@ enum SettingsPane: Int, CaseIterable {
         switch self {
         case .general: return "gearshape"
         case .menuBar: return "menubar.rectangle"
+        case .agents: return "switch.2"
         case .devices: return "rectangle.portrait.on.rectangle.portrait"
         case .claude: return "terminal"
         case .about: return "info.circle"
@@ -67,6 +69,10 @@ final class SettingsModel: ObservableObject {
     // Mirrors of the Mac-side preferences, re-read on every pull so a change made
     // anywhere (another window, `defaults write`) shows here too.
     @Published var prefs: [BarPref: Bool] = [:]
+    // Settings > Agents (Agents.swift): On is read from the host's file, In the menu
+    // from UserDefaults; Beside the icon is `prefs` above.
+    @Published var agentsOn: [AgentSwitch: Bool] = [:]
+    @Published var agentsInMenu: [AgentSwitch: Bool] = [:]
     @Published var sound = ""
     @Published var colourful = true
     // The bar's size: the choice, what Automatic resolved to, and why.
@@ -79,6 +85,9 @@ final class SettingsModel: ObservableObject {
         self.s = s
         if !nameEditing { nameDraft = s.macTagSource == "name" ? s.macTag : "" }
         prefs = Dictionary(uniqueKeysWithValues: BarPref.allCases.map { ($0, $0.on) })
+        let file = AgentSwitch.readFile()
+        agentsOn = Dictionary(uniqueKeysWithValues: AgentSwitch.allCases.map { ($0, file[$0] ?? true) })
+        agentsInMenu = Dictionary(uniqueKeysWithValues: AgentSwitch.allCases.map { ($0, $0.inMenu) })
         sound = askSoundName
         colourful = colourfulIcon
         barSize = BarSize.current

@@ -406,6 +406,10 @@ function remoteState() {
     const st = fs.statSync(HOST_ALIVE);
     if (Date.now() - st.mtimeMs > 15_000) return { display: false, answerable: false };
     const hb = JSON.parse(fs.readFileSync(HOST_ALIVE, "utf8"));
+    // This agent switched OFF in Settings > Agents: the host shows nothing of it, so
+    // there is no display to publish an ask to and nothing to wait for. Absent (an
+    // older host) means on.
+    if (hb.agents && hb.agents[AGENT] === false) return { display: false, answerable: false };
     return {
       display: hb.connected === true,
       // Absent (older host) means ON: waiting on a PermissionRequest doesn't

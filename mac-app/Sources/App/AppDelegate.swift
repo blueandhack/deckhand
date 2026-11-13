@@ -357,8 +357,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // A header says when its readings are OLD, once for the section, instead of
         // "· stale 35m" on every row under it.
         let ageNote = { (stale: Bool, age: Int?) in stale ? "updated \(humanMinutes((age ?? 0) / 60)) ago" : "" }
-        let claudeOn = s.pct5h != nil || s.pct7d != nil
-        let codexOn = s.cxPct != nil || s.cx2Pct != nil
+        // "Usage in the menu" (Settings > Agents). An agent switched OFF entirely has
+        // no readings to show - the host stops publishing them - so it needs no test here.
+        let claudeOn = AgentSwitch.claude.inMenu && (s.pct5h != nil || s.pct7d != nil)
+        let codexOn = AgentSwitch.codex.inMenu && (s.cxPct != nil || s.cx2Pct != nil)
         claudeHeader.attributedTitle = menuHeader("Claude", note: ageNote(cStale, s.quotaAgeSec))
         codexHeader.attributedTitle = menuHeader("Codex", note: ageNote(xStale, s.cxAgeSec))
         for (item, win, pct, reset, stale, shown) in [
@@ -382,7 +384,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // GPT models the app also offers only once used - zeros there are noise.
         var gRows: [(label: String?, group: String, b: GeminiGroup.Bucket)] = []
         let primary = GeminiGroup.primary(s.gemini)
-        for g in s.gemini {
+        for g in AgentSwitch.antigravity.inMenu ? s.gemini : [] {
             let isPrimary = g.name == primary?.name
             let isOwn = GeminiGroup.isOwn(g)
             guard isPrimary || isOwn || g.buckets.contains(where: { $0.pct > 0 }) else { continue }
@@ -745,6 +747,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // numbers are rendered as.
     func setBarPref(_ pref: BarPref, _ on: Bool) {
         UserDefaults.standard.set(on, forKey: pref.rawValue)
+        refresh()
+    }
+
+    /// Settings > Agents, On. Written to the file the host reads every tick, so it
+    /// takes effect within one tick, and holds across a host restart or a host that
+    /// was not running when it was flipped (Agents.swift).
+    func setAgent(_ a: AgentSwitch, on: Bool) {
+        AgentSwitch.write(a, on: on)
+        refresh()
+    }
+
+    /// Settings > Agents, Usage in the menu. Mac-side only, like setBarPref.
+    func setAgentInMenu(_ a: AgentSwitch, _ on: Bool) {
+        UserDefaults.standard.set(on, forKey: a.menuKey)
         refresh()
     }
 

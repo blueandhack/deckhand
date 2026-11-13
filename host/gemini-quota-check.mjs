@@ -81,7 +81,9 @@ server.close();
 const src = fs.readFileSync(new URL("./index.mjs", import.meta.url), "utf8");
 const fn = (re) => src.match(re)?.[0] ?? "";
 const readUsage = fn(/async function readUsage\(\) \{[\s\S]*?\n\}\n/);
-t(/^\s*kickGeminiQuota\(\);/m.test(readUsage), true, "readUsage() kicks the Gemini read");
+// Behind the Agents switch since 2026-11-13: an Antigravity that is switched OFF is not
+// asked at all (host/agents-check.mjs binds the OFF half).
+t(/^\s*if \(agents\.antigravity\) kickGeminiQuota\(\);/m.test(readUsage), true, "readUsage() kicks the Gemini read");
 t(/await\s+kickGeminiQuota/.test(readUsage), false, "and never waits on it");
 const kick = fn(/function kickGeminiQuota\(\) \{[\s\S]*?\n\}\n/);
 t(/if \(geminiQuotaInFlight \|\| Date\.now\(\) - geminiQuotaAskedAt < GEMINI_QUOTA_EVERY_MS\) return;/.test(kick), true,

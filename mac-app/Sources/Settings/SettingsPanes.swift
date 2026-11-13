@@ -155,12 +155,15 @@ struct MenuBarPane: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            Section("Beside the icon") {
-                DescribedToggle(title: "Claude usage", detail: "5-hour figure on top, 7-day below. \u{25B2} means you are using it faster than the clock.", isOn: toggle(.usage))
-                DescribedToggle(title: "Codex usage", detail: "Only on a Mac where Codex reports a quota.", isOn: toggle(.codex))
-                DescribedToggle(title: "Antigravity usage", detail: "AG: Antigravity's most-used Gemini limit, from the Antigravity app while it runs, otherwise from the agy CLI.", isOn: toggle(.gemini))
+            Section {
                 DescribedToggle(title: "Session counts", detail: "\u{25CB} waiting on you, \u{25CF} working.", isOn: toggle(.sessions))
                 DescribedToggle(title: "Needs-input count", detail: "\u{25A0} and how many sessions are waiting for your answer.", isOn: toggle(.asking))
+            } header: {
+                Text("Beside the icon")
+            } footer: {
+                // The three usage switches moved to Agents, beside each agent's On switch.
+                Text("Each agent's usage column is switched on the Agents pane.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
 
             Section {
@@ -169,6 +172,57 @@ struct MenuBarPane: View {
                     .disabled(!mirrorsOn)
                 DescribedToggle(title: "Colourful icon", detail: "Off follows the menu bar's own colour, light or dark.",
                                 isOn: Binding(get: { m.colourful }, set: { m.app?.setColourfulIcon($0) }))
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+/// Settings > Agents: per agent, On (whole off when unchecked - the host stops reading
+/// it and nothing about it is shown anywhere, display included), then where its usage
+/// shows on the Mac. See Agents.swift.
+struct AgentsPane: View {
+    @ObservedObject var m: SettingsModel
+
+    func detail(_ a: AgentSwitch) -> String {
+        switch a {
+        case .claude: return "Usage (5-hour and 7-day), token counts and Claude Code sessions."
+        case .codex: return "Codex usage and sessions. Off also stops the occasional refresh turn Deckhand runs to keep Codex's figure current."
+        case .antigravity: return "Antigravity usage and sessions. Off also stops asking the Antigravity app and the agy CLI for usage."
+        }
+    }
+    func usageDetail(_ a: AgentSwitch) -> String {
+        switch a {
+        case .claude: return "5-hour figure on top, 7-day below. \u{25B2} means you are using it faster than the clock."
+        case .codex: return "Only on a Mac where Codex reports a quota."
+        case .antigravity: return "AG: Antigravity's most-used Gemini limit."
+        }
+    }
+
+    var body: some View {
+        Form {
+            ForEach(AgentSwitch.allCases, id: \.self) { a in
+                let on = m.agentsOn[a] ?? true
+                Section {
+                    DescribedToggle(title: "On", detail: detail(a),
+                                    isOn: Binding(get: { on }, set: { m.app?.setAgent(a, on: $0) }))
+                    DescribedToggle(title: "Usage beside the icon", detail: usageDetail(a),
+                                    isOn: Binding(get: { m.prefs[a.barPref] ?? a.barPref.on },
+                                                  set: { m.app?.setBarPref(a.barPref, $0) }))
+                        .disabled(!on)
+                    DescribedToggle(title: "Usage in the menu", detail: "Its rows in the menu that drops down from the icon.",
+                                    isOn: Binding(get: { m.agentsInMenu[a] ?? true },
+                                                  set: { m.app?.setAgentInMenu(a, $0) }))
+                        .disabled(!on)
+                } header: {
+                    Text(a.title)
+                } footer: {
+                    if !on {
+                        Text("Off: Deckhand does not read \(a.title) at all, and shows nothing of it in the menu bar, the menu or on the display.")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
             }
         }
         .formStyle(.grouped)

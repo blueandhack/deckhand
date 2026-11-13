@@ -431,3 +431,37 @@ func modeHostActionPreview() {
     }
     exit(0)
 }
+
+/// `--agents-preview <dir> [--dark]`: Settings > Agents rendered offscreen, once as the
+/// switches are and once with Codex OFF (set on the model only - the real
+/// ~/.claude/deckhand-agents.json is never written by a preview).
+func modeAgentsPreview() {
+    guard let i = CommandLine.arguments.firstIndex(of: "--agents-preview"),
+          CommandLine.arguments.count > i + 1 else { return }
+    let dir = CommandLine.arguments[i + 1]
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+    let dark = CommandLine.arguments.contains("--dark")
+    app.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+    NSAppearance.current = app.appearance
+    let model = SettingsModel()
+    model.pull(readStatus(), bar: nil)
+    for name in ["current", "codex-off"] {
+        if name == "codex-off" { model.agentsOn[.codex] = false }
+        let h: CGFloat = 900
+        let host = NSHostingView(rootView: AgentsPane(m: model).frame(width: SETTINGS_W, height: h))
+        host.appearance = app.appearance
+        host.frame = NSRect(x: 0, y: 0, width: SETTINGS_W, height: h)
+        let win = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        win.appearance = app.appearance
+        win.contentView = host
+        host.layoutSubtreeIfNeeded()
+        win.display()
+        guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { continue }
+        host.cacheDisplay(in: host.bounds, to: rep)
+        let out = (dir as NSString).appendingPathComponent("agents-\(name)\(dark ? "-dark" : "").png")
+        try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: out))
+        print("== \(name): \(out)")
+    }
+    exit(0)
+}

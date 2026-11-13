@@ -9,6 +9,31 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
 
 ---
 
+## A live session is never aged out (2026-11-13)
+
+User report: "when a task run on background for long time, the session counts disappear."
+`readSessions()` deleted any record with no hook event for `SESSION_STALE_MS` (20 minutes),
+on the guess that its terminal had closed without `SessionEnd`. But nothing fires a hook
+while Claude waits on a long background task, or while a session sits open and idle - so
+live sessions were deleted, and the device's rows and the menu bar's counts went with
+them. Measured on this Mac: seven `claude` processes running, two records left; and, live,
+the released 0.1.6 host deleting two sessions (`d401f2c2`, `e4689aa9`) the minute they
+crossed 20 minutes while both processes (87901, 89837) were still running.
+
+The record already carried the evidence: `inbox.socket` is `/tmp/cc-socks/<pid>.sock`, and
+`<pid>` is the Claude Code process (the hook inherits it). Every socket in that directory
+belonged to a live `claude` - it removes its socket on exit. `host/session-liveness.mjs`
+(`sessionFate()`) now decides each record:
+- socket exists AND pid alive -> **keep**, however long it has been quiet;
+- pid gone -> **end** it now (rewritten as `status: "ended"`, the same brief ghost row a
+  `SessionEnd` gives, logged as `Sessions: <id> ended - its Claude process <pid> is gone`),
+  instead of a dead session lingering for twenty minutes;
+- alive but no socket (exiting, or a reused pid), or no socket in the record at all (Codex,
+  Antigravity, an older Claude Code) -> the old 20-minute rule, unchanged.
+A record the old rule already deleted does not come back until that session's next hook
+event. `node host/agents-check.mjs` binds it (the selftest reinstates the age rule over a
+live process and must fail by name).
+
 ## The list scrolls past six on board 2 (2026-09-14)
 
 **THE SESSIONS TAB WAS NEVER CAPPED BY THE PANEL.** It was capped by the PROTOCOL:
