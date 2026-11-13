@@ -441,3 +441,47 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
   The launchd plist (`~/Library/LaunchAgents/com.deckhand.host.plist`) carries it as a
   **commented-out** entry in `EnvironmentVariables` — documented where a reader looks for it,
   and inert, because the absent variable must go on meaning `next` exactly.
+
+## Memory: what a long-running host holds, and why
+
+**Measured 2026-11-13 on the released `Deckhand Host` (Node 26.13.0) after 29 hours: 327 MB
+physical footprint, 124 MB of live JS heap after a forced GC, and 327 GB allocated over the
+run (~3 MB/s).** The heap snapshot was taken by sending the live host `SIGUSR1` (Node opens
+its inspector on `127.0.0.1:9229`), collecting over CDP, and closing the inspector again with
+`inspector.close()`. Three findings, all fixed on the same change:
+
+- **104 MB of the 124 MB was one cache holding transcript lines it never meant to keep.**
+  `makeProjectReplies()`'s `cwdCache` stores one cwd per project directory (820 on this Mac).
+  `cwdFromLines()` returned the regex capture `m[1]`, and **V8 builds a capture as a SLICED
+  string that keeps its whole parent alive** - here, a transcript's opening `queue-operation`
+  record, which embeds the entire first prompt (~131 KB each). So 820 thirty-byte paths pinned
+  ~104 MB. It lands the first time PROJECTS is opened, not gradually. `cwdFromLines()` now
+  returns a copy (a `Buffer` round trip, which guarantees a fresh flat string - `slice()` does
+  not). Measured over the real `~/.claude/projects`: `buildProjectsReply()` retained
+  **108.0 MB before, 0.2 MB after**. `project-index-check.mjs` measures retention with a real
+  `gc()` and its `--selftest` reinstates the shipped capture and fails by name.
+  **The rule this teaches: anything a long-lived structure KEEPS from a regex capture must be
+  copied.** `String.replace()` that matches nothing hands the same slice back, so a no-op
+  replace is not a copy either (measured: 10.2 MB kept for 40 results over 256 KB lines).
+  `JSON.parse` results do NOT pin their source (measured: 0.00 MB), so parsed records are safe
+  to cache.
+- **noble never forgets a peripheral.** Every BLE advertiser gets five per-UUID entries and
+  phones rotate their address every few minutes: 7,722 `Peripheral` objects after 29 hours.
+  `forgetStranger()` (index.mjs, called first in the `discover` handler) drops a disconnected
+  peripheral whose name none of the connect filters could ever accept; anything `Deckhand*`, the
+  selected device and every paired name are never touched. noble's native mac binding keeps no
+  discovered peripheral of its own (`ble_manager.mm` stores one only on connect), so nothing
+  survives on the C++ side. **Not yet observed on a running host.**
+- **The churn was the per-tick re-reads.** `readCodexSessions()` read 64 KB head + 64 KB tail of
+  all 35 Codex rollouts every 5 s and JSON-parsed every line (~4.5 MB of buffers a tick), and
+  `transcriptInfo()` read a 64 KB tail per live session per tick. Both now reuse the previous
+  result while the file's mtime AND size are unchanged (`codexRollCache`, rebuilt from each walk
+  so it cannot outgrow it; `txInfoCache`, LRU of 64). `transcriptInfo`'s cached strings go
+  through `ownString()` first, because `model` is a regex capture and would otherwise pin its
+  64 KB window, which is the first finding again. **The end-to-end allocation rate after the
+  change has not been measured on a running host.**
+
+**Not changed, and why.** The menu-bar process (`Deckhand`) measured 70 MB with a 72 MB peak over
+30 hours, i.e. flat; `heap` shows ordinary AppKit/SwiftUI objects with no single outlier. No
+`--max-old-space-size` was added to the host: `histItems()` loads a whole transcript, and the
+largest are tens of MB, so a cap low enough to matter could turn a big transcript into a crash.

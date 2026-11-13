@@ -1245,6 +1245,21 @@ function cleanTitle(raw) {
   return s.replace(/[\u0000-\u001f]+/g, " ").replace(/\s+/g, " ").trim();
 }
 
+// A string the caller may KEEP: a fresh flat copy. A regex capture is a sliced string
+// that pins the whole text it was matched in (and String.replace() that matches
+// nothing hands the same slice back), so anything cached from transcriptInfo's 64KB
+// window would hold the window. See cwdFromLines() in project-index.mjs for the 104MB
+// that cost when a cache held captures.
+const ownString = (s) => (s ? Buffer.from(s, "utf8").toString("utf8") : s);
+
+// path -> { mtimeMs, size, info }. transcriptInfo() runs for every live session on
+// every 5s tick (twice for a FOCUSed one) and for each row of a PROJSESS reply; the
+// transcript changes only when its session writes, so most of those reads returned
+// what the last one did. Keyed on mtime AND size, so any append re-reads. Bounded by
+// count because PROJSESS walks up to a project's whole transcript list.
+const TX_INFO_CACHE_MAX = 64;
+const txInfoCache = new Map();
+
 async function transcriptInfo(transcriptPath) {
   const out = { model: "", title: "", prompt: "", startedMs: 0 };
   if (!transcriptPath) return out;
@@ -1253,6 +1268,12 @@ async function transcriptInfo(transcriptPath) {
     try {
       const st = await fh.stat();
       const { size } = st;
+      const hit = txInfoCache.get(transcriptPath);
+      if (hit && hit.mtimeMs === st.mtimeMs && hit.size === size) {
+        txInfoCache.delete(transcriptPath);
+        txInfoCache.set(transcriptPath, hit); // touch: most recently used goes last
+        return { ...hit.info };
+      }
       // When the session began. Taken from the transcript's birthtime rather than adding
       // a field to the hook: a hook change would need reinstalling into ~/.claude before
       // it did anything, and this stat is already paid for.
@@ -1269,6 +1290,12 @@ async function transcriptInfo(transcriptPath) {
       // A title you set yourself outranks a generated one.
       out.title = cleanTitle(lastMatch(RE_CUSTOM_TITLE, text) || lastMatch(RE_AI_TITLE, text));
       out.prompt = cleanTitle(lastMatch(RE_LAST_PROMPT, text));
+      out.model = ownString(out.model);
+      out.title = ownString(out.title);
+      out.prompt = ownString(out.prompt);
+      txInfoCache.delete(transcriptPath);
+      txInfoCache.set(transcriptPath, { mtimeMs: st.mtimeMs, size, info: { ...out } });
+      while (txInfoCache.size > TX_INFO_CACHE_MAX) txInfoCache.delete(txInfoCache.keys().next().value);
       return out;
     } finally {
       await fh.close();
@@ -1362,7 +1389,7 @@ async function codexRolloutFiles() {
         const id = stem.slice(-36);
         try {
           const st = await fs.stat(full);
-          out.push({ id, file: full, mtimeMs: st.mtimeMs });
+          out.push({ id, file: full, mtimeMs: st.mtimeMs, size: st.size });
         } catch {
           /* vanished between readdir and stat */
         }
@@ -1432,6 +1459,16 @@ async function readCodexRollout(file) {
 // Claude side there is no endpoint to ask, so the rollouts are the only source.
 let codexRateLimits = null;
 
+// file -> { mtimeMs, size, roll }: the parsed head+tail of each rollout, from the last
+// walk. Every 5s tick used to re-read all of them - 35 rollouts on this Mac, 32 of them
+// past 64KB, so ~4.5MB of buffers decoded and JSON-parsed line by line per tick,
+// almost all of it from files nobody had touched. That churn was most of the host's
+// ~3MB/s of allocation (327GB over a 29-hour run, measured 2026-11-13), and the heap
+// grows to hold it between collections. Not the miss cache codexRolloutFiles() warns
+// about: the walk still runs every tick, a new file is a new key, and an unreadable
+// one (roll === null) is never stored, so it is retried next tick as before.
+let codexRollCache = new Map();
+
 async function readCodexSessions() {
   let files;
   try {
@@ -1441,9 +1478,15 @@ async function readCodexSessions() {
   }
 
   const out = [];
+  const seen = new Map();
   for (const f of files) {
-    const roll = await readCodexRollout(f.file);
+    // Reused while the file is byte-for-byte the size and mtime it was: a rollout is
+    // append-only, so either moves on any write. See codexRollCache.
+    const hit = codexRollCache.get(f.file);
+    const roll =
+      hit && hit.mtimeMs === f.mtimeMs && hit.size === f.size ? hit.roll : await readCodexRollout(f.file);
     if (!roll) continue;
+    seen.set(f.file, { mtimeMs: f.mtimeMs, size: f.size, roll });
     if (roll.rateLimits && (!codexRateLimits || f.mtimeMs >= codexRateLimits.at)) {
       codexRateLimits = { ...roll.rateLimits, at: f.mtimeMs };
     }
@@ -1469,6 +1512,7 @@ async function readCodexSessions() {
       agent: "codex",
     });
   }
+  codexRollCache = seen; // only files that still exist, so the cache cannot outgrow the walk
   return out;
 }
 
@@ -5116,6 +5160,35 @@ function startBleScan() {
 // refused" (unauthorized) without parsing the log; null until noble reports once.
 let bleAdapterState = null;
 
+// NOBLE NEVER FORGETS A PERIPHERAL. onDiscover() files every advertiser it hears
+// under its UUID in five maps (_peripherals, _services, _characteristics,
+// _descriptors, _discoveredPeripheralUUids) and nothing ever removes one. Phones,
+// watches and earbuds rotate their BLE address every few minutes, so each rotation
+// is a new UUID: a heap snapshot of the host after 29 hours held 7,722 Peripheral
+// objects, nearly all of them strangers (2026-11-13). The native side keeps no copy
+// of a discovered peripheral (ble_manager.mm stores one only on connect, and looks
+// it up again by identifier if it is missing), so dropping the JS entries is the
+// whole of forgetting it.
+//
+// A STRANGER is a peripheral this host could never connect to - its name passes
+// none of the discover handler's own filters below - and that noble says is not
+// connected. Anything named like ours is kept, so a pairing scan's list and the
+// auto-connect path see exactly what they saw before. Forgetting also clears the
+// "already discovered" mark, so a stranger that re-advertises is announced again,
+// which the handler ignores at the cost of one name comparison.
+function forgetStranger(peripheral, name) {
+  if (name === "Deckhand" || name.startsWith("Deckhand-")) return;
+  if (selectedDevice && name === selectedDevice) return;
+  if (name && deviceEntry(name)) return;
+  if (peripheral === blePeripheral || peripheral.state !== "disconnected") return;
+  const uuid = peripheral.uuid;
+  delete noble._peripherals[uuid];
+  delete noble._services[uuid];
+  delete noble._characteristics[uuid];
+  delete noble._descriptors[uuid];
+  delete noble._discoveredPeripheralUUids[uuid];
+}
+
 function startBle() {
   noble.on("stateChange", (state) => {
     bleAdapterState = state;
@@ -5126,6 +5199,7 @@ function startBle() {
 
   noble.on("discover", async (peripheral) => {
     const name = peripheral.advertisement.localName || "";
+    forgetStranger(peripheral, name);
     // A PAIRING SCAN LISTS, IT DOES NOT CONNECT. For its 5 seconds the normal
     // auto-connect is suppressed outright: the user is choosing from the list,
     // and grabbing one of them mid-scan would both shorten the list and connect
