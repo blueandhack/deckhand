@@ -210,10 +210,18 @@ function recordRunStart() {
 function recordRunEnd(reason) {
   const cur = readJsonSync(RUN_STATE);
   if (!cur || cur.pid !== process.pid) return; // a newer run owns the file now
+  // The heartbeat's own last tick, copied here because a clean exit now deletes
+  // the heartbeat (removeOwnHeartbeat) - and the ledger's "last tick" came from it.
+  // Without this every clean restart was logged "last tick unknown (no heartbeat
+  // left behind - /tmp cleared?)" (seen on the first 0.1.5 start). It is the
+  // heartbeat's time, NOT now: a hung host stopped by SIGTERM must still read as
+  // hung, and its heartbeat is exactly as stale as the hang.
+  const beat = readJsonSync(HOST_ALIVE);
+  const lastTickAt = beat?.pid === process.pid ? beat.at : undefined;
   try {
     writeFileSync(
       RUN_STATE,
-      JSON.stringify({ ...cur, watchdogFires, suspendResumes, endReason: reason, endedAt: Date.now() })
+      JSON.stringify({ ...cur, watchdogFires, suspendResumes, endReason: reason, endedAt: Date.now(), lastTickAt })
     );
   } catch {}
 }
