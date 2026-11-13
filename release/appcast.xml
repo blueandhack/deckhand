@@ -3,26 +3,28 @@
     <channel>
         <title>Deckhand</title>
         <item>
-            <title>0.1.6</title>
+            <title>0.1.7</title>
             <description><![CDATA[
-<p><strong>Seventh alpha of Deckhand.app.</strong> Installed 0.1.x copies update to this automatically (Sparkle); new installs download the DMG below.</p>
+<p><strong>Eighth alpha of Deckhand.app.</strong> Installed 0.1.x copies update to this automatically (Sparkle); new installs download the DMG below.</p>
 <p><strong>Requires:</strong> Apple Silicon, macOS 14 or later, and a Deckhand display (firmware is flashed from the repo with <code>./flash.sh</code>). No new firmware is needed for this release.</p>
 <h4>What's new</h4>
-<ul><li><strong>The restart log tells the truth again.</strong> Since 0.1.5, the background host clears its status file when it stops cleanly, so the menu bar shows "Stopped" at once. That also left the restart history (<code>deckhand-service.sh status</code>) saying every clean restart had "last tick unknown (... /tmp cleared?)". The host now records its last tick before it exits, so a clean restart reads as one, and a host that had stalled before it was stopped is still reported as stalled.</li></ul>
-<p>Nothing else changes from 0.1.5, including its much lower memory use.</p>
+<ul><li><strong>Sessions no longer disappear while a long task runs.</strong> A Claude Code session that went 20 minutes without activity, for example while waiting on a long background task, was dropped from the session counts and the display. Deckhand now checks whether the session's Claude process is still running: an open session stays however quiet it is, and one whose process has exited shows as ended straight away instead of lingering for 20 minutes. Codex and Antigravity sessions keep the old 20-minute rule. A session already dropped by an earlier version comes back the next time it does anything.</li><li><strong>Settings &gt; Agents: switch Claude Code, Codex or Antigravity off completely.</strong> Each agent has three switches:</li><li><strong>On.</strong> When it is off, Deckhand stops reading that agent's usage (no more background <code>agy</code> or Codex refresh runs). Its sessions are left out of the menu bar, the menu and the display, and its hooks never wait on the display.</li><li><strong>Usage beside the icon.</strong> This moved here from the Menu Bar pane.</li><li><strong>Usage in the menu.</strong> This one is new.</li></ul>
+<p>With both display switches off, the agent is still tracked and still shown on the display, but not on the Mac.</p>
 <h4>Install (new users)</h4>
-<ol><li>Download <code>Deckhand-0.1.6.dmg</code>, open it, and drag <strong>Deckhand</strong> onto <strong>Applications</strong>.</li><li>Open it from Applications and follow the setup window (it asks before touching Claude Code's settings and backs up first).</li><li>Restart Claude Code so it picks up the hooks.</li></ol>
+<ol><li>Download <code>Deckhand-0.1.7.dmg</code>, open it, and drag <strong>Deckhand</strong> onto <strong>Applications</strong>.</li><li>Open it from Applications and follow the setup window (it asks before touching Claude Code's settings and backs up first).</li><li>Restart Claude Code so it picks up the hooks.</li></ol>
+<h4>Known limits</h4>
+<p>With Claude Code off, the display's usage cards show dashes rather than disappearing; the firmware is unchanged in this release.</p>
 <h4>Still not verified</h4>
-<p>Memory use over a full day on 0.1.5 and later (measured at 13 minutes so far); the USAGE tab with Codex <strong>and</strong> Antigravity both reporting, on the display itself; anything new on the smaller (2.8") display; a Mac with no Node or Homebrew installed; a notched MacBook screen's menu bar; a first-time Bluetooth prompt from a fresh permission state; and <strong>Uninstall</strong>.</p>
+<p>The USAGE tab with Codex <strong>and</strong> Antigravity both reporting, on the display itself; anything new on the smaller (2.8") display; a Mac with no Node or Homebrew installed; a notched MacBook screen's menu bar; a first-time Bluetooth prompt from a fresh permission state; and <strong>Uninstall</strong>.</p>
 <p>Feedback and bug reports: <a href="https://github.com/blueandhack/deckhand/issues">Issues</a>.</p>
 ]]></description>
-            <pubDate>Fri, 13 Nov 2026 03:45:28 -0800</pubDate>
+            <pubDate>Fri, 13 Nov 2026 12:50:52 -0800</pubDate>
             <link>https://github.com/blueandhack/deckhand</link>
-            <sparkle:version>753</sparkle:version>
-            <sparkle:shortVersionString>0.1.6</sparkle:shortVersionString>
+            <sparkle:version>757</sparkle:version>
+            <sparkle:shortVersionString>0.1.7</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://github.com/blueandhack/deckhand/releases/download/v0.1.6/Deckhand-0.1.6.dmg" length="33074352" type="application/octet-stream" sparkle:edSignature="ScZCnUues/2c7Y/HkpUR0WRfxpzQ37cagW+bBq333PwrOJpIggkqShhwFinBrttZ9yxXanvlYoRrVE0/qO/+CA=="/>
+            <enclosure url="https://github.com/blueandhack/deckhand/releases/download/v0.1.7/Deckhand-0.1.7.dmg" length="33106456" type="application/octet-stream" sparkle:edSignature="vgbAM2HJfpCaEDv8rXJksqk5YsS6GmGdy8Q8vK1N3fXgP39kFsg/cat2PzWW8cSAZC2G5huaozRJAm37QpDYAA=="/>
         </item>
     </channel>
 </rss>
