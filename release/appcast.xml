@@ -3,25 +3,26 @@
     <channel>
         <title>Deckhand</title>
         <item>
-            <title>0.1.5</title>
+            <title>0.1.6</title>
             <description><![CDATA[
-<p><strong>Sixth alpha of Deckhand.app.</strong> Installed 0.1.x copies update to this automatically (Sparkle); new installs download the DMG below.</p>
+<p><strong>Seventh alpha of Deckhand.app.</strong> Installed 0.1.x copies update to this automatically (Sparkle); new installs download the DMG below.</p>
 <p><strong>Requires:</strong> Apple Silicon, macOS 14 or later, and a Deckhand display (firmware is flashed from the repo with <code>./flash.sh</code>). No new firmware is needed for this release.</p>
 <h4>What's new</h4>
-<ul><li><strong>Gigabytes less memory.</strong> Deckhand used to run a usage tool (ccusage) that re-read every Claude Code transcript you have on every update, about 1.25 GB each time, two at once, almost continuously. Deckhand now counts tokens itself, reading each transcript once and then only what is added: a few MB instead of about 2.5 GB.</li><li><strong>A leaner background host.</strong> It now runs with memory settings tuned for a process that mostly waits, and Settings gives memory back when you close it.</li><li><strong>Start, Stop and Restart answer you.</strong> Clicking one shows what it is doing ("Stopping Deckhand…"), then what happened ("Restarted."), or says so if nothing changed within 20 seconds. Before, nothing on screen moved.</li><li><strong>The USAGE tab's token counts are Claude's own.</strong> The 5-hour and 7-day cards are Claude's quota, so their token counts no longer include Codex. The FABLE line counts Claude Fable models only (a local model with "Fable" in its name was being counted), and the weekly count is always the current week.</li></ul>
+<ul><li><strong>The restart log tells the truth again.</strong> Since 0.1.5, the background host clears its status file when it stops cleanly, so the menu bar shows "Stopped" at once. That also left the restart history (<code>deckhand-service.sh status</code>) saying every clean restart had "last tick unknown (... /tmp cleared?)". The host now records its last tick before it exits, so a clean restart reads as one, and a host that had stalled before it was stopped is still reported as stalled.</li></ul>
+<p>Nothing else changes from 0.1.5, including its much lower memory use.</p>
 <h4>Install (new users)</h4>
-<ol><li>Download <code>Deckhand-0.1.5.dmg</code>, open it, and drag <strong>Deckhand</strong> onto <strong>Applications</strong>.</li><li>Open it from Applications and follow the setup window (it asks before touching Claude Code's settings and backs up first).</li><li>Restart Claude Code so it picks up the hooks.</li></ol>
+<ol><li>Download <code>Deckhand-0.1.6.dmg</code>, open it, and drag <strong>Deckhand</strong> onto <strong>Applications</strong>.</li><li>Open it from Applications and follow the setup window (it asks before touching Claude Code's settings and backs up first).</li><li>Restart Claude Code so it picks up the hooks.</li></ol>
 <h4>Still not verified</h4>
-<p>The new memory figures on a long-running copy of this release (they were measured on the code, not yet on the installed app); the USAGE tab with Codex <strong>and</strong> Antigravity both reporting, on the display itself; anything new on the smaller (2.8") display; a Mac with no Node or Homebrew installed; a notched MacBook screen's menu bar; a first-time Bluetooth prompt from a fresh permission state; and <strong>Uninstall</strong>.</p>
+<p>Memory use over a full day on 0.1.5 and later (measured at 13 minutes so far); the USAGE tab with Codex <strong>and</strong> Antigravity both reporting, on the display itself; anything new on the smaller (2.8") display; a Mac with no Node or Homebrew installed; a notched MacBook screen's menu bar; a first-time Bluetooth prompt from a fresh permission state; and <strong>Uninstall</strong>.</p>
 <p>Feedback and bug reports: <a href="https://github.com/blueandhack/deckhand/issues">Issues</a>.</p>
 ]]></description>
-            <pubDate>Fri, 13 Nov 2026 03:26:26 -0800</pubDate>
+            <pubDate>Fri, 13 Nov 2026 03:45:28 -0800</pubDate>
             <link>https://github.com/blueandhack/deckhand</link>
-            <sparkle:version>749</sparkle:version>
-            <sparkle:shortVersionString>0.1.5</sparkle:shortVersionString>
+            <sparkle:version>753</sparkle:version>
+            <sparkle:shortVersionString>0.1.6</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://github.com/blueandhack/deckhand/releases/download/v0.1.5/Deckhand-0.1.5.dmg" length="33075367" type="application/octet-stream" sparkle:edSignature="pckJq58uFl0xb2Gt2dzCwRXHgV6qGkTrTLv6FyW144WNx6wCwkPcEyV81w1VcHpGEAWn+LUEvvEv2SWGBEnhDw=="/>
+            <enclosure url="https://github.com/blueandhack/deckhand/releases/download/v0.1.6/Deckhand-0.1.6.dmg" length="33074352" type="application/octet-stream" sparkle:edSignature="ScZCnUues/2c7Y/HkpUR0WRfxpzQ37cagW+bBq333PwrOJpIggkqShhwFinBrttZ9yxXanvlYoRrVE0/qO/+CA=="/>
         </item>
     </channel>
 </rss>
