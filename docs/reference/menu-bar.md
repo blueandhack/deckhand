@@ -65,6 +65,27 @@ about 1s. Measured after the change: a SIGSTOPped host replaced in **51s** (12s 
 heartbeat to count as stale, the 30s wait, ~6s for `kickstart -k` to clear a stopped
 process); a `kill -9` replaced by launchd in **1s**.
 
+**Start, Stop and Restart show what they are doing, then what happened** (2026-11-13, user
+report: "when I click restart, or stop, the response is none"). Two causes. "Running" is
+the heartbeat's AGE (< 12s), so a stopped host looked alive for up to 12s, and a restarted
+one writes the same file as the old one - nothing on screen changed at all. And
+`stopHost()` ran `pkill`/`unregister()` on the main thread, freezing the window that should
+have answered. Now (`App/HostAction.swift`): a click enters an in-progress state at once -
+a spinner and "Stopping Deckhand..." in Settings, Restart/Stop disabled, a disabled
+"Stopping Deckhand..." menu item - the work runs off the main thread, and the heartbeat is
+polled every 0.5s until the change is REAL: stopped = no live heartbeat, started = a live
+one, restarted = a live one from a different **`pid`** (a new heartbeat field). The result
+shows for 4s ("Restarted."); no change within 20s says so in orange, for 30s, with the log
+as the next step. The poll timer is on the run loop's `.common` modes, because a
+`scheduledTimer` does not fire while a menu is open. The host side: on SIGTERM/SIGINT/SIGHUP
+it deletes the heartbeat if it is still ITS own (`removeOwnHeartbeat()`), so a stop reads as
+stopped at once rather than after 12s; the session hook already treats a missing heartbeat
+as "no display", which is now simply true sooner. `--host-action-preview <dir> [--dark]`
+renders the real General pane and prints the real menu lines in all six states without
+starting or stopping anything - looked at for this change. **Not yet measured on a running
+app:** the click-to-"Stopped" time with the heartbeat removal live, and the restart's pid
+change, both need a build of this code.
+
 **`SMAppService.status` IS A SYNCHRONOUS XPC CALL AND MUST NOT RUN ON THE MAIN THREAD.**
 Measured with `sample` on the released app: ~35ms of every 3s refresh blocked in
 `+[SMAppService sendSMDRequest:reply:error:]` (the agent's status and the login item's),
@@ -564,8 +585,9 @@ directory (used verbatim) and remains the test seam. launchd's own stdout/stderr
 deliberately go to `~/Library/Logs/` instead, because launchd opens those at SPAWN time
 and a missing directory would stop the job starting rather than merely lose its log.
 
-**`host/index.mjs`** polls every `POLL_INTERVAL_MS` (5000ms) for: `ccusage blocks --active`
-and `ccusage weekly` (token counts), the rate-limit cache file, and the sessions directory
+**`host/index.mjs`** polls every `POLL_INTERVAL_MS` (5000ms) for: the token counts (`ccusage
+blocks --active` and `ccusage weekly` until 2026-11-13; now `host/claude-tokens.mjs`, see
+host-runtime.md "Memory"), the rate-limit cache file, and the sessions directory
 (pruning any session file older than `SESSION_STALE_MS`, since a closed terminal may never
 fire `SessionEnd`). It assembles one JSON object and writes it to USB (if `usbPort` is set) and
 BLE (if `bleCharacteristic` is set) independently every tick, and refreshes the

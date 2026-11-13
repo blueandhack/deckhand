@@ -274,10 +274,11 @@ say "Signing with $IDENTITY"
 sign() { codesign --force --options runtime --timestamp --sign "$IDENTITY" "$@"; }
 # a) EVERY Mach-O in the host's node_modules, not just *.node addons: the addons so
 #    library validation can stay ON for Node (host.entitlements), and executables too -
-#    ccusage runs a native binary of its own (@ccusage/ccusage-darwin-arm64/bin/ccusage),
-#    which the first notarization rejected unsigned. npm also stages that binary 0644
-#    and ccusage's cli.js chmods it on first run - a write into a signed, installed
-#    bundle that may not be writable - so it is made executable here, before signing.
+#    ccusage shipped a native binary of its own, which the first notarization rejected
+#    unsigned, and npm staged it 0644 (its cli.js chmodded it on first run, a write into
+#    a signed bundle). ccusage is no longer a dependency (2026-11-13, host/claude-
+#    tokens.mjs), but the loop stays general: any executable a dependency ships is
+#    made executable and signed here rather than found by the notary.
 while IFS= read -r -d '' f; do
   ft="$(file -b "$f")"
   case "$ft" in *Mach-O*) ;; *) continue ;; esac

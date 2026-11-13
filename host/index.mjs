@@ -1,4 +1,4 @@
-// Deckhand host script: polls local Claude Code usage (via ccusage) and streams
+// Deckhand host script: polls local Claude Code usage (host/claude-tokens.mjs) and streams
 // it as JSON lines to the ELEGOO ESP32 display, over USB serial and/or BLE -
 // whichever the device currently has connected. The two transports are
 // independent: this script always tries both, and sends to whichever are
@@ -19,7 +19,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import os from "node:os";
 import fs from "node:fs/promises";
-import { createWriteStream, createReadStream, renameSync, statSync, appendFileSync, readFileSync, writeFileSync, mkdirSync, existsSync, realpathSync } from "node:fs";
+import { createWriteStream, createReadStream, renameSync, statSync, appendFileSync, readFileSync, writeFileSync, mkdirSync, existsSync, realpathSync, unlinkSync } from "node:fs";
 import readline from "node:readline";
 import crypto from "node:crypto";
 import { SerialPort } from "serialport";
@@ -47,7 +47,8 @@ import { resolveMacEmoji } from "./mac-emoji.mjs";
 import { lineTargetsUs, stripAddress } from "./line-address.mjs";
 import { formatRunStartLine } from "./run-ledger.mjs";
 import { classifyStall, stallMessage, makeAwaitTracker, describePending } from "./watchdog.mjs";
-import { pickTokens, describeChildError, CCUSAGE_TIMEOUT_MS } from "./ccusage.mjs";
+import { pickTokens } from "./ccusage.mjs";
+import { makeClaudeTokens } from "./claude-tokens.mjs";
 // The wireless-pairing derivations. Pure functions with no I/O and no clock,
 // pinned byte for byte against pairing.ino by pair-crypto-check.mjs - do not
 // reimplement any of them here.
@@ -85,7 +86,6 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // process.execPath is the node inside DeckhandBLE.app, so it always exists and
 // never depends on PATH or on which node version happens to be selected - the
 // same reason the mic decoder is spawned this way.
-const CCUSAGE_JS = path.join(__dirname, "node_modules", "ccusage", "src", "cli.js");
 
 // When launched via `open DeckhandBLE.app` (needed for the Bluetooth permission
 // prompt - see DeckhandBLE.app/Contents/Info.plist), stdout/stderr aren't
@@ -218,9 +218,23 @@ function recordRunEnd(reason) {
   } catch {}
 }
 
+// A CLEAN EXIT TAKES ITS HEARTBEAT WITH IT. The menu bar reads "running" as "the
+// heartbeat was written in the last 12s", so a host stopped by Stop or Restart
+// used to look alive for up to 12s after it was gone - the window kept saying
+// Running beside a Stop button, and a click read as having done nothing. Only OUR
+// heartbeat is removed (its `pid`): a restart's new host may already have written
+// its own. The session hook reads the same file, and a missing heartbeat already
+// means "no display connected" to it, which is now simply true sooner.
+function removeOwnHeartbeat() {
+  try {
+    if (readJsonSync(HOST_ALIVE)?.pid === process.pid) unlinkSync(HOST_ALIVE);
+  } catch {}
+}
+
 for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"]) {
   process.on(sig, () => {
     recordRunEnd(sig);
+    removeOwnHeartbeat();
     process.exit(0);
   });
 }
@@ -870,18 +884,6 @@ function expectedHmac(deviceName, nonce, pid, idx) {
     .update(`${nonce}:${pid}:${idx}`)
     .digest("hex")
     .slice(0, 16);
-}
-
-async function runCcusage(args) {
-  const { stdout } = await execFileAsync(process.execPath, [CCUSAGE_JS, ...args, "--json"], {
-    maxBuffer: 10 * 1024 * 1024,
-    // This runs on EVERY tick, so an un-timed hang here stalls the whole poll
-    // loop - the same failure class as the BLE write, just with a child process
-    // instead of a callback. execFile's timeout also kills the child, so a slow
-    // ccusage cannot accumulate orphans one per tick.
-    timeout: CCUSAGE_TIMEOUT_MS,
-  });
-  return JSON.parse(stdout);
 }
 
 async function readRateLimits() {
@@ -2750,61 +2752,39 @@ async function readSessions() {
   };
 }
 
-function sumModelTokens(mb) {
-  return (
-    (mb.inputTokens ?? 0) +
-    (mb.outputTokens ?? 0) +
-    (mb.cacheCreationTokens ?? 0) +
-    (mb.cacheReadTokens ?? 0)
-  );
-}
-
-// Last good token counts, so a ccusage failure costs the COUNT and not the
-// tick - see host/ccusage.mjs for why Promise.all was the wrong combinator.
+// Last good token counts, so a failed read costs the COUNT and not the tick -
+// see host/ccusage.mjs (named for the tool that used to supply them) for why.
 let lastTokens = null;
 let tokensStaleLogged = false;
 
-// Never rejects: a failed read yields null and the tick carries on without it.
-async function tryCcusage(args) {
-  try {
-    return await runCcusage(args);
-  } catch (err) {
-    console.error(`ccusage ${args.join(" ")}: ${describeChildError(err)}`);
-    return null;
-  }
-}
-
-// ccusage runs BESIDE the tick, never inside it. The tick used to AWAIT both
-// calls, and making them unable to reject (tryCcusage) fixed what a timeout
-// threw away but not how long the tick WAITED for it: up to CCUSAGE_TIMEOUT_MS.
-// The heartbeat is written at the top of each tick, so a 20s wait put the next
-// write 25s after the last - past the menu bar's 12s "is the host alive" bar -
-// and the menu flipped to Stopped (hollow boat, no figures) and back, which
-// reads exactly like the host restarting. Measured 2026-11-07 off the reading
-// ages in deckhand-launchd.out: tick gaps of 12-25s, CAPPED AT 25 (= 5s + the
-// 20s timeout), in clusters; and ZERO in the 34.8h after ccusage began failing
-// instantly at launch (a broken dylib), against seven in the 34.8h before.
+// THE TOKEN COUNTS ARE READ HERE, NOT BY CCUSAGE (host/claude-tokens.mjs). ccusage
+// re-read every transcript on every run - 1.3 GB here - and peaked at ~1.25 GB per
+// run; this host ran its two reports in parallel, back to back, so ~2.5 GB was
+// resident almost all the time (measured 2026-11-13) for three numbers. The reader
+// reads each transcript once and then only what is appended: ~2 s and a 43 MB peak
+// for the first pass, ~50 ms a tick after, ~3 MB kept.
 //
-// SINGLE-FLIGHT: a tick starts a run only when none is in flight, and every
-// tick uses the most recent FINISHED result. A slow ccusage now costs token
-// freshness (a count at most one run old) and no longer the tick; a fast one
-// behaves as before, refreshing every tick. The FIRST tick still waits, so a
-// fresh host publishes measured counts rather than logging "nothing measured
-// yet" for one tick.
-let ccusageLatest = { blocks: null, weekly: null };
-let ccusageInFlight = null;
-let ccusageEverFinished = false;
-function kickCcusage() {
-  if (ccusageInFlight) return ccusageInFlight;
-  ccusageInFlight = Promise.all([tryCcusage(["blocks", "--active"]), tryCcusage(["weekly"])])
-    .then(([blocks, weekly]) => {
-      ccusageLatest = { blocks, weekly };
-      ccusageEverFinished = true;
-    })
+// Still BESIDE the tick and single-flight, for the reason ccusage was: the tick
+// writes the heartbeat, and a slow read must cost token freshness, never the tick
+// (a 25s tick gap once flipped the menu bar to Stopped). The FIRST tick waits, so a
+// fresh host publishes measured counts rather than "nothing measured yet".
+const claudeTokens = makeClaudeTokens({ root: PROJECTS_DIR });
+let tokensLatest = null; // the last read's three figures; null when it failed
+let tokensInFlight = null;
+let tokensEverFinished = false;
+function kickTokens() {
+  if (tokensInFlight) return tokensInFlight;
+  tokensInFlight = claudeTokens
+    .read()
+    .then(
+      (v) => { tokensLatest = v; },
+      (err) => { tokensLatest = null; console.error(`Token counts: read failed: ${err?.stack || err}`); }
+    )
     .finally(() => {
-      ccusageInFlight = null;
+      tokensEverFinished = true;
+      tokensInFlight = null;
     });
-  return ccusageInFlight;
+  return tokensInFlight;
 }
 
 // Antigravity usage (host/gemini-quota.mjs), from one of TWO sources, best first:
@@ -2856,41 +2836,26 @@ function geminiQuotaLine() {
 
 async function readUsage() {
   kickGeminiQuota();
-  // ccusage is NOT on this list any more - see kickCcusage above. The rest are
+  // The token counts are NOT on this list - see kickTokens above. The rest are
   // still gathered together and none of them can reject the tick. countInventory()
   // is readdir-only (no stat, no content read - see
   // host/project-replies.mjs) so it is cheap enough to sit on this list too.
   // The full project listing and a project's own session list are NOT built
   // here, deliberately - see the note beside hostSecondsSinceMidnight below.
-  const ccusageRun = kickCcusage();
-  if (!ccusageEverFinished) await track("ccusage:first", ccusageRun);
+  const tokensRun = kickTokens();
+  if (!tokensEverFinished) await track("tokens:first", tokensRun);
   const [rateLimits, sessions, projectInventory] = await Promise.all([
     track("readRateLimits", readRateLimits()),
     track("readSessions", readSessions()),
     track("countInventory", countInventory()),
   ]);
-  // A finished run's result is reused tick after tick until the next one lands.
-  // A null half is a FAILED call, which pickTokens below carries over as stale.
-  const { blocks: blocksResp, weekly: weeklyResp } = ccusageLatest;
-
-  const activeBlock = blocksResp?.blocks?.find((b) => b.isActive);
-  const currentWeek = weeklyResp?.weekly?.at(-1) ?? null;
   const fiveHour = rateLimits.five_hour;
   const sevenDay = rateLimits.seven_day;
-  const fableBreakdown = (currentWeek?.modelBreakdowns ?? []).find((mb) =>
-    /fable/i.test(mb.modelName)
-  );
 
-  // A missing reading must not read as a measured zero, so each field is null
-  // when its call failed and pickTokens decides between fresh and last-known.
-  const tokens = pickTokens(
-    {
-      sessionTokens: blocksResp ? (activeBlock?.totalTokens ?? 0) : null,
-      weekAllTokens: weeklyResp ? (currentWeek?.totalTokens ?? 0) : null,
-      weekFableTokens: weeklyResp ? (fableBreakdown ? sumModelTokens(fableBreakdown) : 0) : null,
-    },
-    lastTokens
-  );
+  // A finished read is reused tick after tick until the next one lands. A failed
+  // read is null, and pickTokens carries the last good figures over as stale rather
+  // than publishing a measured-looking zero.
+  const tokens = pickTokens(tokensLatest ?? {}, lastTokens);
   if (!tokens.stale) lastTokens = { ...tokens };
   // Logged on the EDGE, not per tick: these run every 5s and a stale-token
   // line each time would bury the tick lines it sits between.
@@ -6172,6 +6137,9 @@ async function tick(generation = tickGeneration) {
             connected: usbLinks.length > 0 || !!bleCharacteristic,
             remoteAnswer,
             at: Date.now(),
+            // Which process wrote this: the menu bar's Restart is done when it changes,
+            // and removeOwnHeartbeat() deletes the file only while it is still ours.
+            pid: process.pid,
             ble: bleAdapterState,
             // `device` = who we're actually talking to (falls back to the choice);
             // `devices`/`selected` let the menu bar render the picker without ever

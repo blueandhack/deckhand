@@ -10,23 +10,29 @@ extension AppDelegate {
             // one that hangs, so a stale heartbeat gets a kill-and-restart.
             run("/bin/launchctl", ["kickstart", "-k", "gui/\(getuid())/\(agentLabel)"])
         case .requiresApproval:
-            let a = NSAlert()
-            a.messageText = "Deckhand is turned off in Login Items"
-            a.informativeText = "macOS will not run Deckhand's background host until it is allowed again in System Settings \u{203A} General \u{203A} Login Items."
-            a.addButton(withTitle: "Open Login Items")
-            a.addButton(withTitle: "Cancel")
-            NSApp.activate(ignoringOtherApps: true)
-            if a.runModal() == .alertFirstButtonReturn { SMAppService.openSystemSettingsLoginItems() }
+            // Start may run off the main thread (beginHostAction); an alert may not.
+            DispatchQueue.main.async {
+                let a = NSAlert()
+                a.messageText = "Deckhand is turned off in Login Items"
+                a.informativeText = "macOS will not run Deckhand's background host until it is allowed again in System Settings \u{203A} General \u{203A} Login Items."
+                a.addButton(withTitle: "Open Login Items")
+                a.addButton(withTitle: "Cancel")
+                NSApp.activate(ignoringOtherApps: true)
+                if a.runModal() == .alertFirstButtonReturn { SMAppService.openSystemSettingsLoginItems() }
+            }
         default:
             // Clear a stray host first (setup's Bluetooth-prompt one, if its window
             // was closed), or the agent's host would fight it for the port and BLE.
             _ = runCapture("/usr/bin/pkill", ["-f", bundledHostScript])
             do { try svc.register() } catch {
-                let a = NSAlert()
-                a.messageText = "Couldn't start Deckhand's background host"
-                a.informativeText = error.localizedDescription
-                NSApp.activate(ignoringOtherApps: true)
-                a.runModal()
+                let text = error.localizedDescription
+                DispatchQueue.main.async {
+                    let a = NSAlert()
+                    a.messageText = "Couldn't start Deckhand's background host"
+                    a.informativeText = text
+                    NSApp.activate(ignoringOtherApps: true)
+                    a.runModal()
+                }
             }
         }
         ServiceState.shared.refresh()

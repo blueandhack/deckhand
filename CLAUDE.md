@@ -424,6 +424,7 @@ node host/gemini-sessions-check.mjs                     # Antigravity rows on th
 node host/gemini-quota-check.mjs                        # Antigravity usage: the app's local server, or `agy -p /usage`
 node host/session-inbox-check.mjs                       # the inbox frame, over a stand-in socket
 node host/{host-tag,mac-emoji,run-ledger,watchdog,ccusage}-check.mjs
+node host/claude-tokens-check.mjs [--live]              # the USAGE token counts: scanner = JSON.parse, reader = brute force
 node host/whisper-prompt-check.mjs                      # the dictation vocabulary, vs whisper's SILENT prompt cap
 node host/whisper-prompt-check.mjs --live               # ... and whether its leading terms still bite
 node firmware/board-baseline.mjs --doc-check           # the quote above vs the JSON

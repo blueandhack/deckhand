@@ -1,4 +1,5 @@
 import Cocoa
+import SwiftUI
 #if SPARKLE
 import Sparkle
 #endif
@@ -364,4 +365,69 @@ func modeIconPreview() {
             ? CommandLine.arguments[i + 1] : "icon-preview.png")
         exit(0)
     }
+}
+
+/// --host-action-preview <dir> [--dark]: the General pane and the status menu in each
+/// state Start/Stop/Restart can put them in (HostAction.swift), rendered from the real
+/// GeneralPane and the real menu with only the action and its note forced. Those states
+/// otherwise exist only for the seconds after a real click - which stops or restarts
+/// the host - so this is the way to look at them. Starts, stops and writes nothing but
+/// the PNGs and a text dump of each menu.
+func modeHostActionPreview() {
+    guard let i = CommandLine.arguments.firstIndex(of: "--host-action-preview"),
+          CommandLine.arguments.count > i + 1 else { return }
+    let dir = CommandLine.arguments[i + 1]
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+    let dark = CommandLine.arguments.contains("--dark")
+    app.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+    NSAppearance.current = app.appearance
+    let d = AppDelegate()
+    d.dryRun = true
+    ServiceState.shared.refreshNow()
+    let menu = d.buildMenu()
+    let model = SettingsModel()
+    model.app = d
+    let now = Date()
+    let pid = readStatus().pid
+    let cases: [(String, HostAction?, HostActionNote?)] = [
+        ("0-idle", nil, nil),
+        ("1-stopping", HostAction(kind: .stopping, since: now, fromPid: pid), nil),
+        ("2-restarting", HostAction(kind: .restarting, since: now, fromPid: pid), nil),
+        ("3-starting", HostAction(kind: .starting, since: now, fromPid: nil), nil),
+        ("4-restarted", nil, HostActionNote(text: HostActionKind.restarting.doneText, failed: false, until: now.addingTimeInterval(60))),
+        ("5-stop-failed", nil, HostActionNote(text: HostActionKind.stopping.failedText, failed: true, until: now.addingTimeInterval(60))),
+    ]
+    for (name, action, note) in cases {
+        d.hostAction = action
+        d.hostActionNote = note
+        d.refresh()
+        model.pull(readStatus(), bar: nil)
+        let host = NSHostingView(rootView: GeneralPane(m: model).frame(width: SETTINGS_W, height: 230))
+        host.appearance = app.appearance
+        host.frame = NSRect(x: 0, y: 0, width: SETTINGS_W, height: 230)
+        let win = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        win.appearance = app.appearance
+        win.contentView = host
+        host.layoutSubtreeIfNeeded()
+        win.display()
+        guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { continue }
+        host.cacheDisplay(in: host.bounds, to: rep)
+        let img = NSImage(size: host.bounds.size)
+        img.lockFocus()
+        NSColor.windowBackgroundColor.setFill()
+        NSRect(origin: .zero, size: host.bounds.size).fill()
+        rep.draw(in: NSRect(origin: .zero, size: host.bounds.size))
+        img.unlockFocus()
+        let out = (dir as NSString).appendingPathComponent("host-action-\(name).png")
+        if let tiff = img.tiffRepresentation, let bmp = NSBitmapImageRep(data: tiff) {
+            try? bmp.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: out))
+        }
+        print("== \(name): \(out)")
+        // The status menu's first lines and its Start/Stop item, as text.
+        for item in menu.items where !item.isHidden && (item === d.startStop || item === d.statusLine || item === d.deviceLine) {
+            print("   menu: \(item.attributedTitle?.string ?? item.title)\(item.isEnabled ? "" : "  [disabled]")")
+        }
+    }
+    exit(0)
 }

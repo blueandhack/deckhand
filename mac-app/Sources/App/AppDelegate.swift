@@ -45,6 +45,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // do from it: start or stop, pair, and open Settings.
     let settingsWindowItem = NSMenuItem(title: "Settings\u{2026}", action: #selector(openSettings), keyEquivalent: ",")
     var settingsWindow: SettingsWindowController?
+    /// The pane Settings showed when it was last closed (SettingsWindowController.windowWillClose).
+    var lastSettingsPane = 0
     // Wireless pairing. ONE ROW, and it opens a window rather than a submenu - see
     // the note above PAIR_TICK_SEC (Pairing/PairWindow.swift) for why a menu cannot hold this flow. It is
     // never dimmed: with no host, or against a host too old to pair, the WINDOW
@@ -81,6 +83,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // reboot). downSince/lastRestart debounce the restart.
     var downSince: Date?
     var lastRestart = Date.distantPast
+    // A Start/Stop/Restart in flight, and what the last one came to (HostAction.swift).
+    var hostAction: HostAction?
+    var hostActionNote: HostActionNote?
+    var hostActionTimer: Timer?
     /// launchd refused a restart (no such job); see watchdog.
     var watchdogGaveUp = false
     // --menu-dump / --menu-preview build the real menu and refresh it. Neither may
@@ -306,7 +312,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         // ---- the connection: what, and how ----
         let device = s.device ?? s.selected
-        if !s.running {
+        if let a = hostAction {
+            statusLine.attributedTitle = menuTitle([("\u{25CC}  ", F_BODY, .secondaryLabelColor),
+                                                    (a.kind.progressTitle, F_BOLD, .labelColor)])
+            deviceLine.attributedTitle = menuTitle([("      " + a.kind.progressDetail, F_SMALL, .secondaryLabelColor)])
+        } else if let n = currentHostActionNote, n.failed {
+            statusLine.attributedTitle = menuTitle([("\u{26A0}  ", F_BODY, .systemOrange),
+                                                    (s.running ? "Deckhand is running" : "Deckhand is stopped", F_BOLD, .labelColor)])
+            deviceLine.attributedTitle = menuTitle([("      " + n.text, F_SMALL, .systemOrange)])
+        } else if !s.running {
             statusLine.attributedTitle = menuTitle([("\u{25E6}  ", F_BODY, .secondaryLabelColor),
                                                     ("Deckhand is stopped", F_BOLD, .labelColor)])
             deviceLine.attributedTitle = menuTitle([("      The display is not being updated.", F_SMALL, .secondaryLabelColor)])
@@ -456,7 +470,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             voiceSep.isHidden = true
         }
         rebuildPairRow(s)
-        startStop.title = s.running ? "Stop Deckhand" : "Start Deckhand"
+        startStop.title = hostAction?.kind.progressTitle ?? (s.running ? "Stop Deckhand" : "Start Deckhand")
+        startStop.isEnabled = hostAction == nil
         // Naming the supervisor matters: with launchd in charge, a stop is permanent
         // until Start, whereas unsupervised the app's own watchdog may bring it back.
         startStop.toolTip = hostSupervisionText()
@@ -694,15 +709,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc func toggleHost() {
+        // One at a time: a second click while the first is still landing would
+        // otherwise reverse it (Stop, then Start against the old heartbeat).
+        guard hostAction == nil else { return }
         if readStatus().running {
             wantRunning = false
             downSince = nil
-            stopHost()
+            beginHostAction(.stopping) { [weak self] in self?.stopHost() }
         } else {
             wantRunning = true
             lastRestart = Date() // don't let the watchdog also fire right now
             downSince = nil
-            startHost()
+            beginHostAction(.starting) { [weak self] in self?.startHost() }
         }
     }
 
@@ -840,7 +858,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func showSettings(pane: SettingsPane?) {
-        if settingsWindow == nil { settingsWindow = SettingsWindowController(app: self) }
+        if settingsWindow == nil {
+            settingsWindow = SettingsWindowController(app: self)
+            // A fresh controller after a close: put back the pane that was showing.
+            if pane == nil { settingsWindow?.tabs.selectedTabViewItemIndex = lastSettingsPane }
+        }
         settingsWindow?.model.pull(readStatus(), bar: statusItem?.button)
         ServiceState.shared.refresh { [weak self] in
             self?.settingsWindow?.model.pullServices()
