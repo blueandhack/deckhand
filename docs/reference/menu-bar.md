@@ -86,6 +86,39 @@ starting or stopping anything - looked at for this change. **Not yet measured on
 app:** the click-to-"Stopped" time with the heartbeat removal live, and the restart's pid
 change, both need a build of this code.
 
+**Settings > Agents: each agent can be switched off WHOLE** (2026-11-13, user report: "if
+turn off cc or codex or agy, you should complete turn off"). The "Claude usage / Codex
+usage / Antigravity usage" switches used to hide only that service's column beside the
+icon: the menu still listed it, the display still showed it, and the host kept polling it
+(Antigravity's CLI fallback is a 96-176 MB process every five minutes; Codex's refresh is a
+real model turn). The user asked for "two switch, whole off, and no display, display on
+menu, display on dropdown", so the Agents pane (`AgentsPane`, `App/Agents.swift`) has three
+per agent:
+- **On** - written to `~/.claude/deckhand-agents.json`, which the HOST re-reads every tick
+  (`host/agents.mjs`, one stat a tick). Off: no polling at all (Claude: no OAuth call, no
+  token read, no rate-limit read; Codex: no rollout walk, no refresh turn; Antigravity: no
+  app-server ask, no `agy` spawn, no index query), its cached readings dropped, its
+  sessions filtered out of what the host publishes - so it is gone from the bar, the menu
+  AND the display - and the heartbeat's new `agents` field makes its hook never publish an
+  ask or wait on the display. A FILE rather than a command, because the host must honour
+  it whether or not the app is running and a command sent while the host is down is lost.
+  Absent, unparseable, or a non-boolean value = ON (`parseAgents`), the behaviour of every
+  build before it.
+- **Usage beside the icon** - the old `BarPref` (`barShowUsage`/`barShowCodex`/
+  `barShowGemini`), moved here from the Menu Bar pane.
+- **Usage in the menu** - new, `menuShow.<agent>` in UserDefaults: the agent's usage rows
+  in the dropdown. Sessions are not affected by it; they follow **On**.
+Measured with the branch's host running against this Mac's real data (the bundled host's
+copy with only the changed files overlaid, since the signed helper refuses the repo's
+unsigned native modules): Codex + Antigravity off -> `Agents: OFF - codex, antigravity` in
+the log and the next tick without `gmq=`; Claude off -> `5h=?%` and `sessions(0)`; all on ->
+both back on the next tick, except Antigravity's usage, which waited out its once-a-minute
+ask stamp - so switching it off now resets that stamp. `node host/agents-check.mjs` (with
+`--selftest`, 17 faults) binds the rules and every gate. `--agents-preview <dir> [--dark]`
+renders the pane offscreen. **On the display, a Claude that is off reads as a Mac that has
+never measured Claude** (dashes on the USAGE cards); the firmware was not changed and has no
+"switched off" state of its own. Not yet clicked through on a running build of the app.
+
 **`SMAppService.status` IS A SYNCHRONOUS XPC CALL AND MUST NOT RUN ON THE MAIN THREAD.**
 Measured with `sample` on the released app: ~35ms of every 3s refresh blocked in
 `+[SMAppService sendSMDRequest:reply:error:]` (the agent's status and the login item's),
@@ -589,7 +622,9 @@ and a missing directory would stop the job starting rather than merely lose its 
 blocks --active` and `ccusage weekly` until 2026-11-13; now `host/claude-tokens.mjs`, see
 host-runtime.md "Memory"), the rate-limit cache file, and the sessions directory
 (pruning any session file older than `SESSION_STALE_MS`, since a closed terminal may never
-fire `SessionEnd`). It assembles one JSON object and writes it to USB (if `usbPort` is set) and
+fire `SessionEnd` - **corrected 2026-11-13:** only when there is no better evidence; a
+Claude session whose process is still running is kept however quiet it is, see
+sessions-and-asks.md "A live session is never aged out"). It assembles one JSON object and writes it to USB (if `usbPort` is set) and
 BLE (if `bleCharacteristic` is set) independently every tick, and refreshes the
 `/tmp/deckhand-<uid>/host-alive` heartbeat (`connected` + `remoteAnswer`) that gates whether the hook
 waits for a remote answer at all. The **device→host

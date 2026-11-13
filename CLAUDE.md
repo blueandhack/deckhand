@@ -423,6 +423,7 @@ node host/{codex-refresh,line-address,session-lookup}-check.mjs
 node host/gemini-sessions-check.mjs                     # Antigravity rows on the device, and the field-by-field merge
 node host/gemini-quota-check.mjs                        # Antigravity usage: the app's local server, or `agy -p /usage`
 node host/session-inbox-check.mjs                       # the inbox frame, over a stand-in socket
+node host/agents-check.mjs                              # Settings > Agents (whole off) and session liveness
 node host/{host-tag,mac-emoji,run-ledger,watchdog,ccusage}-check.mjs
 node host/claude-tokens-check.mjs [--live]              # the USAGE token counts: scanner = JSON.parse, reader = brute force
 node host/whisper-prompt-check.mjs                      # the dictation vocabulary, vs whisper's SILENT prompt cap

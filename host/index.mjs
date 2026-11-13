@@ -49,6 +49,8 @@ import { formatRunStartLine } from "./run-ledger.mjs";
 import { classifyStall, stallMessage, makeAwaitTracker, describePending } from "./watchdog.mjs";
 import { pickTokens } from "./ccusage.mjs";
 import { makeClaudeTokens } from "./claude-tokens.mjs";
+import { makeAgentSwitches, agentOf, describeOff } from "./agents.mjs";
+import { sessionFate, pidAlive, socketPid } from "./session-liveness.mjs";
 // The wireless-pairing derivations. Pure functions with no I/O and no clock,
 // pinned byte for byte against pairing.ino by pair-crypto-check.mjs - do not
 // reimplement any of them here.
@@ -339,7 +341,11 @@ const OAUTH_CACHE_FILE = path.join(RUNTIME_DIR, "oauth-usage.json");
 // (status: "ended"), not deleted, on SessionEnd - see the hook for why. This is
 // what powers the SESSIONS tab.
 const SESSIONS_DIR = path.join(os.homedir(), ".claude", "deckhand-sessions");
-const SESSION_STALE_MS = 20 * 60 * 1000; // 20 min with no update = treat as dead
+// 20 min with no update = treat as dead - but ONLY for a record with no better
+// evidence. A Claude session whose process is still running is kept however quiet it
+// is, and one whose process has gone is ended at once (host/session-liveness.mjs):
+// this guess used to delete live sessions waiting on long background tasks.
+const SESSION_STALE_MS = 20 * 60 * 1000;
 // How long an ENDED record survives before this host deletes its file, which is
 // what makes the device's ghost row eventually retire. A deliberate "it ended"
 // signal is unambiguous - unlike SESSION_STALE_MS above, which is a GUESS at a
@@ -1104,6 +1110,13 @@ async function fetchOauthUsage(token) {
 }
 
 async function pollOauthUsage() {
+  // Claude switched OFF in Settings > Agents: no network call, just look again at the
+  // usual interval. The back-off and spacing stamps are left alone, so switching it
+  // back on resumes exactly where the limiter allows.
+  if (!agentSwitches().claude) {
+    setTimeout(pollOauthUsage, OAUTH_POLL_INTERVAL_MS);
+    return;
+  }
   try {
     // Still inside a persisted back-off window (possibly from a previous
     // run of this script)? Wait it out instead of re-tripping the limit.
@@ -2569,7 +2582,7 @@ let focusPinnedId = "";
 // tick and printed on the tick's log line, which is the menu's only feed.
 let menuSessions = { list: [], total: 0 };
 
-async function readSessions() {
+async function readSessions(agents = agentSwitches()) {
   let files;
   try {
     files = await track("readSessions:dir", fs.readdir(SESSIONS_DIR));
@@ -2589,14 +2602,34 @@ async function readSessions() {
       // `updated_at` for a record written before this field existed (an older
       // hook, or one that raced a host restart); both are set together by the
       // hook today, so that fallback is only ever exercised by old data.
-      if (record.status === "ended") {
-        if (Date.now() - (record.ended_at ?? record.updated_at) > SESSION_ENDED_GRACE_MS) {
-          await track("readSessions:rm", fs.rm(filePath, { force: true })); // ghost row's grace period is over
-          continue;
-        }
-      } else if (Date.now() - record.updated_at > SESSION_STALE_MS) {
-        await track("readSessions:rm", fs.rm(filePath, { force: true })); // terminal likely closed without SessionEnd
+      //
+      // A LIVE PROCESS OUTRANKS THE CLOCK: see host/session-liveness.mjs. "remove" is
+      // a ghost row whose grace is over, or a record with no liveness evidence that
+      // has been quiet past SESSION_STALE_MS; "end" is a Claude session whose process
+      // has gone without a SessionEnd, rewritten here exactly as the hook would have
+      // written it so it gets the same brief ghost row.
+      const fate = sessionFate(record, {
+        now: Date.now(),
+        staleMs: SESSION_STALE_MS,
+        endedGraceMs: SESSION_ENDED_GRACE_MS,
+        isAlive: pidAlive,
+        exists: existsSync,
+      });
+      if (fate === "remove") {
+        await track("readSessions:rm", fs.rm(filePath, { force: true }));
         continue;
+      }
+      if (fate === "end") {
+        delete record.ask;
+        record.status = "ended";
+        record.ended_at = record.updated_at = Date.now();
+        // Atomic, like the hook's own writes. The process that owned this record is
+        // gone, so no hook can be writing it at the same moment.
+        await track("readSessions:end", fs.writeFile(filePath + ".tmp", JSON.stringify(record))
+          .then(() => fs.rename(filePath + ".tmp", filePath)))
+          .catch(() => {});
+        console.log(`Sessions: ${path.basename(file, ".json").slice(0, 8)} ended - its Claude process ` +
+                    `${socketPid(record)} is gone and no SessionEnd arrived.`);
       }
       // The filename IS the session id - carry it so the device can match
       // sessions across polls even when two sessions share a project name.
@@ -2616,20 +2649,27 @@ async function readSessions() {
   // how much it needs you rather than by which tool it came from. They arrive
   // pre-shaped by readCodexSessions().
   // Codex arrives from both directions now; the hook record wins where both exist.
-  const merged = mergeById(await track("readSessions:codex", readCodexSessions()), records);
+  // AN AGENT THAT IS SWITCHED OFF IS NOT READ AT ALL (host/agents.mjs): no rollout
+  // walk for Codex, no index query for Antigravity - and its hook records, which its
+  // hooks keep writing, are filtered out below.
+  const merged = mergeById(agents.codex ? await track("readSessions:codex", readCodexSessions()) : [], records);
   // ANTIGRAVITY: pulled from its own conversation index every tick, and pushed by
   // deckhand-antigravity-hook.mjs when its hook is installed - merged FIELD BY FIELD,
   // the index's live status winning (mergeAntigravity, sessions-merge.mjs). A hook
   // record for a SUBAGENT conversation is dropped: the index knows which conversations
   // have a parent and the hook payload does not, and a subagent is not a session
   // anyone waits on (the pull path has always skipped them).
-  const ag = readGeminiSessions();
-  const agChildren = ag.children ?? new Set();
-  // Field by field, not record by record - see mergeAntigravity() for the measurement.
-  const agHook = merged.filter((r) => r.agent === "antigravity" && !agChildren.has(r.id));
-  const withAg = [...merged.filter((r) => r.agent !== "antigravity"), ...mergeAntigravity(ag, agHook)];
+  const others = merged.filter((r) => r.agent !== "antigravity");
+  let withAg = others;
+  if (agents.antigravity) {
+    const ag = readGeminiSessions();
+    const agChildren = ag.children ?? new Set();
+    // Field by field, not record by record - see mergeAntigravity() for the measurement.
+    const agHook = merged.filter((r) => r.agent === "antigravity" && !agChildren.has(r.id));
+    withAg = [...others, ...mergeAntigravity(ag, agHook)];
+  }
   records.length = 0;
-  records.push(...withAg);
+  records.push(...withAg.filter((r) => agents[agentOf(r)] !== false));
 
   // Urgency first, recency second: the display fits 6 sessions, and when
   // there are more, a session that NEEDS INPUT must never be the hidden one.
@@ -2842,19 +2882,43 @@ function geminiQuotaLine() {
   return `gmq=${quotaField(groups)} gmage=${Math.round(ageMs / 1000)} `;
 }
 
+// THE AGENTS SWITCHES (host/agents.mjs), re-read every tick. Turning one off drops
+// what was cached for it, so nothing it measured lingers - and turning it back on
+// re-reads from scratch rather than resurfacing an hours-old figure as current.
+const agentSwitches = makeAgentSwitches();
+let agentsSeen = null;
+function noteAgents(agents) {
+  const sig = describeOff(agents);
+  if (sig === agentsSeen) return;
+  if (agentsSeen !== null || sig) console.log(sig ? `Agents: OFF - ${sig} (not read, not shown).` : "Agents: all on.");
+  agentsSeen = sig;
+  if (!agents.codex) { codexRateLimits = null; codexRollCache = new Map(); }
+  // The ask stamps too, so switching it back on asks at once instead of waiting out
+  // the minute (or the CLI's five) since the last ask before it was switched off.
+  // Measured: without this, usage stayed absent for every tick of a 25s window after.
+  if (!agents.antigravity) { geminiQuota = null; geminiQuotaAskedAt = 0; geminiQuotaCliAskedAt = 0; }
+}
+
 async function readUsage() {
-  kickGeminiQuota();
+  const agents = agentSwitches();
+  noteAgents(agents);
+  if (agents.antigravity) kickGeminiQuota();
   // The token counts are NOT on this list - see kickTokens above. The rest are
   // still gathered together and none of them can reject the tick. countInventory()
   // is readdir-only (no stat, no content read - see
   // host/project-replies.mjs) so it is cheap enough to sit on this list too.
   // The full project listing and a project's own session list are NOT built
   // here, deliberately - see the note beside hostSecondsSinceMidnight below.
-  const tokensRun = kickTokens();
-  if (!tokensEverFinished) await track("tokens:first", tokensRun);
+  // Claude OFF: no token read and no rate-limit cache read, and the OAuth poll skips
+  // its network call (pollOauthUsage) - its figures go out as "none", as on a Mac that
+  // has never measured them.
+  if (agents.claude) {
+    const tokensRun = kickTokens();
+    if (!tokensEverFinished) await track("tokens:first", tokensRun);
+  }
   const [rateLimits, sessions, projectInventory] = await Promise.all([
-    track("readRateLimits", readRateLimits()),
-    track("readSessions", readSessions()),
+    track("readRateLimits", agents.claude ? readRateLimits() : Promise.resolve({})),
+    track("readSessions", readSessions(agents)),
     track("countInventory", countInventory()),
   ]);
   const fiveHour = rateLimits.five_hour;
@@ -2863,8 +2927,10 @@ async function readUsage() {
   // A finished read is reused tick after tick until the next one lands. A failed
   // read is null, and pickTokens carries the last good figures over as stale rather
   // than publishing a measured-looking zero.
-  const tokens = pickTokens(tokensLatest ?? {}, lastTokens);
-  if (!tokens.stale) lastTokens = { ...tokens };
+  const tokens = agents.claude
+    ? pickTokens(tokensLatest ?? {}, lastTokens)
+    : { sessionTokens: 0, weekAllTokens: 0, weekFableTokens: 0, stale: tokensStaleLogged };
+  if (agents.claude && !tokens.stale) lastTokens = { ...tokens };
   // Logged on the EDGE, not per tick: these run every 5s and a stale-token
   // line each time would bury the tick lines it sits between.
   if (tokens.stale !== tokensStaleLogged) {
@@ -2884,7 +2950,7 @@ async function readUsage() {
   // quotaAgeSec tells the device exactly how much.
   const oauthAt = oauthUsage?.fetchedAt ?? 0;
   const cacheAt = rateLimits.written_at ?? 0;
-  const useOauth = !!oauthUsage && oauthAt >= cacheAt;
+  const useOauth = agents.claude && !!oauthUsage && oauthAt >= cacheAt;
   const quotaAt = useOauth ? oauthAt : cacheAt;
   const five = quotaWindow(
     useOauth ? oauthUsage.fiveHourPct : fiveHour?.used_percentage,
@@ -2912,9 +2978,9 @@ async function readUsage() {
     quotaSource: useOauth ? "oauth" : "cache",
     // How old the quota numbers actually are, so the device can flag stale
     // data on screen - the footer's freshness only covers the transport.
-    quotaAgeSec: quotaAt > 0 ? Math.round((Date.now() - quotaAt) / 1000) : null,
-    ...codexUsage(),
-    ...antigravityUsageForDevice(),
+    quotaAgeSec: agents.claude && quotaAt > 0 ? Math.round((Date.now() - quotaAt) / 1000) : null,
+    ...(agents.codex ? codexUsage() : {}),
+    ...(agents.antigravity ? antigravityUsageForDevice() : {}),
     sessions: sessions.list,
     sessionsTotal: sessions.total,
     hiddenAsking: sessions.hiddenAsking,
@@ -6144,6 +6210,9 @@ async function tick(generation = tickGeneration) {
           JSON.stringify({
             connected: usbLinks.length > 0 || !!bleCharacteristic,
             remoteAnswer,
+            // The Agents switches, so a hook for an agent that is OFF never publishes
+            // an ask or waits on the display (remoteState() in the session hook).
+            agents: agentSwitches(),
             at: Date.now(),
             // Which process wrote this: the menu bar's Restart is done when it changes,
             // and removeOwnHeartbeat() deletes the file only while it is still ours.
@@ -6206,7 +6275,7 @@ async function tick(generation = tickGeneration) {
     // bound it to at most one turn per 6h, and a turn takes seconds - awaiting it would
     // put a model call inside the 5s poll loop, which is the stall shape tick() has a
     // watchdog for. Errors are swallowed by the function itself.
-    maybeRefreshCodexUsage().catch(() => {});
+    if (agentSwitches().codex) maybeRefreshCodexUsage().catch(() => {});
     // hostId rides along so a device paired with several Macs knows which of
     // its stored keys to sign this prompt's answer with. remoteAnswer tells the
     // device whether its option buttons are live or read-only, so it never

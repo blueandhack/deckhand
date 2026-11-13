@@ -25,6 +25,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             switch pane {
             case .general: root = AnyView(GeneralPane(m: model))
             case .menuBar: root = AnyView(MenuBarPane(m: model))
+            case .agents: root = AnyView(AgentsPane(m: model))
             case .devices: root = AnyView(DevicesPane(m: model))
             case .claude: root = AnyView(ClaudePane(m: model))
             case .about: root = AnyView(AboutPane(m: model))
