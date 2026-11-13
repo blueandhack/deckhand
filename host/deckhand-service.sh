@@ -50,6 +50,10 @@ case "${1:-}" in
   <key>ProgramArguments</key>
   <array>
     <string>$BIN</string>
+    <!-- The same two V8 memory flags as the released app's launcher
+         (release/host-launch.c, which says what they measured). -->
+    <string>--max-semi-space-size=1</string>
+    <string>--optimize-for-size</string>
     <string>$SCRIPT</string>
   </array>
   <key>WorkingDirectory</key><string>$HERE</string>

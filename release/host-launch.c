@@ -58,7 +58,14 @@ int main(int argc, char **argv) {
     if (!realpath(rel, target)) die("host script not found in the bundle");
     if (access(node, X_OK) != 0) die("bundled node missing or not executable");
 
-    char *args[] = { node, target, NULL };
+    // Two V8 flags that trade nothing this process notices for memory. The host is
+    // idle between 5s ticks, so a smaller young generation (1 MB semi-spaces, where
+    // V8 grows to 16) costs a few more tiny collections and keeps far less garbage
+    // committed; --optimize-for-size makes V8's own growth heuristics favour size.
+    // Measured 2026-11-13 on the host's token reader (host/claude-tokens.mjs) over
+    // 1.2 GB of transcripts: settled at 43 MB with defaults, 24-29 MB with both,
+    // same CPU (1.15 s vs 1.04-1.09 s). host/deckhand-service.sh passes the same two.
+    char *args[] = { node, "--max-semi-space-size=1", "--optimize-for-size", target, NULL };
     execv(node, args);
     die("exec failed");
     return 1;

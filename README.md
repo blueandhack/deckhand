@@ -159,7 +159,7 @@ puts them there. At runtime they use these per-user paths:
 ## Known limitations
 
 - **~5s delay**: the host polls every `POLL_INTERVAL_MS` (5000ms in
-  `host/index.mjs`), plus whatever `ccusage`/`git` subprocess calls take.
+  `host/index.mjs`), plus whatever its `git` subprocess calls take.
   The footer's "Xs ago" makes this visible rather than hiding it. A
   permission prompt answered within a second or two may come and go
   between polls — the device is for prompts you *haven't* noticed.

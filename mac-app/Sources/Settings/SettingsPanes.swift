@@ -8,11 +8,19 @@ struct GeneralPane: View {
         !m.s.running ? .secondary : (m.s.deviceConnected ? .green : .orange)
     }
     var statusTitle: String {
+        if let a = m.action { return a.kind.progressTitle }
         if !m.s.running { return "Stopped" }
         if m.s.deviceConnected, let d = m.s.device { return "Syncing with \(d)" }
         return "Running, no display connected"
     }
+    /// While an action is landing, what it is waiting for; just after, what it came
+    /// to - a failure on its own, a success ahead of the ordinary line.
     var statusDetail: String {
+        if let a = m.action { return a.kind.progressDetail }
+        if let n = m.actionNote { return n.failed ? n.text : n.text + " " + baseDetail }
+        return baseDetail
+    }
+    var baseDetail: String {
         if !m.s.running { return "The display is not being updated." }
         if m.s.deviceConnected, let d = m.s.device {
             return m.linkText(d).map { "Connected over \($0)." } ?? "Connected."
@@ -24,14 +32,23 @@ struct GeneralPane: View {
         Form {
             Section {
                 HStack(alignment: .center, spacing: 12) {
-                    Circle().fill(statusColor).frame(width: 10, height: 10)
+                    if m.action != nil {
+                        ProgressView().controlSize(.small).frame(width: 10, height: 10)
+                    } else {
+                        Circle().fill(m.actionNote?.failed == true ? Color.orange : statusColor).frame(width: 10, height: 10)
+                    }
                     VStack(alignment: .leading, spacing: 2) {
                         Text(statusTitle).font(.headline)
-                        Text(statusDetail).font(.callout).foregroundStyle(.secondary)
+                        Text(statusDetail).font(.callout)
+                            .foregroundStyle(m.actionNote?.failed == true ? Color.orange : Color.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     Spacer()
-                    if m.s.running { Button("Restart") { m.app?.restartHost() } }
-                    Button(m.s.running ? "Stop" : "Start") { m.app?.toggleHost() }
+                    Group {
+                        if m.s.running { Button("Restart") { m.app?.restartHost() } }
+                        Button(m.s.running ? "Stop" : "Start") { m.app?.toggleHost() }
+                    }
+                    .disabled(m.action != nil)
                 }
                 .padding(.vertical, 2)
             } header: {

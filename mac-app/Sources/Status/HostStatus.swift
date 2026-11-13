@@ -21,6 +21,9 @@ struct SessionRow {
 
 struct HostStatus {
     var running = false
+    /// The process that wrote the heartbeat. A Restart is finished when this
+    /// changes - "running" alone cannot tell the new host from the old one.
+    var pid: Int? = nil
     var deviceConnected = false
     // Quota as NUMBERS, where this used to keep one pre-formatted string. The
     // menu now draws a bar and a humanised reset time, and neither can be
@@ -125,6 +128,7 @@ func readStatus() -> HostStatus {
         if let data = FileManager.default.contents(atPath: heartbeatPath),
            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             s.deviceConnected = (obj["connected"] as? Bool) ?? false
+            s.pid = obj["pid"] as? Int
             s.device = obj["device"] as? String
             s.selected = obj["selected"] as? String
             s.devices = (obj["devices"] as? [String]) ?? []

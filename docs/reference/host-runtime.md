@@ -252,6 +252,9 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
   everything else writes through a STREAM whose buffer is **lost** when the process exits:
   verified with a test that writes both ways and exits immediately - the stream line
   disappears, the synchronous one survives.
+- **SUPERSEDED 2026-11-13: ccusage is no longer run at all** (`host/claude-tokens.mjs`; see
+  "Memory" below). This entry and the next are kept for what they teach about child
+  processes under launchd.
 - **`ccusage` is spawned as `<process.execPath> <cli.js>`, never through its `.bin`
   shebang.** That shebang is `#!/usr/bin/env node`, which needs `node` on PATH - and under
   launchd PATH is minimal, while node on this machine is **nvm-managed** under
@@ -277,7 +280,8 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
     Stop/Start, and launchd's KeepAlive would retry it every 10s. Re-running `build-app.sh`
     fixes it for as long as Homebrew's libraries stay put. **Not yet done** at the time of
     writing.
-- **`ccusage` runs beside the tick, not inside it (`kickCcusage`), because waiting for it made
+- **`ccusage` runs beside the tick, not inside it (`kickCcusage`, now `kickTokens` over the
+  incremental reader, with the same single-flight shape for the same reason), because waiting for it made
   the menu bar look like the host was restarting.** The tick used to await both calls. The
   timeout no longer cost the tick its payload (`tryCcusage`), but the tick still WAITED up to
   `CCUSAGE_TIMEOUT_MS` (20s). The heartbeat is written at the top of each tick, so the next
@@ -481,7 +485,61 @@ its inspector on `127.0.0.1:9229`), collecting over CDP, and closing the inspect
   64 KB window, which is the first finding again. **The end-to-end allocation rate after the
   change has not been measured on a running host.**
 
-**Not changed, and why.** The menu-bar process (`Deckhand`) measured 70 MB with a 72 MB peak over
-30 hours, i.e. flat; `heap` shows ordinary AppKit/SwiftUI objects with no single outlier. No
-`--max-old-space-size` was added to the host: `histItems()` loads a whole transcript, and the
-largest are tens of MB, so a cap low enough to matter could turn a big transcript into a crash.
+**Not changed, and why.** No `--max-old-space-size` was added to the host: `histItems()` loads a
+whole transcript, and the largest are tens of MB, so a cap low enough to matter could turn a big
+transcript into a crash.
+
+### The second pass (2026-11-13): the biggest cost was never the host
+
+Sampling every Deckhand process found **two `ccusage` processes at ~1.2 GB each**. ccusage
+re-reads every transcript on every run (1.3 GB here) and filters afterwards - `--since` changed
+neither its time nor its memory (measured: 3-4 s and 1.16-1.29 GB per run, with or without it) -
+and the host ran `blocks --active` and `weekly` in parallel, starting the next pair the moment the
+last finished. So ~2.5 GB was resident almost continuously, for three numbers on the USAGE tab.
+
+**`host/claude-tokens.mjs` replaces it.** It reads each transcript under `~/.claude/projects`
+touched in the last 8 days once, then only the bytes appended since, and keeps four numbers per
+usage record (~3 MB for this Mac's week). Measured: first pass ~2 s, later reads ~50 ms. ccusage
+is no longer a dependency. Matched against ccusage 20 on this Mac's own transcripts: the active
+5h block equal to the token, **24 of 25 days equal to the token**, the 25th off by 5,680 of 454.8M
+(0.0012%) for a reason not found. Three rules were LEARNED from that comparison, not assumed: a
+record is keyed on `message.id` even without a `requestId` (keying only when both existed counted
+local-model replies once per content block: 31k-374k tokens a day too many); the LARGEST copy of
+a key wins (copies differ, because each content block's line carries the usage so far); and
+`ccusage claude weekly` starts weeks on SUNDAY while plain `ccusage weekly`, which the host used,
+starts them on MONDAY - the reader keeps Monday. **Three deliberate differences**, all because
+these numbers sit on the CLAUDE quota cards: Codex is not counted (ccusage 20's `weekly` became
+`agent: "all"`); Fable is `claude-...fable...` summed, where `find(/fable/i)` took the first
+model with "fable" anywhere in its name - this week a local Qwen "...Defiant-Fable..." model, so
+the FABLE line was showing ITS tokens; and the week is the current one, where `weekly.at(-1)` was
+the last week with data (the whole previous week, beside the 7d bar, on a Monday morning).
+
+Getting the reader's own memory down took three measured steps, each a different cause:
+`JSON.parse` of whole lines (148 MB of usage lines a pass) left it 58-66 MB resident, so a byte
+scanner reads the five fields in place; a fresh read buffer per file was suspected next and was
+NOT it; the real cost was carrying a line that spans chunks with `Buffer.concat` - multi-MB tool
+results re-copied per chunk, **168 MB with the parser switched off** - so no line is copied unless
+it is parsed. Result: **peak 43 MB for the first pass, settled at 24-29 MB with the V8 flags
+below**, from a 14 MB bare Node. `claude-tokens-check.mjs` holds the scanner to `JSON.parse` and
+the reader to a brute-force read (`--live`: all 42,161 usage lines and 32,090 records on this Mac,
+0 differences); its `--selftest` found four of its own assertions unable to fail on the first run,
+including one comparing two nulls, and one fault that could never be seen: ccusage's 5h-gap rule
+is implied by its 5h-from-start rule, so it was removed from the code rather than tested.
+
+**V8 flags on the host**: `--max-semi-space-size=1 --optimize-for-size`, in `release/host-launch.c`
+and `host/deckhand-service.sh`. On the reader's workload: settled 43 MB -> 24-29 MB, CPU unchanged
+(1.15 s vs 1.04-1.09 s). **Not yet measured on a running host** - this build has not run as the app.
+
+**The menu-bar app**: a harness over the app's own code measured 16 MB for the menu bar alone and
+~54 MB once Settings has been opened and its five panes visited. Closing Settings now RELEASES its
+controller (it was kept; the pane is remembered instead): ~5 MB back. The other ~32 MB is SwiftUI
+itself, resident for the life of the process once loaded - the window, controller, hosting views
+and model were all confirmed gone with `heap`, and `malloc_zone_pressure_relief` returned 0 bytes.
+Only running Settings in its own short-lived process would return it, and that is not a small
+change: the Menu Bar pane reads the status item's fit, which only the menu-bar process owns;
+Pairing and Setup open windows that would die with a Settings process; Check for Updates and
+Uninstall belong to the main process's updater. **Not done.**
+
+**Still spawned, and left alone:** `agy -p /usage` reaches 96-176 MB for a few seconds, at most
+every 5 minutes, and only when no Antigravity app answers on its local server; `git` (~7 MB) runs
+per live session per tick for the branch name.

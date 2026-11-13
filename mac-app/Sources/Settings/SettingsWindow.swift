@@ -60,8 +60,24 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     /// opening the status menu does - and an accessory app has no Dock icon or
     /// Cmd-Tab entry to get it back by. (User report, 2026-11-08.) Closing the window
     /// returns the app to the menu bar only.
+    ///
+    /// THE CONTROLLER IS RELEASED ON CLOSE, where it used to be kept so the window
+    /// reopened where it was (the pane is now remembered instead). Measured
+    /// 2026-11-13 with a harness over this app's own code: the menu bar alone is
+    /// 16 MB; opening Settings and visiting its five panes takes it to ~54 MB, and
+    /// a closed-but-kept controller holds all of it. Releasing returns ~5 MB - the
+    /// window, the five hosting views and their view graphs. The other ~32 MB is
+    /// SwiftUI itself, resident for the life of any process that has loaded it, and
+    /// no release or malloc_zone_pressure_relief returns it (measured: 0 bytes).
+    /// Only a separate Settings process could; see docs/reference/menu-bar.md.
     func windowWillClose(_ n: Notification) {
-        DispatchQueue.main.async { NSApp.setActivationPolicy(.accessory) }
+        let app = model.app
+        let pane = tabs.selectedTabViewItemIndex
+        DispatchQueue.main.async {
+            NSApp.setActivationPolicy(.accessory)
+            app?.lastSettingsPane = pane
+            app?.settingsWindow = nil
+        }
     }
 
     func show(pane: SettingsPane?) {
@@ -83,17 +99,18 @@ extension AppDelegate {
     /// Restart in place. Supervised, through launchd (`kickstart -k`), so there is
     /// still exactly one supervisor; unsupervised, the old force-clear-and-open.
     func restartHost() {
+        guard hostAction == nil else { return }
         wantRunning = true
         lastRestart = Date()
         downSince = nil
-        if isSupervised() {
-            let label = isBundled ? agentLabel : "com.deckhand.host"
-            DispatchQueue.global(qos: .userInitiated).async {
+        let supervised = isSupervised()
+        let label = isBundled ? agentLabel : "com.deckhand.host"
+        beginHostAction(.restarting) { [weak self] in
+            if supervised {
                 _ = runCapture("/bin/launchctl", ["kickstart", "-k", "gui/\(getuid())/\(label)"])
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in self?.refresh() }
+            } else {
+                self?.startHost()
             }
-        } else {
-            startHost()
         }
     }
 

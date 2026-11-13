@@ -57,6 +57,9 @@ final class SettingsModel: ObservableObject {
     @Published var codexHooks = false
     @Published var agHooks = false
     @Published var busy = false
+    /// A Start/Stop/Restart in flight, and what the last one came to (HostAction.swift).
+    @Published var action: HostAction?
+    @Published var actionNote: HostActionNote?
     @Published var nameDraft = ""
     /// True while the name field has focus, so the 3s refresh does not overwrite
     /// what someone is typing with the name the host still has.
@@ -80,6 +83,8 @@ final class SettingsModel: ObservableObject {
         colourful = colourfulIcon
         barSize = BarSize.current
         if let app = app {
+            action = app.hostAction
+            actionNote = app.currentHostActionNote
             barTier = app.barTier
             barFitNote = app.barFitNote
             barHidden = app.barHidden
