@@ -231,6 +231,26 @@ for (const [name, ok] of missingHeartbeatCases({ describePrevRun, formatRunStart
     !/sleep resumes/.test(formatRunStartLine({ n: 64, prev: { ...prev, suspendResumes: 0 }, beat: { at: T0 + HOUR }, at: T0 })));
 }
 
+// A CLEAN EXIT DELETES ITS HEARTBEAT (since 2026-11-13) and copies its last tick
+// into the run-state record. Seen on the first 0.1.5 start: without the copy, every
+// clean restart read "last tick unknown (... /tmp cleared?)".
+{
+  const prev = { startNumber: 57, startedAt: T0, endedAt: T0 + HOUR, endReason: "SIGTERM", lastTickAt: T0 + HOUR - 3000 };
+  const d = describePrevRun(prev, null);
+  check("a clean exit's recorded last tick is used when its heartbeat is gone", d.tickKnown === true && Math.round(d.ranMs / MIN) === 60);
+  check("a clean exit with a recorded last tick does not blame /tmp",
+    !/tmp cleared|last tick unknown/.test(formatRunStartLine({ n: 58, prev, beat: null, at: T0 })));
+  // The ledger's whole purpose survives: a HUNG host stopped by SIGTERM records a
+  // last tick exactly as stale as its heartbeat was.
+  const hungPrev = { ...prev, lastTickAt: T0 + 10 * MIN };
+  check("a hung run stopped by SIGTERM still reads as hung, from the recorded tick",
+    describePrevRun(hungPrev, null).hung === true && /STALLED/.test(formatRunStartLine({ n: 59, prev: hungPrev, beat: null, at: T0 })));
+  check("with both present, the later last tick wins",
+    Math.round(describePrevRun({ ...prev, lastTickAt: T0 + 10 * MIN }, { at: T0 + 50 * MIN }).ranMs / MIN) === 50);
+  check("a malformed recorded tick reads as absent",
+    describePrevRun({ ...prev, lastTickAt: "soon" }, null).tickKnown === false);
+}
+
 // A stall shorter than the watchdog's own threshold is just a slow last tick.
 {
   const prev = { startNumber: 50, startedAt: T0, endedAt: T0 + HOUR, endReason: "SIGTERM" };

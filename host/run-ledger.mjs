@@ -53,7 +53,14 @@ export function describePrevRun(prev, beat) {
   // A malformed `at` must read as ABSENT, never coerced: `at: 0` would date the
   // last tick to 1970 and report a 56-year stall, and a string would poison
   // every subtraction downstream into NaN.
-  const tick = isStamp(beat?.at) ? beat.at : null;
+  //
+  // TWO SOURCES since 2026-11-13: a clean exit deletes its heartbeat (so the menu
+  // bar sees Stopped at once) after copying the heartbeat's `at` into the
+  // run-state record as `lastTickAt`. A crash leaves the heartbeat and no copy.
+  // The later of the two is the last tick; neither present is still UNKNOWN.
+  const fromBeat = isStamp(beat?.at) ? beat.at : null;
+  const fromRecord = isStamp(prev?.lastTickAt) ? prev.lastTickAt : null;
+  const tick = fromBeat === null ? fromRecord : fromRecord === null ? fromBeat : Math.max(fromBeat, fromRecord);
 
   if (startedAt === null || tick === null) {
     return {
