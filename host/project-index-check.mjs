@@ -16,6 +16,13 @@
 // pickTranscript at all, and would have passed with project-index.mjs deleted.
 import * as realModule from "./project-index.mjs";
 import fs from "node:fs";
+import v8 from "node:v8";
+import vm from "node:vm";
+
+// A real collector, for the retention assertion below: it measures what the heap
+// KEEPS, which no comparison of return values can see.
+v8.setFlagsFromString("--expose-gc");
+const gc = vm.runInNewContext("gc");
 
 const SELFTEST = process.argv.includes("--selftest");
 
@@ -49,6 +56,29 @@ function suite(mod, check) {
   const beyond = Array.from({ length: mod.SCAN_LINES + 5 }, (_, i) =>
     i === mod.SCAN_LINES + 2 ? '{"cwd":"/should/not/be/found"}' : '{"type":"noise"}');
   check("a cwd sitting past SCAN_LINES is not found", mod.cwdFromLines(beyond), null);
+
+  // THE LEAK THIS CAUGHT IN PRODUCTION: the returned path must not keep the line
+  // it was found in alive. A real opening record embeds the whole first prompt
+  // (~131KB measured), and cwdCache keeps one result per project directory for
+  // the life of the host - 104MB across 796 directories before the fix. Each
+  // parent here is UNIQUE (V8 would otherwise share one) and 256KB, so a
+  // returned slice pins N x 256KB while a copy pins N short paths. The bound is
+  // a quarter of what the slices pin, far above what the copies cost.
+  {
+    const N = 40, BIG = 256 * 1024;
+    gc();
+    const before = process.memoryUsage().heapUsed;
+    const kept = [];
+    for (let i = 0; i < N; i++) {
+      const line = `{"type":"queue-operation","operation":"enqueue","content":"${String(i).padEnd(BIG, "x")}","cwd":"/Users/someone/work/project-${i}"}`;
+      kept.push(mod.cwdFromLines([line]));
+    }
+    gc();
+    const retained = process.memoryUsage().heapUsed - before;
+    check("a returned cwd does not keep its (large) source line alive",
+      { pinsSourceLines: retained > (N * BIG) / 4, correct: kept[N - 1] === `/Users/someone/work/project-${N - 1}` },
+      { pinsSourceLines: false, correct: true });
+  }
 
   check("a hyphenated project keeps its hyphen",
     mod.projectLabel("/Users/yujia/work/claude-plugins"), "claude-plugins");
@@ -170,6 +200,20 @@ const faults = [
       cwdFromLines: (lines) => {
         const RE_CWD = /"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"/;
         for (const line of lines) {
+          const m = RE_CWD.exec(line);
+          if (m) return m[1];
+        }
+        return null;
+      },
+    }],
+  // The production leak, exactly as it shipped: right answer, bounded scan, and
+  // every result a sliced string that pins its whole source line.
+  ["cwdFromLines returns the regex capture itself (a slice that pins its line)",
+    {
+      ...realModule,
+      cwdFromLines: (lines) => {
+        const RE_CWD = /"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"/;
+        for (const line of lines.slice(0, realModule.SCAN_LINES)) {
           const m = RE_CWD.exec(line);
           if (m) return m[1];
         }
