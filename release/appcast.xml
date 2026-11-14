@@ -3,28 +3,28 @@
     <channel>
         <title>Deckhand</title>
         <item>
-            <title>0.1.8</title>
+            <title>0.1.9</title>
             <description><![CDATA[
-<p><strong>Ninth alpha of Deckhand.app.</strong> Installed 0.1.x copies update to this automatically (Sparkle); new installs download the DMG below.</p>
+<p><strong>Tenth alpha of Deckhand.app.</strong> Installed 0.1.x copies update to this automatically (Sparkle); new installs download the DMG below.</p>
 <p><strong>Requires:</strong> Apple Silicon, macOS 14 or later, and a Deckhand display (firmware is flashed from the repo with <code>./flash.sh</code>). No new firmware is needed for this release.</p>
 <h4>What's new</h4>
-<ul><li><strong>Every session in the menu shows which agent it belongs to.</strong> Each row now starts with <code>CC</code>, <code>CODEX</code> or <code>AGY</code>, in a column of its own so the project names line up. Before, only Codex and Antigravity sessions were labelled, faintly and after the project name, while Claude Code sessions had no label. The display already labels every session, and is unchanged.</li></ul>
-<p>Nothing else changes from 0.1.7, including the Agents switches and the fix that keeps long-running sessions listed.</p>
+<ul><li><strong>Codex in auto mode no longer shows "needs input".</strong> In auto mode, Codex's own reviewer approves commands, but Codex still told Deckhand about each approval as if it were a question for you. So the session showed "needs input" the whole time, and each approval waited 15 seconds for a tap on the display before Codex carried on. Deckhand now checks the session's approval setting: approvals Codex handles itself keep the session "working" and run without the wait. When Codex really is asking you, it shows on the display as before.</li></ul>
+<p>Nothing else changes from 0.1.8.</p>
 <h4>Install (new users)</h4>
-<ol><li>Download <code>Deckhand-0.1.8.dmg</code>, open it, and drag <strong>Deckhand</strong> onto <strong>Applications</strong>.</li><li>Open it from Applications and follow the setup window (it asks before touching Claude Code's settings and backs up first).</li><li>Restart Claude Code so it picks up the hooks.</li></ol>
+<ol><li>Download <code>Deckhand-0.1.9.dmg</code>, open it, and drag <strong>Deckhand</strong> onto <strong>Applications</strong>.</li><li>Open it from Applications and follow the setup window (it asks before touching Claude Code's settings and backs up first).</li><li>Restart Claude Code so it picks up the hooks.</li></ol>
 <h4>Known limits</h4>
 <p>With Claude Code switched off on the Agents pane, the display's usage cards show dashes rather than disappearing; the firmware is unchanged.</p>
 <h4>Still not verified</h4>
-<p>The USAGE tab with Codex <strong>and</strong> Antigravity both reporting, on the display itself; anything new on the smaller (2.8") display; a Mac with no Node or Homebrew installed; a notched MacBook screen's menu bar; a first-time Bluetooth prompt from a fresh permission state; and <strong>Uninstall</strong>.</p>
+<p>Whether Codex's auto-reviewer can ever hand a request back to you; the USAGE tab with Codex <strong>and</strong> Antigravity both reporting, on the display itself; anything new on the smaller (2.8") display; a Mac with no Node or Homebrew installed; a notched MacBook screen's menu bar; a first-time Bluetooth prompt from a fresh permission state; and <strong>Uninstall</strong>.</p>
 <p>Feedback and bug reports: <a href="https://github.com/blueandhack/deckhand/issues">Issues</a>.</p>
 ]]></description>
-            <pubDate>Fri, 13 Nov 2026 18:47:32 -0800</pubDate>
+            <pubDate>Fri, 13 Nov 2026 21:11:30 -0800</pubDate>
             <link>https://github.com/blueandhack/deckhand</link>
-            <sparkle:version>761</sparkle:version>
-            <sparkle:shortVersionString>0.1.8</sparkle:shortVersionString>
+            <sparkle:version>765</sparkle:version>
+            <sparkle:shortVersionString>0.1.9</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://github.com/blueandhack/deckhand/releases/download/v0.1.8/Deckhand-0.1.8.dmg" length="33111520" type="application/octet-stream" sparkle:edSignature="EFpjlA4ReeE994JCiqL6HZrQMDoWBjMSuhvKv88cxaVOARorn93PLZCXLwMpEWS18T1EyJy0h8EP55RMXfIfAw=="/>
+            <enclosure url="https://github.com/blueandhack/deckhand/releases/download/v0.1.9/Deckhand-0.1.9.dmg" length="33111588" type="application/octet-stream" sparkle:edSignature="BYkMC8HNHqnHD0XVn8siPDTNfW1mu5d15LSTR4YA5PrL8vEhH576VxC6bulYHapzv6sdVTvkjs9Xzt1nTDE0Aw=="/>
         </item>
     </channel>
 </rss>
