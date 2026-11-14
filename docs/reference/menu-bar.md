@@ -181,6 +181,15 @@ Four things are load-bearing:
   are switched on by hand. `--menu-dump` prints the composed label and the submenu's
   checkmarks, which is the only way to verify any of this without eyes on the bar -
   `screencapture` needs a TCC grant the host process doesn't have.
+- **Every session row names its agent: `CC`, `CODEX` or `AGY` (2026-11-13,
+  `sessionAgentTag()` in `Menu/MenuRows.swift`), the device's own words with CLAUDE
+  shortened, in a monospaced column before the project name so the names line up.**
+  Before, only Codex and Antigravity rows carried a name - after the project, in
+  `.tertiaryLabelColor` - and a Claude row carried nothing. Seen in an offscreen render
+  of all three agents in both appearances; not yet looked at in the real dropdown. That
+  render also exposed a defect in `--menu-preview` itself, fixed the same day: it drew
+  every row 302pt wide, narrower than `MENU_RIGHT_TAB` (330), so every right-hand column
+  wrapped onto a line of its own in the preview and nowhere else.
 - **Clicking a session row JUMPS TO THE APP that owns it, and which app that is comes out
   of the ENVIRONMENT rather than any search.** The hook is a child of the `claude` process,
   so it inherits `__CFBundleIdentifier` (the bundle that launched Claude Code - VS Code,

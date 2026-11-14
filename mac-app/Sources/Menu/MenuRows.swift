@@ -112,14 +112,26 @@ func sessionAge(_ actSec: Int?) -> String? {
 /// ellipsis, which says "there is more" instead of looking like a typo.
 let SESSION_TITLE_SHOW = 39
 
-/// One session: status glyph, project and (for a non-Claude agent) its name on the
-/// left, the state and how long it has been in it on the right, and what it is
-/// about on a second line. Shape and word, never colour alone: ■ needs you, ○
+/// Every session's agent, in the device's own words (sessions.ino: CLAUDE/CODEX/AGY,
+/// shortened to CC here because the dropdown is narrower), padded to one monospaced
+/// width so the project names line up whichever agent a row belongs to. Until
+/// 2026-11-13 only Codex and Antigravity rows were named - after the project, in a
+/// faint colour - and a Claude row carried nothing, so a mixed list could not be read
+/// at a glance.
+func sessionAgentTag(_ agent: String) -> String {
+    switch agent {
+    case "cx": return "CODEX "
+    case "ag": return "AGY   "
+    default: return "CC    "
+    }
+}
+
+/// One session: status glyph, agent tag and project on the left, the state and how
+/// long it has been in it on the right, and what it is about on a second line. Shape and word, never colour alone: ■ needs you, ○
 /// waiting, ● working - the device's three states, in the host's urgency order.
 func sessionTitle(_ r: SessionRow) -> NSAttributedString {
     let asking = r.status == "asking"
     let glyph = asking ? "\u{25A0}" : (r.status == "waiting" ? "\u{25CB}" : "\u{25CF}")
-    let agent = r.agent == "cx" ? "Codex" : (r.agent == "ag" ? "Antigravity" : "")
     let age = sessionAge(r.actSec)
     let state: String
     switch r.status {
@@ -129,11 +141,12 @@ func sessionTitle(_ r: SessionRow) -> NSAttributedString {
     }
     let out = NSMutableAttributedString(attributedString: menuColumns([
         ("\(glyph)  ", F_BODY, asking ? .systemOrange : .secondaryLabelColor),
+        (sessionAgentTag(r.agent), F_MONO, .secondaryLabelColor),
         (clip(r.name, 22), asking ? F_BOLD : F_BODY, .labelColor),
-        (agent.isEmpty ? "" : "  \(agent)", F_SMALL, .tertiaryLabelColor),
     ], [(state, asking ? F_BOLD : F_SMALL, asking ? .systemOrange : .secondaryLabelColor)]))
     if !r.title.isEmpty {
-        out.append(menuTitle([("\n     ", F_MONO, .secondaryLabelColor),
+        // Indented past the tag too, so the title sits under the project name.
+        out.append(menuTitle([("\n     " + String(repeating: " ", count: sessionAgentTag("").count), F_MONO, .secondaryLabelColor),
                               (clip(r.title, SESSION_TITLE_SHOW), F_SMALL, .secondaryLabelColor)]))
     }
     return out
