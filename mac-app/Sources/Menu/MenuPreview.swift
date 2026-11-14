@@ -57,7 +57,10 @@ func dimmedForDisabled(_ a: NSAttributedString) -> NSAttributedString {
 /// (labelColor, secondaryLabelColor) and resolves at draw time, so light-only
 /// verification would prove nothing about the dark case.
 func writeMenuPreview(to path: String, _ m: NSMenu, bar: NSAttributedString? = nil) {
-    let W: CGFloat = 330, pad: CGFloat = 14
+    // WIDE ENOUGH FOR THE RIGHT-HAND TAB STOP. At a fixed 330 the text box was 302,
+    // narrower than MENU_RIGHT_TAB itself, so every right column (states, reset
+    // times, header notes) wrapped onto a line of its own here and nowhere else.
+    let pad: CGFloat = 14, W: CGFloat = MENU_RIGHT_TAB + pad * 2 + 4
     var rows: [(NSAttributedString?, CGFloat)] = []
     // THE BAR LABEL GOES IN FIRST, because it is now the one surface whose
     // colours cannot be checked any other way: `--menu-dump` prints `.string`
