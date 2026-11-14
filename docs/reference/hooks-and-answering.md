@@ -111,3 +111,26 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
   prompt would stall 90s for nothing — and it must never write anything to stdout **except** a
   genuine `emitDecision()`, because any stray JSON on a `PermissionRequest` hook's stdout can
   auto-allow/deny the dialog.
+
+- **A Codex approval its own reviewer decides is NOT a question for the person
+  (2026-11-13, `codexReviewer()` in the hook).** In auto mode Codex hands every approval
+  to its auto-reviewer, yet still fires `PermissionRequest` - with `permission_mode:
+  "default"` and nothing else in the payload to say so. The hook treated each one as a
+  prompt: the row read NEEDS INPUT for as long as the session ran, and Codex was held
+  15s per approval before its reviewer even saw the request. Measured in the hook log:
+  five `waited 15.1s ... no device answer` in 103s of one auto-mode session, each
+  followed ~20s later by that tool's `PostToolUse`. **That spacing also answers half of
+  the open Codex question above for the auto-review path: the reviewer runs AFTER the
+  hook, not beside it** - the wait was pure delay. The setting is in the rollout: every
+  `turn_context` carries `approvals_reviewer`, and across this Mac's rollouts it was
+  `"auto_review"` (2,860 turns) or `"user"` (158). The hook reads the LAST
+  `turn_context` (backward, in 256KB chunks split on bytes, bounded at 8MB) and only
+  `"auto_review"` skips the ask: status `"working"`, no ask, no wait, and a stale ask is
+  cleared rather than carried. Anything else - `"user"`, a missing field, an unreadable
+  rollout, a value not seen yet - keeps the ask, because hiding a real question is the
+  failure nobody can see. Checked by `claude-hooks/codex-autoreview-check.mjs` (10
+  assertions on the real hook, `--selftest` 7/7); the patched hook against this Mac's
+  live 1MB auto-mode rollout returned in 0.08s. **Not verified:** whether Codex's
+  reviewer can ever escalate a request to the person (if it can, that escalation would
+  arrive through no hook Deckhand sees), and the new hook on a live Codex session -
+  it reaches `~/.claude` with the next app update.

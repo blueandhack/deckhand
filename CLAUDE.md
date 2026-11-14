@@ -431,6 +431,7 @@ node host/whisper-prompt-check.mjs --live               # ... and whether its le
 node firmware/board-baseline.mjs --doc-check           # the quote above vs the JSON
 node host/multi-device-check.mjs                        # two boards on two cables at once
 node claude-hooks/answer-status-check.mjs
+node claude-hooks/codex-autoreview-check.mjs          # Codex auto mode: its reviewer's approvals never ask the person
 node claude-hooks/antigravity-hook-check.mjs            # the Antigravity hook: never PreToolUse, never stdout
 node release/notes-check.mjs                            # release notes -> HTML -> the feed item, and the committed feed
 node docs/design/*/check.mjs                            # committed mocks, bound to the headers

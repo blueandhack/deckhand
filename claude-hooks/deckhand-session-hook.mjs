@@ -16,7 +16,8 @@
 //     desktop app never fires the Notification hook at all (verified: a
 //     desktop session with 650+ tool events and many permission prompts
 //     logged zero Notification events), so permission prompts there were
-//     invisible until this was added.
+//     invisible until this was added. EXCEPT a Codex approval decided by Codex's
+//     own auto-reviewer -> "working", no ask, no wait (see codexReviewer).
 //   - Notification, notification_type == "permission_prompt"
 //                                -> "asking" (terminal sessions; verified via
 //     a captured payload: {"message":"Claude needs your permission",
@@ -398,6 +399,69 @@ function cleanMultiline(s, max) {
     .slice(0, max);
 }
 
+// CODEX'S AUTO MODE IS NOT A QUESTION FOR THE PERSON (2026-11-13). In auto mode Codex
+// hands each approval to its own reviewer ("auto-review") instead of the person - and
+// still fires PermissionRequest for it, with `permission_mode: "default"` and nothing
+// else in the payload that says so. Treated as a prompt, every approval showed the row
+// as NEEDS INPUT and held Codex for REMOTE_WAIT_MS (15s) before its reviewer even saw
+// the request: measured, five 15.1s waits in 103s of one auto-mode session, each
+// followed ~20s later by the tool's PostToolUse with nobody having touched anything.
+//
+// The setting is in the session's own rollout: every `turn_context` carries
+// `approvals_reviewer`. Measured across this Mac's rollouts: "auto_review" (2,860
+// turns) and "user" (158). Only a KNOWN automatic reviewer skips the ask - a missing
+// field, an unreadable rollout or a value not seen yet keeps today's behaviour, because
+// hiding a real question is the one failure the person cannot see.
+const CODEX_AUTO_REVIEWERS = new Set(["auto_review"]);
+// The LAST turn_context is the live one (a session can switch modes between turns), and
+// a long turn can put it megabytes back, so the rollout is read BACKWARD in chunks,
+// whole lines only, and the scan stops at a bound rather than reading a huge file.
+const CODEX_CTX_CHUNK = 256 * 1024;
+const CODEX_CTX_SCAN_MAX = 8 * 1024 * 1024;
+
+function codexReviewer(transcriptPath) {
+  if (typeof transcriptPath !== "string" || !transcriptPath) return null;
+  let fd;
+  try {
+    fd = fs.openSync(transcriptPath, "r");
+    const size = fs.fstatSync(fd).size;
+    let end = size;
+    let carry = Buffer.alloc(0); // the partial line at the front of the last chunk read
+    while (end > 0 && size - end < CODEX_CTX_SCAN_MAX) {
+      const start = Math.max(0, end - CODEX_CTX_CHUNK);
+      const chunk = Buffer.alloc(end - start);
+      fs.readSync(fd, chunk, 0, chunk.length, start);
+      let data = Buffer.concat([chunk, carry]);
+      // Split on BYTES, so a multi-byte character cut by the chunk edge is never decoded
+      // in two halves: everything before the first newline waits for the next chunk.
+      if (start > 0) {
+        const nl = data.indexOf(10);
+        if (nl < 0) { carry = data; end = start; continue; }
+        carry = data.subarray(0, nl);
+        data = data.subarray(nl + 1);
+      }
+      const lines = data.toString("utf8").split("\n");
+      for (let i = lines.length - 1; i >= 0; i--) {
+        if (!lines[i].includes('"turn_context"')) continue;
+        try {
+          const d = JSON.parse(lines[i]);
+          if (d.type !== "turn_context") continue;
+          const r = d.payload?.approvals_reviewer;
+          return typeof r === "string" ? r : null;
+        } catch {
+          // a line still being written - keep looking further back
+        }
+      }
+      end = start;
+    }
+    return null;
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) try { fs.closeSync(fd); } catch {}
+  }
+}
+
 // `display`  - a device is connected right now, so an ask is worth publishing.
 // `answerable` - the device is allowed to decide prompts. Only ever acted on for
 //              PermissionRequest, where the Mac's dialog stays visible anyway.
@@ -705,9 +769,19 @@ try {
       ) {
         status = "asking";
       }
+      // A Codex approval its own reviewer decides (see codexReviewer): Codex is still
+      // busy, nobody is being asked, and nothing may wait on the device.
+      const autoReviewed =
+        AGENT === "codex" &&
+        data.hook_event_name === "PermissionRequest" &&
+        CODEX_AUTO_REVIEWERS.has(codexReviewer(data.transcript_path));
+      if (autoReviewed) {
+        status = "working";
+        dlog("  codex auto-review decides this one: not asking, not waiting\n");
+      }
       // Publish the prompt for the device to show - but only bother when a
       // display is actually connected.
-      const isPermEvent = data.hook_event_name === "PermissionRequest";
+      const isPermEvent = data.hook_event_name === "PermissionRequest" && !autoReviewed;
       const isPreAsk =
         data.hook_event_name === "PreToolUse" &&
         (data.tool_name === "AskUserQuestion" || data.tool_name === "ExitPlanMode");
@@ -742,7 +816,9 @@ try {
       // prompt is over. Everything else leaves it alone.
       const app = owningApp();
       const inbox = messagingInbox();
-      const definesAsk = isPermEvent || isPreAsk;
+      // An auto-reviewed request still DEFINES the current prompt - as none - so it
+      // clears a stale ask rather than carrying one forward under "working".
+      const definesAsk = isPermEvent || isPreAsk || autoReviewed;
       const clearsAsk = ["PostToolUse", "PostToolUseFailure", "Stop", "UserPromptSubmit"]
         .includes(data.hook_event_name);
       const carriedAsk = !definesAsk && !clearsAsk ? existing.ask : null;
