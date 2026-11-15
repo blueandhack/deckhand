@@ -30,6 +30,7 @@ is not.
 | [security.md](guide/security.md) | what the remote can and cannot do, and how it is authenticated |
 | [menu-bar.md](guide/menu-bar.md) | the optional Mac menu-bar app |
 | [how-it-works.md](guide/how-it-works.md) | the data flow, and why the host runs inside an app bundle |
+| [known-limitations.md](guide/known-limitations.md) | what does not work, or works with a catch |
 
 ### `reference/` — for whoever is changing the code
 

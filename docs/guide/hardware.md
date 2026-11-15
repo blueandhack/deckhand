@@ -7,8 +7,8 @@
 ## Hardware
 
 **There are two supported boards.** Board 1 is the one everything below defaults to and the one all
-the optional add-ons are for. Board 2 is bigger, faster over USB, and does not have working audio
-yet.
+the optional add-ons are for. Board 2 is bigger and faster over USB, and its microphone and beeper are on the board.
+(Corrected 2026-11-14: this used to say board 2 "does not have working audio yet".)
 
 | | board 1 — the default | board 2 |
 |---|---|---|
@@ -16,9 +16,9 @@ yet.
 | touch | resistive, one-time 5-point calibration on first boot | capacitive, factory-aligned, no calibration |
 | USB | CH340 serial, `/dev/cu.usbserial-*` | native USB, `/dev/cu.usbmodem*` |
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
-| microphone | fits a MAX4466 module — dictation works | has a real I2S mic on board, **no software for it yet** |
-| beeper | 1W speaker, needs-input beep | speaker present, **not driven yet** |
-| auto-sleep | yes, wakes on a held touch | **no** — the chip cannot wake from deep sleep by touch, so it is disabled |
+| microphone | fits a MAX4466 module — dictation works | real I2S mic on board (ES8311), captured as 16-bit PCM |
+| beeper | 1W speaker, needs-input beep | on-board speaker via the ES8311, confirmed audible |
+| auto-sleep | yes, after 20 min idle on battery; wakes on a held touch | powers off after **2 hours** idle on battery; only **RESET** wakes it (the chip cannot wake from deep sleep by touch) |
 | screenshots | ~18s each | ~0.4s each |
 
 Everything else is the same firmware and the same host: the same three tabs, the same session list,

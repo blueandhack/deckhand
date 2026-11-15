@@ -1,15 +1,38 @@
 <p align="center"><img src="docs/logo.svg" width="120" alt="Deckhand logo"></p>
 
-# Deckhand
+<h1 align="center">Deckhand</h1>
+
+<p align="center">
+  <strong>A little desk display and remote for Claude Code</strong><br>
+  the crew member who keeps lookout and relays your orders
+</p>
+
+<p align="center">
+  <a href="https://github.com/blueandhack/deckhand/releases"><img src="https://img.shields.io/github/v/release/blueandhack/deckhand?include_prereleases&label=release&color=D97757" alt="Latest release"></a>
+  <a href="https://github.com/blueandhack/deckhand/releases"><img src="https://img.shields.io/github/downloads/blueandhack/deckhand/total?color=D97757" alt="Downloads"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/blueandhack/deckhand?color=blue" alt="MIT license"></a>
+  <a href="https://github.com/blueandhack/deckhand/stargazers"><img src="https://img.shields.io/github/stars/blueandhack/deckhand?style=flat" alt="GitHub stars"></a>
+  <a href="https://github.com/blueandhack/deckhand/network/members"><img src="https://img.shields.io/github/forks/blueandhack/deckhand?style=flat" alt="GitHub forks"></a>
+  <a href="https://github.com/blueandhack/deckhand/commits/main"><img src="https://img.shields.io/github/last-commit/blueandhack/deckhand" alt="Last commit"></a>
+  <a href="https://github.com/blueandhack/deckhand/pulse"><img src="https://img.shields.io/github/commit-activity/m/blueandhack/deckhand" alt="Commit activity"></a>
+  <br>
+  <img src="https://img.shields.io/badge/macOS-14%2B%20%C2%B7%20Apple%20Silicon-000000?logo=apple&logoColor=white" alt="macOS 14+ on Apple Silicon">
+  <img src="https://img.shields.io/badge/ESP32%20%7C%20ESP32--S3-E7352C?logo=espressif&logoColor=white" alt="ESP32 and ESP32-S3">
+  <a href="https://claude.com/claude-code"><img src="https://img.shields.io/badge/Claude%20Code-D97757?logo=claude&logoColor=white" alt="Claude Code"></a>
+  <img src="https://img.shields.io/badge/Arduino-00878F?logo=arduino&logoColor=white" alt="Arduino">
+  <img src="https://img.shields.io/badge/Node.js-5FA04E?logo=nodedotjs&logoColor=white" alt="Node.js">
+  <img src="https://img.shields.io/badge/Swift-F05138?logo=swift&logoColor=white" alt="Swift">
+  <img src="https://img.shields.io/badge/OpenSCAD-3D%20printable%20case-F9D72C?logo=openscad&logoColor=black" alt="OpenSCAD 3D-printable case">
+  <br>
+  <a href="https://github.com/blueandhack/deckhand/issues"><img src="https://img.shields.io/github/issues/blueandhack/deckhand" alt="Open issues"></a>
+  <a href="https://github.com/blueandhack/deckhand/discussions"><img src="https://img.shields.io/github/discussions/blueandhack/deckhand" alt="Discussions"></a>
+  <a href="#contributing"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen" alt="PRs welcome"></a>
+  <img src="https://img.shields.io/github/languages/code-size/blueandhack/deckhand" alt="Code size">
+</p>
 
 <p align="center">
   <img src="docs/device-hero.png" width="270"
        alt="The 3D-printed board 2 case, front on, running the real firmware: the SESSIONS tab with a WAITING FOR YOU card and a second session still working">
-  <br>
-  <em>The printable case from <code>case/</code> &mdash; board 2's, with a real capture on its
-  screen, rendered from the OpenSCAD model rather than mocked up
-  (<code>case/render-hero.py --board 2</code>). Board 1's case renders the same way
-  (<a href="docs/device-hero-board1.png">docs/device-hero-board1.png</a>).</em>
 </p>
 
 <p align="center">
@@ -20,233 +43,170 @@
   <img src="docs/screenshot-settings.png" width="200"
        alt="SETTINGS tab: the group menu - Device, Display, Sound, Pairing, Messages and Danger - each with its current state on a second line">
   <br>
-  <em>USAGE, SESSIONS and SETTINGS on board 2 (320x480, dark theme) &mdash;
-  real captures read back off the panel, not mockups.
-  <code>echo SCREENSHOT &gt; ~/.claude/deckhand-device-command</code> writes a PNG to
-  <code>~/Deckhand-shots/</code>. The capture in the case above is the middle one of these three.</em>
+  <sub>USAGE, SESSIONS and SETTINGS on board 2 (320x480, dark theme). These are real captures
+  read back off the device, not mockups, and the case above is rendered from the OpenSCAD model
+  with one of them composited into its window (<code>case/render-hero.py --board 2</code>).</sub>
 </p>
 
-[github.com/blueandhack/deckhand](https://github.com/blueandhack/deckhand) &middot; MIT
+---
 
-A little desk display and remote for Claude Code — the crew member who keeps lookout and
-relays your orders. It shows live plan usage and per-project session status, beeps when a
-session needs you, and shows permission prompts, questions and plan approvals so you can read
-*and answer* them from across the room — tapping an option, or **speaking** the answer if a
-microphone is fitted — without taking the dialog away from your Mac. **Codex threads appear in
-the same list** and can be answered the same way once Codex's hooks trust prompt is accepted.
+Deckhand sits on your desk and watches Claude Code for you. It shows how much of your plan you
+have used, lists what every session is doing, and **beeps when one needs you**. When Claude
+asks for permission, asks a question or wants a plan approved, you can read it *and answer it*
+from across the room by tapping, typing on the device's keyboard or **speaking**. The dialog
+stays on your Mac too, so you can still answer it there.
 
-Three tabs: **USAGE** (5-hour and 7-day plan quota, with a pace tick showing whether you are
-burning it faster than the clock, plus a Codex row), **SESSIONS** (one row per project, ranked
-by how much it needs you, with the full transcript readable on the device), and **SETTINGS**
-(brightness, sleep, sound, theme, orientation, paired Macs).
+## Features
 
-**It runs on two different boards from one source tree** — an ESP32 + 240x320 panel, and an
-ESP32-S3 + 320x480 panel — chosen by the build target, never by a switch in the source.
+- **Live plan usage.** 5-hour and 7-day quota, with a pace tick showing whether you are burning
+  it faster than the clock, a projection of when it runs out, and a page for each Claude account
+  you use.
+- **Every session at a glance.** One row per project, ranked by how much it needs you: NEEDS
+  INPUT, READY or WORKING, with the model, the git branch and how long it has been that way.
+- **Answer from the device.** Permission prompts, questions and plan approvals, by tap, keyboard
+  or voice (dictation is transcribed on your Mac by whisper). Answers are signed, so only a paired
+  device can approve anything. See [Security](docs/guide/security.md).
+- **Read the whole conversation.** A session's full transcript is readable on the device (paged
+  on board 1, scrolling on board 2). On board 2 a PROJECTS tab lists past sessions for each
+  project too.
+- **More than Claude Code.** **Codex** threads join the same list and can be answered the same
+  way. **Antigravity** sessions and usage appear as well (view only).
+- **Two Macs, two boards.** One device can pair with more than one Mac, and one Mac can drive
+  two boards at once, over USB and Bluetooth LE at the same time.
+- **A menu-bar app** with the same information on the Mac, plus setup, pairing and updates.
+- **Runs on battery** with a battery level that is honest about being an estimate, and
+  sleeps when you walk away.
 
-## Documentation
+## Hardware
 
-This README is deliberately short. The detail lives in two places, split by who is reading:
+Deckhand runs on two off-the-shelf ESP32 touchscreen boards. One source tree builds both, and
+the build target picks the board.
 
-| you are | start here |
-|---|---|
-| **a person** setting this up or building the hardware | [`docs/guide/`](docs/guide/) — [overview](docs/guide/overview.md), [hardware](docs/guide/hardware.md), [setup](docs/guide/install-and-uninstall.md), [controls](docs/guide/controls.md), [answering](docs/guide/answering.md), [voice](docs/guide/voice.md), [security](docs/guide/security.md), [menu bar](docs/guide/menu-bar.md), [how it works](docs/guide/how-it-works.md), [Codex](docs/guide/codex.md) |
-| **an AI agent** working on the code | [`CLAUDE.md`](CLAUDE.md) first — it is the rules, and it says which [`docs/reference/`](docs/reference/) file to read before touching what |
+| | board 1 | board 2 |
+|---|---|---|
+| module | ELEGOO **E32R28T** / E32N28T | LCDwiki **ES3C35P** |
+| chip and screen | ESP32, 2.8" 240x320 | ESP32-S3, 3.5" 320x480 |
+| touch | resistive (one-time calibration) | capacitive |
+| microphone and beeper | add-on MAX4466 mic and 1W speaker | on board (ES8311 codec) |
+| flash it | `./flash.sh` | `./flash.sh --board 2` |
+| case | [`case/`](case/) | [`case/`](case/README-board2.md) |
 
-## Download the app (alpha)
+A LiPo battery is optional on both. Parts list, wiring and what each board can and cannot do:
+**[Hardware](docs/guide/hardware.md)**.
 
-**[Deckhand.app on the Releases page](https://github.com/blueandhack/deckhand/releases)**
-— a notarized Mac app with the menu bar, the host and its own Node built in, so you need
-no Node, Homebrew or clone of this repo. Apple Silicon, macOS 14 or later. It is an
-**alpha**: it works on the machine it was built on and tested end to end there, and the
-release notes list what has not been verified yet. It updates itself (Sparkle).
+## Getting started
 
-Open the DMG, drag Deckhand to **Applications**, open it from there, and follow the setup
-window: it asks before it touches Claude Code's settings, takes a backup first, and asks
-macOS for Bluetooth once. Flashing a board's firmware is still done from this repo
-(below). Details: [Setup](docs/guide/install-and-uninstall.md).
+### 1. The Mac app (alpha)
 
-## Quick start from source (macOS)
+Download **[Deckhand.app from Releases](https://github.com/blueandhack/deckhand/releases)**.
+It is a notarized Mac app with the menu bar, the host and its own Node built in, so you need no
+Node, no Homebrew and no clone of this repo. It needs Apple Silicon and macOS 14 or later, and
+it updates itself through Sparkle.
 
-You need: a Mac with [Node.js](https://nodejs.org) (`brew install node`),
-[arduino-cli](https://arduino.github.io/arduino-cli/), Claude Code, and one of the
-[two supported boards](docs/guide/hardware.md).
+Open the DMG, drag Deckhand to **Applications**, open it, and follow the setup window. It asks
+before it changes Claude Code's settings, takes a backup first, and asks macOS for Bluetooth
+once.
 
+> **Alpha:** it has been tested end to end on the machine it was built on. Each release's notes
+> list what has not been verified yet.
+
+### 2. Flash the board
+
+Firmware is flashed from a clone of this repo. You need
+[arduino-cli](https://arduino.github.io/arduino-cli/) and the ESP32 core.
+
+```sh
+git clone https://github.com/blueandhack/deckhand.git && cd deckhand
+./flash.sh             # board 1
+./flash.sh --board 2   # board 2
 ```
-git clone git@github.com:blueandhack/deckhand.git && cd deckhand
+
+`flash.sh` compiles, finds the serial port, pauses the running host so the port is free,
+uploads, and starts the host again afterwards. A compile takes about three minutes.
+
+### Or: run everything from source
+
+If you would rather not use the app, you need [Node.js](https://nodejs.org)
+(`brew install node`), arduino-cli and Claude Code:
+
+```sh
 ./install.sh
 ```
 
-`install.sh` snapshots any existing Deckhand state to `~/Deckhand-backups`,
-copies the Claude Code hook scripts into `~/.claude/`, registers them in
-`settings.json` (backing yours up and merging - it won't clobber existing
-hooks), runs `npm install`, and builds `DeckhandBLE.app` from your own Node.
-Then two manual steps it prints for you: flash the firmware, and start the
-host. **Restart Claude Code afterwards** so it picks up the new hooks. The
-detailed walk-through is under [Setup](docs/guide/install-and-uninstall.md) below.
+`install.sh` backs up any existing Deckhand state to `~/Deckhand-backups`, installs the Claude
+Code hooks into `~/.claude/` (merging with your existing `settings.json`, never replacing it),
+runs `npm install`, and builds `DeckhandBLE.app` from your Node. **Restart Claude Code
+afterwards** so it picks up the hooks. `./uninstall.sh` takes Deckhand back out of
+`~/.claude` (it keeps your backups, and `--dry-run` shows what it would do first).
 
-## Screenshots
+Full walk-through: **[Setup](docs/guide/install-and-uninstall.md)**.
 
-The device can photograph itself — no camera, no mockup:
+## How it works
 
+```mermaid
+flowchart LR
+    CC["Claude Code hooks<br/>Codex, Antigravity"] -->|"session files<br/>~/.claude/"| Host
+    API["Anthropic usage<br/>endpoint"] -->|"every 5 min"| Host
+    Host["Deckhand host<br/>on your Mac"] <-->|"USB serial<br/>and/or BLE"| Dev["Deckhand<br/>display"]
 ```
-echo "SCREENSHOT" > ~/.claude/deckhand-device-command
-```
 
-`TAB 0|1|2` and `PAGE 0..3` switch what is on screen first, so every tab can be
-captured without standing at the device — the capture path can only ever record
-what is currently on the glass.
+Hooks in Claude Code (and Codex and Antigravity) write each session's state to small files in
+`~/.claude/`. The host on your Mac reads them every few seconds, polls your plan usage, and
+streams both to the device over USB and Bluetooth LE at once. Answers travel back the same way
+and are checked against a key shared when you paired. More: **[How it works](docs/guide/how-it-works.md)**.
 
-It reads the panel back over SPI and ships it as base64 RGB565; the host rebuilds
-it and writes a PNG to `~/Deckhand-shots/`. 240x320 is 153,600 bytes, so it takes
-about 18 seconds at 115200. Nothing is blanked or redrawn while it runs, so what
-lands on the Mac is exactly what was on the glass when the command arrived.
+## Documentation
 
-Two things this depends on, both measured rather than assumed:
-
-- **The panel really can be read back.** The FAB note elsewhere says readback is
-  unreliable here, which is a *speed* argument about per-pixel reads for
-  transparency, not a correctness one. Four known colours written and read back on
-  this wiring came back bit-identical at `SPI_READ_FREQUENCY 20000000`, and
-  `readRect()` pulls a whole row per transaction.
-- **`readRect()` returns pixels BYTE-SWAPPED**, where `readPixel()` does not:
-  writing `0xF800` gives `readPixel=0xF800` but `readRect=0x00F8`. That is the same
-  internal order sprites use, and the same trap the crab art hit with `pushImage`.
-  The firmware undoes it before encoding, so the wire format is plain big-endian
-  RGB565 and the decoder needs no endianness guess. Getting this wrong is not
-  subtle but it is not obviously wrong either — the first capture looked like a
-  perfectly good screenshot with purple text.
+| you are | start here |
+|---|---|
+| **setting it up or building one** | [`docs/guide/`](docs/guide/): [overview](docs/guide/overview.md) · [hardware](docs/guide/hardware.md) · [setup](docs/guide/install-and-uninstall.md) · [controls](docs/guide/controls.md) · [answering](docs/guide/answering.md) · [voice](docs/guide/voice.md) · [security](docs/guide/security.md) · [menu bar](docs/guide/menu-bar.md) · [Codex](docs/guide/codex.md) · [how it works](docs/guide/how-it-works.md) · [known limitations](docs/guide/known-limitations.md) |
+| **changing the code** (person or AI agent) | [`CLAUDE.md`](CLAUDE.md) first. It holds the rules, and it says which [`docs/reference/`](docs/reference/) file to read before touching what |
 
 ## Project layout
 
 ```
-firmware/deckhand_display/*.ino           Arduino sketch, several files, one build
-firmware/deckhand_display/board.h         picks the board from the compile target
-firmware/deckhand_display/board_*.h       per-board pins, capabilities and EVERY layout constant
-firmware/deckhand_display/panel_*.{h,cpp} board 2's TFT_eSPI-compatible shim + framebuffer
-firmware/deckhand_display/st77922_*       board 2's panel init sequence and touch controller
-firmware/deckhand_display/*-geom-check.mjs  layout arithmetic checkers, both boards, no hardware
-firmware/tft_setup/User_Setup.h           TFT_eSPI pin config - BOARD 1 ONLY
-docs/board-1-known-defects.md             board-1 bugs the second-board port surfaced
-host/index.mjs                            Node script (runs on your Mac)
-host/typed-answer.mjs, voice-answer.mjs   answer crypto, pure + testable
-host/build-app.sh                         builds DeckhandBLE.app from your node
-host/DeckhandBLE.plist                    Info.plist template for that app
-host/deckhand-service.sh                  launchd supervision (install/stop/status)
-flash.sh                                  compile + flash, handles the serial port
-claude-hooks/                             the ~/.claude hook scripts + installer
-install.sh                                one-command setup
-```
-
-Runtime state, per user:
-
-```
-/tmp/deckhand-<uid>/host.log              the host's log (rotates at 5MB, keeps .1)
-/tmp/deckhand-<uid>/host-alive            heartbeat; gates the hook's remote wait
-~/.claude/deckhand-restarts.log           one line per host start (see Keeping it running)
-~/Library/Logs/deckhand-launchd.{out,err} whatever dies before the host's own logger
-```
-
-The Claude Code hook scripts ship in `claude-hooks/` but *run* from
-`~/.claude/` (hooks are configured per-user, not per-project); `install.sh`
-puts them there. At runtime they use these per-user paths:
-
-```
-~/.claude/deckhand-statusline.mjs        statusLine hook -> ~/.claude/deckhand-rate-limits.json
-~/.claude/deckhand-session-hook.mjs      session hooks   -> ~/.claude/deckhand-sessions/*.json
-~/.claude/settings.json                  registers both of the above
+firmware/deckhand_display/   the Arduino sketch: one source tree, both boards
+  board.h, board_*.h         board selection; every pin and layout constant lives here
+  *-check.mjs                offline checkers for layout and protocol, no hardware needed
+firmware/tft_setup/          TFT_eSPI pin map (board 1 only)
+host/                        the Node host that runs on your Mac (index.mjs), plus its checkers
+claude-hooks/                hook scripts for Claude Code, Codex and Antigravity, and their installers
+mac-app/                     the menu-bar app (Swift)
+release/                     building, notarizing and publishing Deckhand.app and its update feed
+case/                        OpenSCAD cases for both boards, ready-to-print STLs, the hero renderer
+docs/                        guide/ for people, reference/ for whoever changes the code, design/ mocks
+flash.sh, install.sh, uninstall.sh
 ```
 
 ## Known limitations
 
-- **~5s delay**: the host polls every `POLL_INTERVAL_MS` (5000ms in
-  `host/index.mjs`), plus whatever its `git` subprocess calls take.
-  The footer's "Xs ago" makes this visible rather than hiding it. A
-  permission prompt answered within a second or two may come and go
-  between polls — the device is for prompts you *haven't* noticed.
-- **The quota endpoint is undocumented** (it's what `/usage` uses); if it
-  ever changes shape the host just falls back to the statusLine cache. It
-  also rate-limits bursts — the host polls every 5 min and backs off 15
-  min on HTTP 429. If the Mac goes weeks with no Claude Code use at all,
-  the Keychain token can expire; opening any Claude Code surface once
-  refreshes it.
-- **Remote answering has a 90s window** per prompt (the hook can't wait
-  forever), shows up to 1400 characters of detail (tap READ ALL for a
-  full-screen reader with prev/next), and doesn't support multi-select
-  questions. Question answers reach Claude as a "user already answered: X"
-  hook message rather than a native picker selection — functionally
-  equivalent. Answering is authenticated (see [Security](docs/guide/security.md));
-  a device that hasn't been USB-provisioned with the pairing secret can't
-  approve anything until you connect it via USB once.
-- **Stale quota is flagged, not hidden**: if the quota numbers are older
-  than 15 minutes (endpoint outage + stale cache), the USAGE cards show
-  "stale 3h" in the alert color where the reset time normally sits.
-- **Battery % is a voltage estimate** (no coulomb counter): it dips a few
-  percent under heavy load and reads optimistic while charging. Charge
-  state relies on USB *data* being present — a wall charger with no data
-  shows "on battery" while silently charging fine.
-- **"Off" is deep sleep**, a few mA, not a hard power cut — the CH340 and
-  regulator stay powered. For true zero draw, unplug the battery. Because
-  there's no VBUS-sense pin, "on USB power" is inferred from recent USB data,
-  so a *data-less* wall charger counts as "on battery" for the 20-minute
-  auto-sleep — plugged into your Mac (data flowing) it never auto-sleeps.
-- **Touch calibration** is a 5-point least-squares *affine* fit (four corners
-  plus the centre), so it corrects skew and rotation between the panel and the
-  glass, not just scale and offset. It reports the worst residual at the
-  targets and refuses to install a mapping from a nonsense set of taps, keeping
-  the previous one instead. If it ever
-  feels wrong after a firmware change, tap CALIBRATE on the SETTINGS tab, or
-  send `RECAL` via the trigger file
-  (`echo "RECAL" > ~/.claude/deckhand-device-command`) — never by opening a
-  new USB connection, which resets the board via the CH340's RTS line.
-- **`TOUCH_SWAP_XY`** in the `.ino` exists because this board's touch
-  controller has swapped axes relative to the display; it's already set
-  correctly for this exact board, but is there as an escape hatch if a
-  differently-wired unit needs it flipped back.
-- **BLE scan is name-based, not UUID-based**: our 128-bit service UUID
-  usually doesn't fit in the 31-byte primary BLE advertisement alongside
-  anything else, so the host scans for all devices and matches by the
-  advertised name "Deckhand" instead of filtering by service UUID.
-- **`DeckhandBLE.app` is tied to the current Homebrew node install**: it
-  contains a literal copy of `node` and `libnode.147.dylib`. If you
-  `brew upgrade node`, re-copy both files into
-  `host/DeckhandBLE.app/Contents/MacOS/` and re-run
-  `codesign --force --deep --sign - host/DeckhandBLE.app`, or the bundled
-  copy will just be stale (not broken, but won't get upgrades/fixes).
-- **If Bluetooth permission ever gets stuck** (macOS crashes the process
-  again after previously working), reset the cached TCC decision with
-  `tccutil reset BluetoothAlways com.deckhand.ble-host` and relaunch via
-  `open` so it prompts again.
+The main ones, in short. The full list is in
+**[Known limitations](docs/guide/known-limitations.md)**.
 
-### Board 2 specifically
+- **Up to ~5 seconds of lag.** The host polls rather than being pushed to, and the footer shows
+  how old the data is.
+- **Remote answers have a 90-second window** per prompt, and multi-select questions must be
+  answered on the Mac.
+- **The usage endpoint is undocumented.** It is the one `/usage` uses. If it changes, the host
+  falls back to the statusLine cache, and stale numbers are flagged on screen rather than hidden.
+- **Battery percentage is an estimate** from voltage, and "off" is deep sleep (a few mA), not a
+  hard power cut.
+- **Board 2 cannot wake from deep sleep on a touch.** That is a limit of the ESP32-S3's wake pins.
+  So it powers itself off only after two hours idle on battery, and RESET wakes it.
 
-- **No audio yet.** Board 2 has a real microphone and speaker on board (an ES8311 I2S codec), but
-  the firmware has no capture path for them, so the record button is **hidden** rather than shown as
-  a control that does nothing, and the needs-input beep is silent. Everything text-based works —
-  including answering prompts by **typing** on the device's keyboard. This is the obvious next piece
-  of work, and board 2's mic should end up *better* than board 1's: enough bandwidth and memory to
-  send plain 16-bit PCM, which is what the speech-to-text wants anyway.
-  Two rough edges that follow from it and are not fixed yet: **SETTINGS → ACTIONS → MIC TEST is
-  still offered** and does nothing visible when tapped, and the **POWER OFF** hint and confirm
-  dialog still say "touch to wake" when on this board only RESET wakes it.
-- **No auto-sleep, and that is the chip's fault rather than a missing feature.** Deep sleep on the
-  ESP32-S3 can only be woken by an RTC-capable GPIO (0–21), and board 2's touch interrupt is on
-  GPIO47. So a sleeping board 2 could only be revived by pressing RESET — which would turn a status
-  display into a brick until you walked over to it — and the 20-minute auto-sleep is therefore
-  switched off. The screen still blanks on the `SLEEP AFTER` timer and still comes back on a touch,
-  and the manual **POWER OFF** button still works (its confirm dialog says RESET, not "touch to
-  wake").
-- **BLE won't connect after you swap boards until you pick the new one.** The host pins its BLE
-  scan to the selected device, so a `selected` left pointing at your other board makes a
-  present, healthy device invisible. Fix it from the menu bar's **Device** submenu, or
-  `echo "SELECT Deckhand-XXXX" > ~/.claude/deckhand-device-command`. USB is unaffected.
-- **Screenshots cannot verify colour on board 2.** `SCREENSHOT` there reads the shadow framebuffer
-  rather than the panel, so a capture is right by construction even when the glass is wrong — a real
-  byte-order bug survived the entire port that way. Use `COLORTEST`
-  (`echo "COLORTEST" > ~/.claude/deckhand-device-command`), which draws six patches each labelled
-  with the colour it is supposed to be, and check it with your eyes.
-- **The SETTINGS page has about 140px of empty space** below the DEVICE card. Real, cosmetic, and
-  nobody has decided what belongs there yet.
+## Contributing
+
+Issues and pull requests are welcome. There is no unit test suite. A change is verified by
+compiling, flashing, watching the log and looking at the screen, plus a set of offline checkers
+(`node firmware/deckhand_display/*-check.mjs`, `node host/*-check.mjs`). **Read
+[`CLAUDE.md`](CLAUDE.md) before changing firmware.** It lists the rules that have cost real
+debugging time, such as never compiling both boards at once and keeping on-device text to plain
+ASCII.
+
+## License
+
+[MIT](LICENSE). Third-party licenses are in [`licenses/`](licenses/).
 
 ---
 
-*Rumor has it something small and orange lives beneath the footer.*
+<p align="center"><sub><em>Rumor has it something small and orange lives beneath the footer.</em></sub></p>
